@@ -8,6 +8,9 @@ height = 34
 position = "top"
 margin = 6
 gap = 6
+# Kept font-agnostic, since this is what dbar uses when no config file exists.
+# A provider emitting glyph icons needs a font that carries them; see
+# examples/showcase.toml.
 font = "sans-serif 10"
 
 [bar.background]

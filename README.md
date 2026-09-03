@@ -104,6 +104,37 @@ spacing = 0
 Style resolution runs built-in defaults, then the named `[style.*]` a module
 picks, then that module's own keys.
 
+### Icons
+
+dbar has no icon set of its own yet. Until it does, icons come from the status
+provider as text: i3status-rs ships several icon sets, and every block in
+[examples/i3status-rs.toml](examples/i3status-rs.toml) formats as `$icon $value`,
+so one line decides what you get.
+
+```toml
+[icons]
+icons = "none"          # the default: not "no icon", but short text labels
+# icons = "material-nf" # glyph icons - needs a font that carries them
+```
+
+Glyph sets live in the Unicode private use area, so the font has to carry them.
+Pair one with a proportional Nerd Font such as `DejaVuSansM Nerd Font Propo`, so
+body text still reads like a UI font while the icons resolve from the same face:
+
+```toml
+[bar]
+font = "DejaVuSansM Nerd Font Propo 10"
+```
+
+A font without those glyphs still works - dbar falls back per glyph - but on a
+system with many Nerd Fonts installed the fallback can source each icon from a
+different face, leaving them mismatched in weight and size. Naming one font that
+has everything avoids that.
+
+This route is limited by design: the provider picks which glyph each block gets,
+and icon size is tied to the font size rather than being its own style property.
+A built-in vector icon set is the V1 plan.
+
 ### Separators
 
 A separator is a transition between two neighbouring modules, drawn as vector

@@ -24,6 +24,8 @@ position = "top"        # "top" | "bottom"
 margin = 8              # gap between the bar and the screen edge; floats the bar
 gap = 12                # horizontal space between groups
 font = "Liberation Sans 10"
+# For glyph icons, set icons = "material-nf" in the provider config and name a
+# font that carries them here, e.g. "DejaVuSansM Nerd Font Propo 10".
 exclusive = true        # reserve the space so windows do not sit under the bar
 
 [bar.background]

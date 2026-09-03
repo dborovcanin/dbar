@@ -10,6 +10,17 @@
 # "native" leaves colors and separators to dbar instead of baking them into the
 # protocol output. Blocks are named by position, so this file's order decides
 # the "0", "1", ... names that showcase.toml selects on.
+#
+# Every block below formats as "$icon $value", and the icon set decides what
+# "$icon" becomes. The set named below is the only thing standing between glyph
+# icons and plain text:
+#
+#   none          not "no icon" - short text labels instead: CPU, MEM, DISK, ...
+#                 works with any font, which is why it is the default here
+#   material-nf   glyph icons; needs a font that carries them, so pair it with
+#                 a Nerd Font in the dbar config
+#
+# Other sets: awesome4, awesome5, awesome6, material, emoji.
 
 [theme]
 theme = "native"
@@ -18,34 +29,34 @@ icons = "none"
 
 [[block]]
 block = "cpu"
-format = " CPU $utilization "
+format = " $icon $utilization "
 
 [[block]]
 block = "memory"
-format = " RAM $mem_used_percents "
+format = " $icon $mem_used_percents "
 
 [[block]]
 block = "disk_space"
 path = "/"
-format = " DISK $free "
+format = " $icon $free "
 
 [[block]]
 block = "load"
-format = " LOAD $1m "
+format = " $icon $1m "
 
 [[block]]
 block = "net"
-format = " NET $speed_down "
+format = " $icon $speed_down "
 
 [[block]]
 block = "sound"
-format = " VOL $volume "
+format = " $icon $volume "
 
 [[block]]
 block = "uptime"
-format = " UP $uptime "
+format = " $icon $uptime "
 
 [[block]]
 block = "time"
 interval = 5
-format = " $timestamp.datetime(f:'%H:%M') "
+format = " $icon $timestamp.datetime(f:'%H:%M') "
