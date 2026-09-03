@@ -114,6 +114,8 @@ struct RawBar {
     gap: f32,
     #[serde(default = "default_font")]
     font: String,
+    /// Base icon size; defaults to a multiple of the font size.
+    icon_size: Option<f32>,
     #[serde(default)]
     background: RawBarBackground,
     /// Reserve space so windows are not covered. Defaults to on.
@@ -245,6 +247,7 @@ impl Default for RawBar {
             margin: 0,
             gap: default_gap(),
             font: default_font(),
+            icon_size: None,
             background: RawBarBackground::default(),
             exclusive: true,
         }
@@ -281,6 +284,8 @@ pub struct Bar {
     pub gap: f32,
     pub font_family: String,
     pub font_size: f32,
+    /// Icon edge length used unless a style or module overrides it.
+    pub icon_size: f32,
     pub background: Color,
     pub radius: f32,
     pub exclusive: bool,
@@ -358,15 +363,15 @@ pub struct Style {
     pub icon_size: f32,
 }
 
-/// Icon edge length as a multiple of the font size, when a style does not set one.
+/// Icon edge length as a multiple of the font size, when `[bar] icon_size` is absent.
 ///
 /// Ties the two together so that changing `[bar] font` scales the icons with the text.
 const ICON_SIZE_RATIO: f32 = 1.4;
 
-/// The starting point of the cascade, with the icon size derived from the bar font.
-fn base_style(font_size: f32) -> Style {
+/// The starting point of the cascade, carrying the bar-wide icon size.
+fn base_style(icon_size: f32) -> Style {
     Style {
-        icon_size: font_size * ICON_SIZE_RATIO,
+        icon_size,
         ..Style::default()
     }
 }
@@ -468,6 +473,11 @@ impl Config {
             gap: raw.bar.gap,
             font_family,
             font_size,
+            icon_size: raw
+                .bar
+                .icon_size
+                .map(|v| v.max(0.0))
+                .unwrap_or(font_size * ICON_SIZE_RATIO),
             background: match &raw.bar.background.color {
                 Some(c) => palette.get(c)?,
                 None => Color::TRANSPARENT,
@@ -477,7 +487,7 @@ impl Config {
         };
 
         // Named styles resolve against the built-in defaults, once.
-        let base = base_style(bar.font_size);
+        let base = base_style(bar.icon_size);
         let mut styles: HashMap<String, Style> = HashMap::new();
         for (name, raw_style) in &raw.styles {
             let style = base

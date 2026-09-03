@@ -110,13 +110,20 @@ dbar draws its own icons as vector geometry, so they scale with `icon_size`
 rather than riding on a font:
 
 ```toml
-[module.battery]
-icon = "battery"
-icon_size = 16          # optional; defaults to 1.4x the bar font size
+[bar]
+icon_size = 15          # base for every icon
+
+[style.compact]
+icon_size = 12          # overrides the bar
+
+[module.clock]
+icon = "clock"
+icon_size = 18          # overrides both
 ```
 
-Left unset, `icon_size` follows the font, so changing `[bar] font` scales icons
-along with the text. Setting it pins the icon independently.
+`icon_size` cascades like any other style property: `[bar]` sets the base, a
+named style overrides it, and a module overrides that. With `[bar] icon_size`
+left out it defaults to 1.4x the font size, so icons scale with the text.
 
 Fixed: `cpu`, `memory`, `disk`, `clock`, `ethernet`, `headphones`, `wifi-off`,
 `volume-muted`.

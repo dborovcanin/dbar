@@ -20,19 +20,21 @@
 
 [bar]
 height = 36
-position = "top"        # "top" | "bottom"
-margin = 8              # gap between the bar and the screen edge; floats the bar
-gap = 12                # horizontal space between groups
-# Icon sizes default to 1.4x this, so changing the font scales them with it.
-font = "Liberation Sans 10"
+position = "top"            # "top" | "bottom"
+margin = 8                  # gap between the bar and the screen edge; floats the bar
+gap = 12                    # horizontal space between groups
+font = "Liberation Sans 14"
+# Base icon size for the whole bar. Styles and modules override it; left out
+# entirely, it defaults to 1.4x the font size, so icons scale with the text.
+icon_size = 20
 # For glyph icons, set icons = "material-nf" in the provider config and name a
 # font that carries them here, e.g. "DejaVuSansM Nerd Font Propo 10".
-exclusive = true        # reserve the space so windows do not sit under the bar
+exclusive = true # reserve the space so windows do not sit under the bar
 
 [bar.background]
 # Drawn under every group. Transparent here, so the groups read as separate
 # floating islands.
-color = "#00000000"     # the last two hex digits are alpha
+color = "#00000000" # the last two hex digits are alpha
 radius = 0
 
 [status]
@@ -43,10 +45,19 @@ command = "i3status-rs"
 # reordering of the provider config becomes a one-line change here instead of a
 # silent mismatch. Without this, groups have to select on "0", "1", ...
 blocks = [
-    "cpu", "memory", "disk",
-    "wifi", "ethernet", "offline",
-    "volume", "muted", "headphones",
-    "brightness", "battery", "charging", "clock",
+  "cpu",
+  "memory",
+  "disk",
+  "wifi",
+  "ethernet",
+  "offline",
+  "volume",
+  "muted",
+  "headphones",
+  "brightness",
+  "battery",
+  "charging",
+  "clock",
 ]
 # i3status-rs resolves a bare filename against $XDG_CONFIG_HOME/i3status-rust and
 # ignores the working directory, so pass an absolute path or leave this empty.
@@ -58,7 +69,7 @@ args = []
 
 [colors]
 background = "#1e1e2e"
-surface = "#313244cc"   # alpha cc, so SwayFX blur shows through
+surface = "#313244cc"  # alpha cc, so SwayFX blur shows through
 slate = "#585b70ff"
 text = "#cdd6f4"
 subtext = "#a6adc8"
@@ -157,7 +168,7 @@ modules = ["cpu", "memory", "disk"]
 background = "$surface"
 radius = 12
 padding = 0
-spacing = 0             # only used when the group has no separator
+spacing = 0                         # only used when the group has no separator
 
 [group.system.separator]
 shape = "slant"
@@ -168,7 +179,7 @@ overlap = 1
 
 [group.system.edges]
 left = "round"
-right = "none"          # a squared trailing edge
+right = "none" # a squared trailing edge
 radius = 12
 
 # Connectivity. A hairline divides rather than transitioning between two
@@ -260,7 +271,7 @@ icon = "ethernet"
 [module.clock]
 style = "cool"
 icon = "clock"
-icon_size = 18          # an explicit override; otherwise icons follow the font
+icon_size = 18 # an explicit override; otherwise icons follow the font
 
 # The off states. Nothing picks these automatically yet, so they are named
 # outright; a value-driven variant is what module state styling will add.
