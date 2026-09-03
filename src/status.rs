@@ -26,6 +26,9 @@ pub struct Block {
     pub color: Option<String>,
     #[serde(default)]
     pub background: Option<String>,
+    /// The provider's own alarm flag, which a module state can key on.
+    #[serde(default)]
+    pub urgent: bool,
     /// Either `"none"` or `"pango"`; i3status-rs always sends the latter.
     #[serde(default)]
     pub markup: Option<String>,
@@ -301,4 +304,27 @@ fn decode_entity(entity: &str) -> Option<char> {
             char::from_u32(code)
         }
     }
+}
+
+/// The first percentage in `text`, as 0..=100.
+///
+/// Only `NN%` counts. Values such as "92GB", "23:59" or "3h 5m" carry no percent sign, so
+/// nothing keyed on a percentage fires on a number that means something else.
+pub fn percent(text: &str) -> Option<u8> {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if !bytes[i].is_ascii_digit() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i < bytes.len() && bytes[i] == b'%' {
+            return text[start..i].parse::<u32>().ok().map(|v| v.min(100) as u8);
+        }
+    }
+    None
 }

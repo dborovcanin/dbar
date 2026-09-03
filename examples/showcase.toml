@@ -308,3 +308,19 @@ icon = "brightness"
 [module.battery]
 style = "stone"
 icon = "battery"
+
+# A state overlays the module's own style rather than replacing it, so the icon
+# set above survives and keeps grading. Rules are checked tightest bound first,
+# so "below 15" wins over "below 30" at 10%.
+[module.battery.states.warning]
+below = 30
+style = "warning"
+
+[module.battery.states.critical]
+below = 15
+style = "critical"
+
+# A state can key on the provider's urgent flag instead of a value.
+[module.disk.states.full]
+urgent = true
+style = "critical"

@@ -167,6 +167,39 @@ different face, leaving them mismatched in weight and size.
 This route leaves the provider choosing which glyph each block gets, and ties
 icon size to the font size. dbar's own icons are independent of both.
 
+### Module states
+
+A module can restyle itself conditionally:
+
+```toml
+[module.battery]
+style = "stone"
+icon = "battery"
+
+[module.battery.states.warning]
+below = 30
+style = "warning"
+
+[module.battery.states.critical]
+below = 15
+style = "critical"
+
+[module.disk.states.full]
+urgent = true           # the provider's own alarm flag
+style = "critical"
+```
+
+A rule matches when every condition it states holds: `below` and `above`
+compare against a percentage in the module's text, and `urgent` against the
+flag the provider sets. A rule stating no condition never fires.
+
+Rules are checked tightest bound first, so `below = 15` wins over `below = 30`
+at 10%, whatever order they appear in the file. Urgent rules are checked before
+value rules.
+
+A state overlays the module's own style rather than replacing it, so settings
+such as `icon` survive and a graded icon keeps grading while the colours change.
+
 ### Separators
 
 A separator is a transition between two neighbouring modules, drawn as vector

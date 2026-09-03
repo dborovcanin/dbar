@@ -846,3 +846,85 @@ The defining visual feature is:
 The defining architectural constraint is:
 
 > Rich enough to look polished, but deliberately too small to become CSS, GTK, or a desktop shell.
+
+---
+
+## 17. Implementation Status
+
+### 17.1 Done
+
+**V0** — wlr-layer-shell surface with top/bottom placement, margins and an
+exclusive zone; per-pixel transparency; text shaping and font fallback;
+i3bar-protocol input; left/center/right positions holding groups; rounded
+backgrounds; click and scroll forwarding; integer HiDPI buffer scaling.
+
+**V1, in part** — separators as real vector geometry (`none`, `line`, `slant`,
+`chevron`, `notch`, `round`, `curve`), each mirrorable, with the Powerline
+colour modes and an overlap that hides antialiasing seams; per-side group edges
+with contents clipped to the group outline; reusable styles and named colours;
+a built-in vector icon set, including icons graded over five steps by a
+percentage read from the module's own text; module state styling keyed on a
+value or on the provider's urgent flag.
+
+Two things were added that the specification did not anticipate:
+
+- **`[status] blocks`** names the provider's blocks positionally. The i3bar
+  protocol gives a provider no way to name its blocks usefully — i3status-rs
+  numbers them and rejects a `name` key — so without this a group selects on
+  `"0"` and `"1"` and silently follows a different block whenever the provider
+  is reordered.
+- **Failure diagnostics.** A group list matching nothing logs a warning naming
+  the blocks that are actually arriving, and a provider failure bypasses the
+  group configuration entirely so it cannot be hidden by a module list.
+
+### 17.2 What's left
+
+Roughly in the order the work depends on itself.
+
+**Multi-monitor.** One surface, bound to no particular output. Wants a bar per
+output, plus hotplug handling. The renderer already takes a size and a scale,
+so this is a matter of holding several of them.
+
+**Hover states.** Pointer enter, motion and leave already arrive; nothing keeps
+per-module pointer state or redraws on it. Fits the module state mechanism as a
+condition alongside `below`, `above` and `urgent`.
+
+**Expand on click.** A module showing a longer form while active. Some
+providers cover this themselves — i3status-rs `format_alt` toggles on click for
+several blocks, and dbar already forwards the click — but a general version
+needs per-module toggle state and somewhere to put the second form.
+
+**Configuration unification.** Generating the provider's configuration from
+dbar's, so blocks are declared once. Passing unknown keys through opaquely
+avoids mirroring the provider's schema. This does not fix positional drift:
+when a block fails to emit, every block after it shifts, and no protocol field
+identifies them.
+
+**Colour work.** Gradients, which the specification asks for and the renderer
+does not yet do; theme files; derived colours such as lighten and darken.
+
+**On-click actions.** Running a command on click or scroll, per §10, instead of
+or alongside forwarding to the provider.
+
+**Workspaces and focused window.** A Sway IPC subscription, workspace buttons
+that switch on click, and a window title module. Also the source of application
+identity, and so a prerequisite for application icons.
+
+**System tray.** StatusNotifierItem over D-Bus. Tray icons arrive as pixmaps or
+as icon-theme names, so this needs the raster arm of the icon artwork and, for
+menus, popup surfaces.
+
+**Animations.** Short and opt-in, per §12: hover fades and workspace indicator
+movement, driven by frame callbacks, with the bar still idle when nothing is
+moving.
+
+### 17.3 Smaller known gaps
+
+- Fractional scaling. Only integer buffer scale is honoured today.
+- SVG icon loading, and application icons behind it.
+- Command modules, per §11.
+- Positional block names are unstable while the provider is still starting up:
+  until every block has emitted once, the aliases in `[status] blocks` can
+  point one slot off. It settles on its own.
+- Text is not clipped to the group outline. Backgrounds and separators are;
+  text sits inside the padding, where it has not mattered.

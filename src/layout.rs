@@ -5,8 +5,8 @@
 
 use crate::color::Color;
 use crate::config::{
-    Config, Direction, EdgeShape, Edges, Group as GroupCfg, Separator, SeparatorColor,
-    SeparatorShape, Style,
+    Config, Direction, EdgeShape, Edges, Group as GroupCfg, Module as ModuleCfg, Separator,
+    SeparatorColor, SeparatorShape, Style,
 };
 use crate::icon::{self, Icon};
 use crate::status::Block;
@@ -137,17 +137,21 @@ struct SizedModule {
 const FAULT_COLOR: Color = Color::rgba(0xf3, 0x8b, 0xa8, 0xff);
 
 /// Pick the blocks a group shows, in the order the group asks for.
-fn select_blocks<'a>(group: &GroupCfg, blocks: &'a [Block]) -> Vec<(usize, &'a Block, Style)> {
+fn select_blocks<'a, 'g>(
+    group: &'g GroupCfg,
+    blocks: &'a [Block],
+) -> Vec<(usize, &'a Block, &'g ModuleCfg)> {
     let mut out = Vec::new();
     if group.wildcard {
-        let style = group.modules.first().map(|m| m.style).unwrap_or_default();
-        out.extend(blocks.iter().enumerate().map(|(i, b)| (i, b, style)));
+        if let Some(module) = group.modules.first() {
+            out.extend(blocks.iter().enumerate().map(|(i, b)| (i, b, module)));
+        }
         return out;
     }
     for module in &group.modules {
         for (i, block) in blocks.iter().enumerate() {
             if block.selector() == Some(module.name.as_str()) {
-                out.push((i, block, module.style));
+                out.push((i, block, module));
             }
         }
     }
@@ -161,7 +165,7 @@ fn size_group(
     text: &mut dyn Measure,
 ) -> Option<SizedGroup> {
     let mut modules = Vec::new();
-    for (index, block, style) in select_blocks(group, blocks) {
+    for (index, block, module) in select_blocks(group, blocks) {
         // The i3bar protocol uses an empty `full_text` to mean "hide this block".
         if block.full_text.is_empty() {
             continue;
@@ -170,10 +174,18 @@ fn size_group(
         if content.is_empty() {
             continue;
         }
-        // A graded icon reads its level from a percentage in the text it sits beside.
+        // One reading of the text serves both the state rules and the graded icons.
+        let value = crate::status::percent(&content);
+        let style = module
+            .states
+            .iter()
+            .find(|rule| rule.matches(block.urgent, value))
+            .map(|rule| rule.style)
+            .unwrap_or(module.style);
+
         let icon = style.icon.map(|icon| {
             let level = if icon.is_graded() {
-                icon::percent(&content).map(icon::level_of).unwrap_or(0)
+                value.map(icon::level_of).unwrap_or(0)
             } else {
                 0
             };

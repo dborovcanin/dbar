@@ -210,6 +210,24 @@ struct RawEdges {
 struct RawModule {
     /// Name of a `[style.*]` table to inherit from.
     style: Option<String>,
+    /// Conditional restyling, keyed on the block's value or its urgent flag.
+    #[serde(default)]
+    states: HashMap<String, RawState>,
+    #[serde(flatten)]
+    overrides: RawStyle,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawState {
+    /// Name of a `[style.*]` table whose keys are applied over the module's own.
+    style: Option<String>,
+    /// Matches when the block's percentage is under this.
+    below: Option<f32>,
+    /// Matches when the block's percentage is over this.
+    above: Option<f32>,
+    /// Matches when the provider marks the block urgent.
+    #[serde(default)]
+    urgent: bool,
     #[serde(flatten)]
     overrides: RawStyle,
 }
@@ -349,6 +367,49 @@ pub struct Edges {
 pub struct Module {
     pub name: String,
     pub style: Style,
+    /// Checked in order; the first match replaces the module's style.
+    pub states: Vec<StateRule>,
+}
+
+/// One conditional restyling of a module.
+#[derive(Debug, Clone, Copy)]
+pub struct StateRule {
+    pub urgent: bool,
+    pub below: Option<f32>,
+    pub above: Option<f32>,
+    pub style: Style,
+}
+
+impl StateRule {
+    /// Every condition the rule states has to hold. A rule stating none never fires.
+    pub fn matches(&self, urgent: bool, value: Option<u8>) -> bool {
+        if self.urgent && !urgent {
+            return false;
+        }
+        if let Some(limit) = self.below {
+            match value {
+                Some(v) if (v as f32) < limit => {}
+                _ => return false,
+            }
+        }
+        if let Some(limit) = self.above {
+            match value {
+                Some(v) if (v as f32) > limit => {}
+                _ => return false,
+            }
+        }
+        self.urgent || self.below.is_some() || self.above.is_some()
+    }
+
+    /// How specific the rule is, for ordering. Urgent first, then the tightest bound.
+    fn specificity(&self) -> (bool, f32) {
+        (
+            !self.urgent,
+            self.below
+                .unwrap_or(f32::MAX)
+                .min(self.above.map(|a| 100.0 - a).unwrap_or(f32::MAX)),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -572,9 +633,46 @@ fn resolve_group(
             // A module listed in a group but never configured still renders with defaults.
             None => base,
         };
+
+        // A state applies the named style's own keys over the module's, rather than
+        // replacing it wholesale, so per-module settings such as the icon survive.
+        let mut states = Vec::new();
+        if let Some(raw_module) = raw.modules.get(module_name) {
+            for (state_name, raw_state) in &raw_module.states {
+                let mut state_style = style;
+                if let Some(style_name) = &raw_state.style {
+                    let named = raw.styles.get(style_name).ok_or_else(|| {
+                        anyhow!(
+                            "state {state_name:?} of module {module_name:?} references \
+                             unknown style {style_name:?}"
+                        )
+                    })?;
+                    state_style = state_style.overlay(named, palette).with_context(|| {
+                        format!("in [module.{module_name}.states.{state_name}]")
+                    })?;
+                }
+                let state_style = state_style
+                    .overlay(&raw_state.overrides, palette)
+                    .with_context(|| format!("in [module.{module_name}.states.{state_name}]"))?;
+                states.push(StateRule {
+                    urgent: raw_state.urgent,
+                    below: raw_state.below,
+                    above: raw_state.above,
+                    style: state_style,
+                });
+            }
+        }
+        // Tightest bound first, so "below 15" wins over "below 30".
+        states.sort_by(|a, b| {
+            a.specificity()
+                .partial_cmp(&b.specificity())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
         modules.push(Module {
             name: module_name.clone(),
             style,
+            states,
         });
     }
 
@@ -623,6 +721,7 @@ fn resolve_group(
             vec![Module {
                 name: "*".to_string(),
                 style: fallback,
+                states: Vec::new(),
             }]
         } else {
             modules
