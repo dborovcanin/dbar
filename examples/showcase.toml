@@ -49,55 +49,66 @@ theme = "native"
 [status.icons]
 icons = "none"
 
+# dbar draws its own icons, so the provider's text labels are turned off. What
+# is left are markers for the states a module cannot otherwise detect: the sound
+# block signals headphones and mute only through its icon, so those keep a word
+# for a state rule to match on, and `strip` removes it once matched.
+[status.icons.overrides]
+volume = ""
+volume_muted = "MUTED"
+headphones = "HEAD "
+bat = ""
+bat_charging = ""
+
 [[status.block]]
 name = "cpu"
 block = "cpu"
-format = " $icon $utilization "
+format = " $utilization "
 
 # format_alt toggles on click, and dbar forwards clicks, so this expands to
 # used/total when clicked and collapses again.
 [[status.block]]
 name = "memory"
 block = "memory"
-format = " $icon $mem_used_percents "
-format_alt = " $icon $mem_used/$mem_total "
+format = " $mem_used_percents "
+format_alt = " $mem_used/$mem_total "
 
 [[status.block]]
 name = "disk"
 block = "disk_space"
 path = "/"
-format = " $icon $free "
+format = " $free "
 
 # Signal strength, so the graded wifi icon has a percentage to read.
 [[status.block]]
 name = "wifi"
 block = "net"
-format = " $icon $signal_strength "
+format = " $signal_strength "
 
 [[status.block]]
 name = "volume"
 block = "sound"
-format = " $icon $volume "
+format = " $icon$volume|$icon "
 
 [[status.block]]
 name = "brightness"
 block = "backlight"
-format = " $icon $brightness "
+format = " $brightness "
 
 # Each state gets its own wording, so the module can tell them apart without
 # depending on which icon set is in use.
 [[status.block]]
 name = "battery"
 block = "battery"
-format = " $icon $percentage "
+format = " $percentage "
 charging_format = " CHARGING $percentage "
-full_format = " $icon full "
+full_format = " $percentage "
 
 [[status.block]]
 name = "clock"
 block = "time"
 interval = 5
-format = " $icon $timestamp.datetime(f:'%a %d %b %H:%M') "
+format = " $timestamp.datetime(f:'%a %d %b %H:%M') "
 
 # ---------------------------------------------------------------------------
 # Named colors, referenced elsewhere as "$name"
@@ -213,6 +224,15 @@ background = "$surface"
 radius = 12
 padding = 3
 spacing = 3
+
+# A workspace module expands into several, so a group separator lands between
+# them like it would between any other pair.
+[group.desktop.separator]
+shape = "line"
+width = 9
+direction = "right"
+color = "$subtext"
+overlap = 0
 
 [group.window]
 modules = ["title"]
@@ -331,12 +351,19 @@ icon = "wifi"
 style = "plain"
 icon = "volume"
 
-# The provider spells the muted state into the text, and a state rule reads it
-# there, so one module covers both cases instead of two modules covering one
-# each. Note this wording comes from the "none" icon set.
+# One module covers all three states: the provider spells each into the text and
+# a rule reads it there. "strip" drops the wording once matched, so what is left
+# is the icon saying it. Stripping "MUTED" empties the text, and a module with an
+# icon still draws, so a muted volume is the icon alone.
 [module.volume.states.muted]
 contains = "MUTED"
+strip = true
 icon = "volume-muted"
+
+[module.volume.states.headphones]
+contains = "HEAD"
+strip = true
+icon = "headphones"
 
 [module.brightness]
 style = "plain"
@@ -348,6 +375,7 @@ icon = "battery"
 
 [module.battery.states.charging]
 contains = "CHARGING"
+strip = true
 icon = "battery-charging"
 
 # A state overlays the module's own style rather than replacing it, so the icon

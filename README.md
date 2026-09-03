@@ -231,6 +231,11 @@ style = "hovered"
 [module.volume.states.muted]
 contains = "MUTED"      # a substring of the module's own text
 icon = "volume-muted"
+
+[module.battery.states.charging]
+contains = "CHARGING"
+strip = true            # drop the wording once it has been matched
+icon = "battery-charging"
 ```
 
 A rule matches when every condition it states holds: `below` and `above`
@@ -240,10 +245,23 @@ pointer, and `focused` and `visible` against a workspace. A rule stating no
 condition never fires.
 
 `contains` is what lets one module cover a state the provider only spells out
-in words - a muted volume or a charging battery - instead of needing a second
-module for each. Give the provider distinct wording per state where it can, as
-`charging_format` does, so the match does not depend on which icon set is in
-use.
+in words - a muted volume, a charging battery, headphones plugged in - instead
+of needing a second module for each. `strip` then removes that wording from
+what is drawn, so the marker does its job without being read: the icon says it.
+
+Since dbar draws its own icons, the provider's text labels are usually turned
+off entirely, leaving only the markers a rule needs:
+
+```toml
+[status.icons]
+icons = "none"
+
+[status.icons.overrides]
+volume = ""             # no "VOL" prefix; dbar draws the icon
+volume_muted = "MUTED"  # kept, because nothing else signals mute
+headphones = "HEAD "    # kept and stripped, so only the icon shows
+bat = ""
+```
 
 Rules are checked tightest bound first, so `below = 15` wins over `below = 30`
 at 10%, whatever order they appear in the file. Urgent rules are checked before

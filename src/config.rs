@@ -260,6 +260,9 @@ struct RawState {
     visible: bool,
     /// Matches when the module's text contains this.
     contains: Option<String>,
+    /// Remove the matched text from what is drawn.
+    #[serde(default)]
+    strip: bool,
     #[serde(flatten)]
     overrides: RawStyle,
 }
@@ -461,6 +464,8 @@ pub struct StateRule {
     pub visible: bool,
     /// Substring the module's text must contain.
     pub contains: Option<String>,
+    /// Whether that substring is removed from the drawn text once matched.
+    pub strip: bool,
     pub below: Option<f32>,
     pub above: Option<f32>,
     pub style: Style,
@@ -764,6 +769,7 @@ fn resolve_group(
                     focused: raw_state.focused,
                     visible: raw_state.visible,
                     contains: raw_state.contains.clone(),
+                    strip: raw_state.strip,
                     below: raw_state.below,
                     above: raw_state.above,
                     style: state_style,

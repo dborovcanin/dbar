@@ -271,20 +271,43 @@ fn size_group(
         }
         // One reading of the text serves both the state rules and the graded icons.
         let value = crate::status::percent(&content);
-        let resolve = |hovered: bool| {
+        let resolve = |hovered: bool, text: &str| {
             module
                 .states
                 .iter()
-                .find(|rule| rule.matches(flags, hovered, value, &content))
+                .find(|rule| rule.matches(flags, hovered, value, text))
                 .map(|rule| rule.style)
                 .unwrap_or(module.style)
         };
-        let style = resolve(false);
+        let style = resolve(false, &content);
+
+        // A provider often has to spell a state into the text for a rule to match on. Once
+        // it has been matched the wording has done its job, and the icon says it better.
+        let content = match module
+            .states
+            .iter()
+            .find(|rule| rule.strip && rule.matches(flags, false, value, &content))
+        {
+            Some(rule) => {
+                let needle = rule.contains.as_deref().unwrap_or_default();
+                content
+                    .replace(needle, "")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            }
+            None => content,
+        };
+        // Stripping can empty the text entirely, which is fine when an icon is left to
+        // carry the module: a muted volume is the icon and nothing else.
+        if content.is_empty() && style.icon.is_none() {
+            continue;
+        }
 
         // Hover is deliberately paint-only. Letting it change padding or the icon would
         // resize the module under the pointer, which can move the pointer off it and
         // oscillate, so the metrics always come from the unhovered style.
-        let hovered = resolve(true);
+        let hovered = resolve(true, &content);
         let hover_style = (hovered != style).then_some(Style {
             padding: style.padding,
             min_width: style.min_width,

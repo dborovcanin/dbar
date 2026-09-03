@@ -864,7 +864,8 @@ colour modes and an overlap that hides antialiasing seams; per-side group edges
 with contents clipped to the group outline; reusable styles and named colours;
 a built-in vector icon set, including icons graded over five steps by a
 percentage read from the module's own text; module state styling keyed on a
-value, on the provider's urgent flag, or on the pointer; workspaces and the
+value, on text the provider writes, on its urgent flag, or on the pointer, with
+the matched text removable so a state marker need not be read; workspaces and the
 focused window over the compositor's own IPC, with workspaces expanding into one
 clickable rectangle each.
 
