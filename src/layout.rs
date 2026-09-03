@@ -4,7 +4,9 @@
 //! neither needs to know about config or the i3bar protocol.
 
 use crate::color::Color;
-use crate::config::{Config, Group as GroupCfg, Style};
+use crate::config::{
+    Config, Direction, Edges, Group as GroupCfg, Separator, SeparatorColor, SeparatorShape, Style,
+};
 use crate::status::Block;
 use crate::text::TextRenderer;
 
@@ -22,6 +24,22 @@ pub struct PlacedModule {
     pub block: usize,
 }
 
+/// A transition drawn in the gap between two neighbouring modules.
+#[derive(Clone, Debug)]
+pub struct PlacedSeparator {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+    pub shape: SeparatorShape,
+    pub direction: Direction,
+    pub overlap: f32,
+    /// Colour of the region on the leading side of the boundary.
+    pub fill: Color,
+    /// Colour behind it, on the trailing side.
+    pub under: Color,
+}
+
 #[derive(Clone, Debug)]
 pub struct PlacedGroup {
     pub x: f32,
@@ -29,8 +47,9 @@ pub struct PlacedGroup {
     pub width: f32,
     pub height: f32,
     pub background: Color,
-    pub radius: f32,
+    pub edges: Edges,
     pub modules: Vec<PlacedModule>,
+    pub separators: Vec<PlacedSeparator>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -65,9 +84,11 @@ impl Frame {
 struct SizedGroup {
     width: f32,
     background: Color,
-    radius: f32,
+    edges: Edges,
     padding: f32,
-    spacing: f32,
+    /// Horizontal space between neighbouring modules.
+    advance: f32,
+    separator: Separator,
     /// Module widths paired with their content.
     modules: Vec<SizedModule>,
 }
@@ -137,17 +158,25 @@ fn size_group(
         return None;
     }
 
+    // A configured separator owns the space between modules; otherwise `spacing` does.
+    let advance = if group.separator.shape.is_none() {
+        group.spacing
+    } else {
+        group.separator.width
+    };
+
     let content: f32 = modules.iter().map(|m| m.width).sum();
-    let gaps = group.spacing * (modules.len() - 1) as f32;
+    let gaps = advance * (modules.len() - 1) as f32;
     let width = content + gaps + group.padding * 2.0;
     let _ = height;
 
     Some(SizedGroup {
         width,
         background: group.background,
-        radius: group.radius,
+        edges: group.edges,
         padding: group.padding,
-        spacing: group.spacing,
+        advance,
+        separator: group.separator,
         modules,
     })
 }
@@ -158,10 +187,36 @@ fn place(sized: SizedGroup, mut x: f32, height: f32) -> PlacedGroup {
     let inner_h = (height - sized.padding * 2.0).max(0.0);
     x += sized.padding;
 
-    let mut modules = Vec::with_capacity(sized.modules.len());
+    let separator = sized.separator;
+    let draw_separators = !separator.shape.is_none() && sized.advance > 0.0;
+
+    let mut modules: Vec<PlacedModule> = Vec::with_capacity(sized.modules.len());
+    let mut separators = Vec::new();
+
     for (i, m) in sized.modules.into_iter().enumerate() {
         if i > 0 {
-            x += sized.spacing;
+            if draw_separators {
+                let previous = &modules[i - 1];
+                separators.push(PlacedSeparator {
+                    x,
+                    y: inner_y,
+                    width: sized.advance,
+                    height: inner_h,
+                    shape: separator.shape,
+                    direction: separator.direction,
+                    overlap: separator.overlap,
+                    fill: match separator.color {
+                        SeparatorColor::Previous => previous.background,
+                        SeparatorColor::Next => m.background,
+                        SeparatorColor::Foreground => previous.foreground,
+                        SeparatorColor::Background => sized.background,
+                        SeparatorColor::Fixed(c) => c,
+                    },
+                    // Whatever the boundary leads into shows behind the shape.
+                    under: m.background,
+                });
+            }
+            x += sized.advance;
         }
         modules.push(PlacedModule {
             x,
@@ -183,8 +238,9 @@ fn place(sized: SizedGroup, mut x: f32, height: f32) -> PlacedGroup {
         width: sized.width,
         height,
         background: sized.background,
-        radius: sized.radius,
+        edges: sized.edges,
         modules,
+        separators,
     }
 }
 

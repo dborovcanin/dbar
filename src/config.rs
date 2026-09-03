@@ -21,6 +21,58 @@ pub enum Edge {
     Bottom,
 }
 
+/// The transition drawn between two neighbouring modules.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SeparatorShape {
+    #[default]
+    None,
+    Line,
+    Slant,
+    Chevron,
+    Notch,
+    Round,
+    Curve,
+}
+
+impl SeparatorShape {
+    pub fn is_none(self) -> bool {
+        self == SeparatorShape::None
+    }
+}
+
+/// Which way a separator shape points.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Direction {
+    #[default]
+    Right,
+    Left,
+}
+
+/// How a group's outer corners are cut.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EdgeShape {
+    #[default]
+    Round,
+    None,
+}
+
+/// Where a separator takes its colour from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SeparatorColor {
+    /// The background of the module before the separator - classic Powerline.
+    Previous,
+    /// The background of the module after it.
+    Next,
+    /// The foreground of the module before it.
+    Foreground,
+    /// The group background.
+    Background,
+    Fixed(Color),
+}
+
 // ---------------------------------------------------------------------------
 // Raw (as written in TOML)
 // ---------------------------------------------------------------------------
@@ -115,6 +167,34 @@ struct RawGroup {
     padding: f32,
     #[serde(default)]
     spacing: f32,
+    separator: Option<RawSeparator>,
+    edges: Option<RawEdges>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSeparator {
+    #[serde(default)]
+    shape: SeparatorShape,
+    #[serde(default = "default_separator_width")]
+    width: f32,
+    #[serde(default)]
+    direction: Direction,
+    #[serde(default = "default_separator_color")]
+    color: String,
+    #[serde(default)]
+    overlap: f32,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEdges {
+    #[serde(default)]
+    left: EdgeShape,
+    #[serde(default)]
+    right: EdgeShape,
+    /// Falls back to the group's own `radius`.
+    radius: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -143,6 +223,12 @@ fn default_true() -> bool {
 }
 fn default_status_command() -> String {
     "i3status-rs".to_string()
+}
+fn default_separator_width() -> f32 {
+    10.0
+}
+fn default_separator_color() -> String {
+    "previous".to_string()
 }
 
 impl Default for RawBar {
@@ -202,12 +288,43 @@ pub struct Status {
 #[derive(Debug, Clone)]
 pub struct Group {
     pub background: Color,
-    pub radius: f32,
     pub padding: f32,
     pub spacing: f32,
+    pub separator: Separator,
+    pub edges: Edges,
     /// `modules = ["*"]` takes every block the provider emits, in provider order.
     pub wildcard: bool,
     pub modules: Vec<Module>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Separator {
+    pub shape: SeparatorShape,
+    /// Horizontal space the transition occupies between two modules.
+    pub width: f32,
+    pub direction: Direction,
+    pub color: SeparatorColor,
+    /// Bleed drawn past each side, to hide seams between antialiased edges.
+    pub overlap: f32,
+}
+
+impl Default for Separator {
+    fn default() -> Self {
+        Separator {
+            shape: SeparatorShape::None,
+            width: default_separator_width(),
+            direction: Direction::Right,
+            color: SeparatorColor::Previous,
+            overlap: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Edges {
+    pub left: EdgeShape,
+    pub right: EdgeShape,
+    pub radius: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -410,6 +527,32 @@ fn resolve_group(
     // Wildcard groups need a style for blocks that have no `[module.*]` table.
     let fallback = styles.get("default").copied().unwrap_or_default();
 
+    let separator = match &raw_group.separator {
+        Some(raw) => Separator {
+            shape: raw.shape,
+            width: raw.width.max(0.0),
+            direction: raw.direction,
+            color: parse_separator_color(&raw.color, palette)
+                .with_context(|| format!("in [group.{name}.separator]"))?,
+            overlap: raw.overlap.max(0.0),
+        },
+        None => Separator::default(),
+    };
+
+    let edges = match &raw_group.edges {
+        Some(raw) => Edges {
+            left: raw.left,
+            right: raw.right,
+            radius: raw.radius.unwrap_or(raw_group.radius),
+        },
+        // Without an [edges] table both corners simply use the group radius.
+        None => Edges {
+            left: EdgeShape::Round,
+            right: EdgeShape::Round,
+            radius: raw_group.radius,
+        },
+    };
+
     Ok(Group {
         background: match &raw_group.background {
             Some(c) => palette
@@ -417,9 +560,10 @@ fn resolve_group(
                 .with_context(|| format!("in [group.{name}]"))?,
             None => Color::TRANSPARENT,
         },
-        radius: raw_group.radius,
         padding: raw_group.padding,
         spacing: raw_group.spacing,
+        separator,
+        edges,
         wildcard,
         modules: if wildcard && modules.is_empty() {
             vec![Module {
@@ -429,6 +573,18 @@ fn resolve_group(
         } else {
             modules
         },
+    })
+}
+
+/// `previous`, `next`, `foreground` and `background` name a source; anything else is
+/// taken as a literal colour or a `$name` reference.
+fn parse_separator_color(spec: &str, palette: &Palette) -> Result<SeparatorColor> {
+    Ok(match spec {
+        "previous" => SeparatorColor::Previous,
+        "next" => SeparatorColor::Next,
+        "foreground" => SeparatorColor::Foreground,
+        "background" => SeparatorColor::Background,
+        other => SeparatorColor::Fixed(palette.get(other)?),
     })
 }
 

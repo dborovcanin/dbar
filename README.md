@@ -17,10 +17,13 @@ This is the **V0** milestone from [spec.md](spec.md).
 - rounded group and module backgrounds
 - click forwarding back to the provider (left, middle, right, scroll)
 - integer HiDPI buffer scaling
+- separators as real vector geometry: `line`, `slant`, `chevron`, `notch`,
+  `round` and `curve`, each mirrorable, with Powerline colour modes and an
+  overlap that hides antialiasing seams
+- per-side group edges, with group contents clipped to the group outline
 
-Not yet implemented: separators and Powerline transitions, vector icons, hover
-states, module state styling, animations, command modules, multi-monitor.
-Those are V1 and V1.x in the spec.
+Not yet implemented: vector icons, hover states, module state styling,
+animations, command modules, multi-monitor. Those are V1 and V1.x in the spec.
 
 ## Build
 
@@ -93,6 +96,36 @@ spacing = 0
 
 Style resolution runs built-in defaults, then the named `[style.*]` a module
 picks, then that module's own keys.
+
+### Separators
+
+A separator is a transition between two neighbouring modules, drawn as vector
+geometry rather than as a font glyph. It is configured per group:
+
+```toml
+[group.system.separator]
+shape = "chevron"     # none | line | slant | chevron | notch | round | curve
+width = 12            # horizontal space the transition occupies
+direction = "left"    # "right" | "left"; mirrors the shape
+color = "previous"    # previous | next | foreground | background, or a color
+overlap = 1           # bleed past each side, hiding antialiasing seams
+```
+
+`color = "previous"` takes the preceding module's background for the leading
+region, which is what gives the classic Powerline wedge. A group without a
+separator falls back to its `spacing` for the gap between modules.
+
+Outer corners are a separate concept:
+
+```toml
+[group.system.edges]
+left = "round"        # "round" | "none"
+right = "round"
+radius = 12           # defaults to the group's own radius
+```
+
+Group contents are clipped to the group outline, so square module corners and
+separator overlap never spill past a rounded edge.
 
 Instead of `"*"`, a group may list block names to select and order them
 explicitly:

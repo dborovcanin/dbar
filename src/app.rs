@@ -190,6 +190,19 @@ impl App {
             &mut self.text,
         );
 
+        log::debug!(
+            "draw: {}x{} scale {}, {} blocks -> {} groups, {} modules",
+            self.width,
+            self.height,
+            self.scale,
+            self.blocks.len(),
+            self.frame.groups.len(),
+            self.frame
+                .groups
+                .iter()
+                .map(|g| g.modules.len())
+                .sum::<usize>()
+        );
         let pw = (self.width * self.scale.max(1) as u32) as i32;
         let ph = (self.height * self.scale.max(1) as u32) as i32;
         let stride = pw * 4;
