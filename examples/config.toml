@@ -1,39 +1,69 @@
 # dbar default configuration.
 #
-# Copy to ~/.config/dbar/config.toml and edit. Every table is optional; anything
-# left out falls back to the built-in defaults.
+# This is what dbar compiles in and uses when no config file exists. Copy it to
+# ~/.config/dbar/config.toml and edit, or write it out with:
+#
+#   dbar --print-config > ~/.config/dbar/config.toml
+#
+# See examples/showcase.toml for every key dbar understands.
 
 [bar]
 height = 34
 position = "top"
 margin = 6
 gap = 6
-# Kept font-agnostic, since this is what dbar uses when no config file exists.
-# A provider emitting glyph icons needs a font that carries them; see
-# examples/showcase.toml.
+# Kept font-agnostic, since this is the built-in default. Icon sizes follow it
+# unless [bar] icon_size says otherwise.
 font = "sans-serif 10"
 
 [bar.background]
-# Fully transparent, so the groups below read as floating islands.
+# Fully transparent, so the group below reads as a floating island.
 color = "#00000000"
 radius = 0
 
-# The status provider. Any i3bar-compatible program works here.
+# Declaring blocks here is "generated mode": dbar writes the provider's own
+# configuration and starts it against that, so there is one file to maintain.
+# Every key except `name` is passed through to the provider untouched.
 [status]
 command = "i3status-rs"
-args = []
-# Names for the provider's blocks, in the order it emits them, so groups can
-# select on "cpu" rather than "0". Unused here because the group below takes
-# every block with "*"; see examples/showcase.toml.
-# blocks = ["cpu", "memory", "disk", "load", "net", "volume", "uptime", "clock"]
+
+[status.theme]
+theme = "native"
+
+[status.icons]
+icons = "none"
+
+[[status.block]]
+name = "cpu"
+block = "cpu"
+format = " $icon $utilization "
+
+[[status.block]]
+name = "memory"
+block = "memory"
+format = " $icon $mem_used_percents "
+
+[[status.block]]
+name = "disk"
+block = "disk_space"
+path = "/"
+format = " $icon $free "
+
+[[status.block]]
+name = "volume"
+block = "sound"
+format = " $icon $volume "
+
+[[status.block]]
+name = "clock"
+block = "time"
+interval = 5
+format = " $icon $timestamp.datetime(f:'%a %d %b %H:%M') "
 
 [colors]
 background = "#1e1e2e"
-surface = "#313244cc"
+surface = "#313244cc"   # alpha cc, so SwayFX blur shows through
 text = "#cdd6f4"
-accent = "#89b4fa"
-warning = "#f9e2af"
-critical = "#f38ba8"
 
 [right]
 groups = ["system"]
@@ -43,7 +73,8 @@ foreground = "$text"
 padding = 8
 
 [group.system]
-# "*" takes every block the status provider emits, in the order it sends them.
+# "*" takes every block the provider emits, in the order it sends them. Naming
+# them explicitly, as showcase.toml does, allows per-module styling.
 modules = ["*"]
 background = "$surface"
 radius = 10

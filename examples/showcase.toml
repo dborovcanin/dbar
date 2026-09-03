@@ -6,62 +6,118 @@
 # across four groups and all three positions, each group using a different
 # separator shape.
 #
-# Blocks are named by [status] blocks below, in the order the provider emits
-# them, so install the matching provider config first:
+# Blocks are named by # ---------------------------------------------------------------------------
+# Status provider
 #
-#   cp examples/i3status-rs.toml ~/.config/i3status-rust/config.toml
+# Declaring blocks here is "generated mode": dbar writes the provider's own
+# configuration into $XDG_RUNTIME_DIR/dbar/provider.toml and starts it against
+# that, so there is one file to maintain instead of two.
 #
-# If a group's module list matches nothing, dbar logs a warning naming the block
-# names the provider is really sending. Run with RUST_LOG=dbar=debug to see it.
-
+# Every key except `name` is passed through to the provider untouched, so dbar
+# does not model its schema and does not drift as that schema changes. `name` is
+# dbar's own handle, which the groups and modules below refer to.
+#
+# To drive an external provider instead, drop the [[status.block]] entries and
+# use `args` with `blocks` to name what it emits by position:
+#
+#   [status]
+#   command = "i3status-rs"
+#   args = ["/path/to/its/config.toml"]
+#   blocks = ["cpu", "memory", ...]
 # ---------------------------------------------------------------------------
-# Bar surface
-# ---------------------------------------------------------------------------
-
-[bar]
-height = 36
-position = "top"            # "top" | "bottom"
-margin = 8                  # gap between the bar and the screen edge; floats the bar
-gap = 12                    # horizontal space between groups
-font = "Liberation Sans 14"
-# Base icon size for the whole bar. Styles and modules override it; left out
-# entirely, it defaults to 1.4x the font size, so icons scale with the text.
-icon_size = 20
-# For glyph icons, set icons = "material-nf" in the provider config and name a
-# font that carries them here, e.g. "DejaVuSansM Nerd Font Propo 10".
-exclusive = true # reserve the space so windows do not sit under the bar
-
-[bar.background]
-# Drawn under every group. Transparent here, so the groups read as separate
-# floating islands.
-color = "#00000000" # the last two hex digits are alpha
-radius = 0
 
 [status]
 command = "i3status-rs"
-# The i3bar protocol gives a provider no way to name its blocks usefully -
-# i3status-rs numbers them "0", "1", ... - so name them here, in the order the
-# provider emits them. Groups and modules below select on these names, and a
-# reordering of the provider config becomes a one-line change here instead of a
-# silent mismatch. Without this, groups have to select on "0", "1", ...
-blocks = [
-  "cpu",
-  "memory",
-  "disk",
-  "wifi",
-  "ethernet",
-  "offline",
-  "volume",
-  "muted",
-  "headphones",
-  "brightness",
-  "battery",
-  "charging",
-  "clock",
-]
-# i3status-rs resolves a bare filename against $XDG_CONFIG_HOME/i3status-rust and
-# ignores the working directory, so pass an absolute path or leave this empty.
-args = []
+
+# "native" leaves colors and separators to dbar rather than baking them into the
+# protocol output. "none" is not "no icon": it substitutes short text labels, so
+# "$icon" reads CPU, MEM, DISK. Set icons = "material-nf" for glyphs, and pair it
+# with a font that carries them.
+[status.theme]
+theme = "native"
+
+[status.icons]
+icons = "none"
+
+[[status.block]]
+name = "cpu"
+block = "cpu"
+format = " $icon $utilization "
+
+# format_alt toggles on click, and dbar forwards clicks, so this module expands
+# to used/total when clicked and collapses again.
+[[status.block]]
+name = "memory"
+block = "memory"
+format = " $icon $mem_used_percents "
+format_alt = " $icon $mem_used/$mem_total "
+
+[[status.block]]
+name = "disk"
+block = "disk_space"
+path = "/"
+format = " $icon $free "
+
+# Signal strength, so dbar's graded wifi icon has a percentage to read.
+[[status.block]]
+name = "wifi"
+block = "net"
+format = " $icon $signal_strength "
+
+# Placeholders, so the showcase can demonstrate icons that nothing selects
+# automatically yet. A real config would drive these from actual state.
+[[status.block]]
+name = "ethernet"
+block = "custom"
+command = "echo LAN"
+interval = 3600
+
+[[status.block]]
+name = "offline"
+block = "custom"
+command = "echo offline"
+interval = 3600
+
+[[status.block]]
+name = "volume"
+block = "sound"
+format = " $icon $volume "
+
+[[status.block]]
+name = "muted"
+block = "custom"
+command = "echo muted"
+interval = 3600
+
+[[status.block]]
+name = "headphones"
+block = "custom"
+command = "echo headphones"
+interval = 3600
+
+[[status.block]]
+name = "brightness"
+block = "backlight"
+format = " $icon $brightness "
+
+[[status.block]]
+name = "battery"
+block = "battery"
+format = " $icon $percentage "
+
+# Reports a percentage, because the charging icon grades on it just as the plain
+# battery icon does.
+[[status.block]]
+name = "charging"
+block = "custom"
+command = "echo 72%"
+interval = 3600
+
+[[status.block]]
+name = "clock"
+block = "time"
+interval = 5
+format = " $icon $timestamp.datetime(f:'%a %d %b %H:%M') "
 
 # ---------------------------------------------------------------------------
 # Named colors, referenced elsewhere as "$name"

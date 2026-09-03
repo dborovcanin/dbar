@@ -255,22 +255,43 @@ modules = ["cpu", "memory", "time"]
 style = "default"
 ```
 
-### Naming blocks
+### The status provider
 
 The i3bar protocol gives a provider no way to name its blocks usefully -
 `i3status-rs` numbers them `"0"`, `"1"`, ... and rejects a `name` key on a
-block - so a group selecting on those numbers silently follows a different
-block whenever the provider's config is reordered.
+block - so dbar names them itself. There are two ways to do that.
 
-Name them once, in the order the provider emits them:
+**Generated mode**, the default: declare the blocks in dbar's own config. dbar
+writes the provider's configuration to `$XDG_RUNTIME_DIR/dbar/provider.toml`
+and starts it against that, so there is one file to maintain instead of two.
 
 ```toml
 [status]
 command = "i3status-rs"
-blocks = ["cpu", "memory", "disk", "load", "net", "volume", "uptime", "clock"]
+
+[status.theme]
+theme = "native"
+
+[[status.block]]
+name = "cpu"                      # dbar's handle for it
+block = "cpu"                     # everything else goes to the provider as-is
+format = " $icon $utilization "
 ```
 
-Groups and modules then select on those names:
+Every key but `name` is passed through untouched, so dbar models none of the
+provider's schema and does not drift as that schema changes.
+
+**External mode**: point at a provider that has its own configuration, and name
+what it emits by position.
+
+```toml
+[status]
+command = "i3status-rs"
+args = ["/path/to/its/config.toml"]
+blocks = ["cpu", "memory", "disk", "volume", "clock"]
+```
+
+Either way, groups and modules select on those names:
 
 ```toml
 [group.desktop]
@@ -280,9 +301,10 @@ modules = ["cpu", "memory"]
 style = "accent"
 ```
 
-The names are dbar's own. Click events still carry the name the provider gave
-the block, so it can route them back. Without `blocks`, groups select on
-whatever the provider sends, which for `i3status-rs` means `"0"`, `"1"`, ...
+The names are dbar's own; click events still carry the name the provider gave
+the block, so it can route them back. Positions are only trusted once the
+provider has emitted as many blocks as are named — until then the array is
+short and every name after a missing block would land on the wrong one.
 
 If a group's module list matches nothing, dbar logs a warning naming the block
 names the provider is actually sending, rather than leaving a blank bar with no

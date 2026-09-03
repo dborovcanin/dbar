@@ -59,6 +59,8 @@ pub struct App {
     fault: Option<String>,
     /// Block names from the last "nothing matched" warning, so it is not repeated per redraw.
     warned_names: Option<Vec<String>>,
+    /// Whether the block-count mismatch has already been reported.
+    alias_count_warned: bool,
 
     /// Surface size in logical pixels.
     width: u32,
@@ -134,6 +136,7 @@ impl App {
             frame: Frame::default(),
             fault: None,
             warned_names: None,
+            alias_count_warned: false,
             width: 0,
             height,
             scale: 1,
@@ -158,11 +161,7 @@ impl App {
                 self.provider.set_accepts_clicks(header.click_events);
             }
             StatusEvent::Blocks(mut blocks) => {
-                // Positional names are all the protocol offers, so pin them to the
-                // configured names once, here, rather than at every use.
-                for (index, block) in blocks.iter_mut().enumerate() {
-                    block.alias = self.config.status.blocks.get(index).cloned();
-                }
+                self.apply_aliases(&mut blocks);
                 self.blocks = blocks;
                 self.fault = None;
                 self.invalidate();
@@ -173,6 +172,44 @@ impl App {
                 self.fault = Some(format!("status provider stopped: {reason}"));
                 self.invalidate();
             }
+        }
+    }
+
+    /// Pin the configured names onto the provider's blocks, by position.
+    ///
+    /// Positions are only trustworthy once the provider has emitted every block it is going
+    /// to: until then the array is short and every name after the missing one would land on
+    /// the wrong block. A provider that legitimately emits a different number keeps working,
+    /// positionally, with one warning.
+    fn apply_aliases(&mut self, blocks: &mut [Block]) {
+        let names = &self.config.status.blocks;
+        if names.is_empty() {
+            return;
+        }
+        if blocks.len() != names.len() && !self.alias_count_warned {
+            log::debug!(
+                "provider sent {} block(s), {} named in the config; names are positional, so \
+                 they are applied once the counts agree",
+                blocks.len(),
+                names.len()
+            );
+        }
+        if blocks.len() < names.len() {
+            // Still starting up. Leaving the blocks unnamed shows nothing for a moment,
+            // which beats showing one block's value under another block's name.
+            return;
+        }
+        if blocks.len() > names.len() && !self.alias_count_warned {
+            log::warn!(
+                "provider sends {} block(s) but [status] blocks names {}; the extra blocks \
+                 keep the names the provider gave them",
+                blocks.len(),
+                names.len()
+            );
+            self.alias_count_warned = true;
+        }
+        for (index, block) in blocks.iter_mut().enumerate() {
+            block.alias = names.get(index).cloned();
         }
     }
 

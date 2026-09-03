@@ -868,11 +868,13 @@ value or on the provider's urgent flag.
 
 Two things were added that the specification did not anticipate:
 
-- **`[status] blocks`** names the provider's blocks positionally. The i3bar
-  protocol gives a provider no way to name its blocks usefully — i3status-rs
-  numbers them and rejects a `name` key — so without this a group selects on
-  `"0"` and `"1"` and silently follows a different block whenever the provider
-  is reordered.
+- **Block naming, in two modes.** The i3bar protocol gives a provider no way to
+  name its blocks usefully — i3status-rs numbers them and rejects a `name` key —
+  so without help a group selects on `"0"` and `"1"` and silently follows a
+  different block whenever the provider is reordered. Declaring blocks under
+  `[[status.block]]` has dbar write the provider's own configuration and start
+  it against that, so they are declared once; `[status] blocks` still names an
+  external provider's blocks by position.
 - **Failure diagnostics.** A group list matching nothing logs a warning naming
   the blocks that are actually arriving, and a provider failure bypasses the
   group configuration entirely so it cannot be hidden by a module list.
@@ -893,12 +895,6 @@ condition alongside `below`, `above` and `urgent`.
 providers cover this themselves — i3status-rs `format_alt` toggles on click for
 several blocks, and dbar already forwards the click — but a general version
 needs per-module toggle state and somewhere to put the second form.
-
-**Configuration unification.** Generating the provider's configuration from
-dbar's, so blocks are declared once. Passing unknown keys through opaquely
-avoids mirroring the provider's schema. This does not fix positional drift:
-when a block fails to emit, every block after it shifts, and no protocol field
-identifies them.
 
 **Colour work.** Gradients, which the specification asks for and the renderer
 does not yet do; theme files; derived colours such as lighten and darken.
@@ -923,8 +919,9 @@ moving.
 - Fractional scaling. Only integer buffer scale is honoured today.
 - SVG icon loading, and application icons behind it.
 - Command modules, per §11.
-- Positional block names are unstable while the provider is still starting up:
-  until every block has emitted once, the aliases in `[status] blocks` can
-  point one slot off. It settles on its own.
+- Names are applied only once the provider has emitted as many blocks as are
+  named, since a short array would put every later name on the wrong block. A
+  provider that emits a different number keeps working positionally, with a
+  warning.
 - Text is not clipped to the group outline. Backgrounds and separators are;
   text sits inside the padding, where it has not mattered.

@@ -139,9 +139,16 @@ struct RawStatus {
     command: String,
     #[serde(default)]
     args: Vec<String>,
-    /// Names for the provider's blocks, in the order it emits them.
+    /// Names for the provider's blocks, in the order it emits them. External mode only.
     #[serde(default)]
     blocks: Vec<String>,
+    /// `[[status.block]]` entries. Their presence switches to generated mode: dbar writes
+    /// the provider's own configuration and starts it against that.
+    #[serde(default, rename = "block")]
+    block: Vec<toml::Table>,
+    /// Passed through to the generated configuration verbatim.
+    theme: Option<toml::Table>,
+    icons: Option<toml::Table>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -281,6 +288,9 @@ impl Default for RawStatus {
             command: default_status_command(),
             args: Vec::new(),
             blocks: Vec::new(),
+            block: Vec::new(),
+            theme: None,
+            icons: None,
         }
     }
 }
@@ -322,6 +332,43 @@ pub struct Status {
     /// i3status-rs numbers them - so groups would otherwise have to select on "0", "1",
     /// and silently follow the wrong block whenever the provider's order changed.
     pub blocks: Vec<String>,
+    /// Set when dbar writes the provider's configuration itself.
+    pub generated: Option<Generated>,
+}
+
+/// A provider configuration dbar writes and owns.
+///
+/// Block bodies are carried as opaque tables, so dbar never models the provider's schema
+/// and does not drift as that schema changes.
+#[derive(Debug, Clone)]
+pub struct Generated {
+    pub theme: Option<toml::Table>,
+    pub icons: Option<toml::Table>,
+    pub blocks: Vec<toml::Table>,
+}
+
+impl Generated {
+    /// Render the provider's configuration file.
+    pub fn to_toml(&self) -> Result<String> {
+        let mut doc = toml::Table::new();
+        if let Some(theme) = &self.theme {
+            doc.insert("theme".to_string(), toml::Value::Table(theme.clone()));
+        }
+        if let Some(icons) = &self.icons {
+            doc.insert("icons".to_string(), toml::Value::Table(icons.clone()));
+        }
+        doc.insert(
+            "block".to_string(),
+            toml::Value::Array(
+                self.blocks
+                    .iter()
+                    .cloned()
+                    .map(toml::Value::Table)
+                    .collect(),
+            ),
+        );
+        toml::to_string_pretty(&doc).context("rendering the generated provider config")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -584,11 +631,7 @@ impl Config {
 
         Ok(Config {
             bar,
-            status: Status {
-                command: raw.status.command.clone(),
-                args: raw.status.args.clone(),
-                blocks: raw.status.blocks.clone(),
-            },
+            status: resolve_status(&raw.status)?,
             positions,
         })
     }
@@ -736,6 +779,65 @@ fn resolve_group(
         } else {
             modules
         },
+    })
+}
+
+/// Split `[status]` into the two provider modes.
+fn resolve_status(raw: &RawStatus) -> Result<Status> {
+    if raw.block.is_empty() {
+        return Ok(Status {
+            command: raw.command.clone(),
+            args: raw.args.clone(),
+            blocks: raw.blocks.clone(),
+            generated: None,
+        });
+    }
+
+    if !raw.blocks.is_empty() {
+        anyhow::bail!(
+            "[status] sets both `blocks` and [[status.block]]; the first names an external \
+             provider's blocks, the second declares them, so only one applies"
+        );
+    }
+    if !raw.args.is_empty() {
+        anyhow::bail!(
+            "[status] sets both `args` and [[status.block]]; dbar passes the generated \
+             config path as the only argument, so `args` would be ignored"
+        );
+    }
+
+    // Each block's `name` is dbar's handle for it; everything else belongs to the provider.
+    let mut names = Vec::with_capacity(raw.block.len());
+    let mut blocks = Vec::with_capacity(raw.block.len());
+    for (index, table) in raw.block.iter().enumerate() {
+        let mut table = table.clone();
+        let name = match table.remove("name") {
+            Some(toml::Value::String(name)) => name,
+            Some(other) => anyhow::bail!(
+                "[[status.block]] #{} has a non-string name {other}",
+                index + 1
+            ),
+            None => anyhow::bail!(
+                "[[status.block]] #{} needs a `name`, which is how groups refer to it",
+                index + 1
+            ),
+        };
+        if names.contains(&name) {
+            anyhow::bail!("two [[status.block]] entries are both named {name:?}");
+        }
+        names.push(name);
+        blocks.push(table);
+    }
+
+    Ok(Status {
+        command: raw.command.clone(),
+        args: Vec::new(),
+        blocks: names,
+        generated: Some(Generated {
+            theme: raw.theme.clone(),
+            icons: raw.icons.clone(),
+            blocks,
+        }),
     })
 }
 
