@@ -71,6 +71,7 @@ args = []
 background = "#1e1e2e"
 surface = "#313244cc"  # alpha cc, so SwayFX blur shows through
 slate = "#585b70ff"
+overlay = "#45475aff"
 text = "#cdd6f4"
 subtext = "#a6adc8"
 accent = "#89b4fa"
@@ -127,6 +128,11 @@ foreground = "$text"
 padding = 9
 
 # No background of its own, so the group background shows through continuously.
+# Hover is paint-only: background, foreground and radius. Anything affecting
+# metrics is ignored, so a module cannot resize under the pointer.
+[style.hovered]
+background = "$overlay"
+
 [style.plain]
 foreground = "$text"
 padding = 12
@@ -268,6 +274,10 @@ icon = "disk"
 style = "plain"
 icon = "ethernet"
 
+[module.ethernet.states.hover]
+hover = true
+style = "hovered"
+
 [module.clock]
 style = "cool"
 icon = "clock"
@@ -278,6 +288,10 @@ icon_size = 18 # an explicit override; otherwise icons follow the font
 [module.offline]
 style = "plain"
 icon = "wifi-off"
+
+[module.offline.states.hover]
+hover = true
+style = "hovered"
 
 [module.muted]
 style = "warm"
@@ -296,6 +310,10 @@ icon = "headphones"
 [module.wifi]
 style = "plain"
 icon = "wifi"
+
+[module.wifi.states.hover]
+hover = true
+style = "hovered"
 
 [module.volume]
 style = "cool"

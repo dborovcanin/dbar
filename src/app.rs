@@ -65,6 +65,8 @@ pub struct App {
     height: u32,
     scale: i32,
 
+    /// Pointer position in surface coordinates, while it is over the bar.
+    pointer_at: Option<(f32, f32)>,
     configured: bool,
     dirty: bool,
     frame_pending: bool,
@@ -135,6 +137,7 @@ impl App {
             width: 0,
             height,
             scale: 1,
+            pointer_at: None,
             configured: false,
             dirty: true,
             frame_pending: false,
@@ -199,8 +202,14 @@ impl App {
         self.frame = match &self.fault {
             Some(message) => layout::fault(message, width, height, &mut self.text),
             None => {
-                let frame =
-                    layout::compute(&self.config, &self.blocks, width, height, &mut self.text);
+                let frame = layout::compute(
+                    &self.config,
+                    &self.blocks,
+                    width,
+                    height,
+                    &mut self.text,
+                    self.pointer_at,
+                );
                 self.warn_if_nothing_matched(&frame);
                 frame
             }
@@ -270,6 +279,19 @@ impl App {
             names.join(", ")
         );
         self.warned_names = Some(names);
+    }
+
+    /// Track the pointer, redrawing only when the module under it changes.
+    ///
+    /// Motion inside one module changes nothing that is drawn, and the bar is meant to sit
+    /// idle, so a redraw per motion event would be wasted work.
+    fn set_pointer(&mut self, at: Option<(f32, f32)>) {
+        let before = self.frame.hover_key(self.pointer_at);
+        let after = self.frame.hover_key(at);
+        self.pointer_at = at;
+        if before != after {
+            self.invalidate();
+        }
     }
 
     fn on_click(&mut self, x: f64, y: f64, button: u32) {
@@ -445,6 +467,10 @@ impl PointerHandler for App {
             }
             let (x, y) = event.position;
             match event.kind {
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                    self.set_pointer(Some((x as f32, y as f32)));
+                }
+                PointerEventKind::Leave { .. } => self.set_pointer(None),
                 PointerEventKind::Press { button, .. } => self.on_click(x, y, button),
                 PointerEventKind::Axis { vertical, .. } => {
                     // i3bar encodes scroll as buttons 4 (up) and 5 (down).

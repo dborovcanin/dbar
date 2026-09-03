@@ -187,11 +187,16 @@ style = "critical"
 [module.disk.states.full]
 urgent = true           # the provider's own alarm flag
 style = "critical"
+
+[module.wifi.states.hover]
+hover = true            # while the pointer is over the module
+style = "hovered"
 ```
 
 A rule matches when every condition it states holds: `below` and `above`
-compare against a percentage in the module's text, and `urgent` against the
-flag the provider sets. A rule stating no condition never fires.
+compare against a percentage in the module's text, `urgent` against the flag
+the provider sets, and `hover` against the pointer. A rule stating no condition
+never fires.
 
 Rules are checked tightest bound first, so `below = 15` wins over `below = 30`
 at 10%, whatever order they appear in the file. Urgent rules are checked before
@@ -199,6 +204,15 @@ value rules.
 
 A state overlays the module's own style rather than replacing it, so settings
 such as `icon` survive and a graded icon keeps grading while the colours change.
+
+`hover` is paint-only: it may change `background`, `foreground` and `radius`,
+and anything affecting metrics is taken from the unhovered style. A hover style
+that changed padding would resize the module under the pointer, which can move
+the pointer off it and oscillate.
+
+The bar redraws when the module under the pointer changes, not on every motion
+event, so it still idles at nothing while the pointer sits still or crosses one
+module.
 
 ### Separators
 

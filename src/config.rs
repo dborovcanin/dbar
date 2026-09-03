@@ -228,6 +228,9 @@ struct RawState {
     /// Matches when the provider marks the block urgent.
     #[serde(default)]
     urgent: bool,
+    /// Matches while the pointer is over the module.
+    #[serde(default)]
+    hover: bool,
     #[serde(flatten)]
     overrides: RawStyle,
 }
@@ -375,6 +378,7 @@ pub struct Module {
 #[derive(Debug, Clone, Copy)]
 pub struct StateRule {
     pub urgent: bool,
+    pub hover: bool,
     pub below: Option<f32>,
     pub above: Option<f32>,
     pub style: Style,
@@ -382,8 +386,11 @@ pub struct StateRule {
 
 impl StateRule {
     /// Every condition the rule states has to hold. A rule stating none never fires.
-    pub fn matches(&self, urgent: bool, value: Option<u8>) -> bool {
+    pub fn matches(&self, urgent: bool, hovered: bool, value: Option<u8>) -> bool {
         if self.urgent && !urgent {
+            return false;
+        }
+        if self.hover && !hovered {
             return false;
         }
         if let Some(limit) = self.below {
@@ -398,10 +405,12 @@ impl StateRule {
                 _ => return false,
             }
         }
-        self.urgent || self.below.is_some() || self.above.is_some()
+        self.urgent || self.hover || self.below.is_some() || self.above.is_some()
     }
 
-    /// How specific the rule is, for ordering. Urgent first, then the tightest bound.
+    /// How specific the rule is, for ordering. Urgent first, then the tightest bound; a
+    /// rule keyed only on hover carries no bound and so sorts last, leaving a warning or a
+    /// critical state visible while the pointer is over it.
     fn specificity(&self) -> (bool, f32) {
         (
             !self.urgent,
@@ -656,6 +665,7 @@ fn resolve_group(
                     .with_context(|| format!("in [module.{module_name}.states.{state_name}]"))?;
                 states.push(StateRule {
                     urgent: raw_state.urgent,
+                    hover: raw_state.hover,
                     below: raw_state.below,
                     above: raw_state.above,
                     style: state_style,

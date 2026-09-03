@@ -86,6 +86,14 @@ fn contains(x: f32, y: f32, rx: f32, ry: f32, rw: f32, rh: f32) -> bool {
 }
 
 impl Frame {
+    /// Identity of the module under a point, for spotting a hover change without laying
+    /// the bar out again. Motion within one module leaves this unchanged.
+    pub fn hover_key(&self, at: Option<(f32, f32)>) -> Option<(u32, u32)> {
+        let (x, y) = at?;
+        let module = self.module_at(x, y)?;
+        Some((module.x.to_bits(), module.width.to_bits()))
+    }
+
     /// Module under a point in surface coordinates.
     pub fn module_at(&self, x: f32, y: f32) -> Option<&PlacedModule> {
         for group in &self.groups {
@@ -123,6 +131,8 @@ const ICON_GAP: f32 = 0.4;
 struct SizedModule {
     width: f32,
     text_width: f32,
+    /// Paint overrides applied while the pointer is over this module.
+    hover_style: Option<Style>,
     /// Width of the icon plus its gap, or zero.
     icon_advance: f32,
     icon: Option<(Icon, usize)>,
@@ -176,12 +186,27 @@ fn size_group(
         }
         // One reading of the text serves both the state rules and the graded icons.
         let value = crate::status::percent(&content);
-        let style = module
-            .states
-            .iter()
-            .find(|rule| rule.matches(block.urgent, value))
-            .map(|rule| rule.style)
-            .unwrap_or(module.style);
+        let resolve = |hovered: bool| {
+            module
+                .states
+                .iter()
+                .find(|rule| rule.matches(block.urgent, hovered, value))
+                .map(|rule| rule.style)
+                .unwrap_or(module.style)
+        };
+        let style = resolve(false);
+
+        // Hover is deliberately paint-only. Letting it change padding or the icon would
+        // resize the module under the pointer, which can move the pointer off it and
+        // oscillate, so the metrics always come from the unhovered style.
+        let hovered = resolve(true);
+        let hover_style = (hovered != style).then_some(Style {
+            padding: style.padding,
+            min_width: style.min_width,
+            icon_size: style.icon_size,
+            icon: style.icon,
+            ..hovered
+        });
 
         let icon = style.icon.map(|icon| {
             let level = if icon.is_graded() {
@@ -200,6 +225,7 @@ fn size_group(
         modules.push(SizedModule {
             width,
             text_width,
+            hover_style,
             icon_advance,
             icon,
             text: content,
@@ -244,7 +270,7 @@ fn size_group(
     })
 }
 
-fn place(sized: SizedGroup, mut x: f32, height: f32) -> PlacedGroup {
+fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>) -> PlacedGroup {
     let group_x = x;
     let inner_y = sized.padding;
     let inner_h = (height - sized.padding * 2.0).max(0.0);
@@ -292,6 +318,19 @@ fn place(sized: SizedGroup, mut x: f32, height: f32) -> PlacedGroup {
             size: m.style.icon_size,
         });
 
+        // Hover is resolved here, against the final rectangle, so it is always the module
+        // actually under the pointer rather than one from a previous frame.
+        let over = pointer.is_some_and(|(px, py)| contains(px, py, x, inner_y, m.width, inner_h));
+        let paint = match (over, m.hover_style) {
+            (true, Some(hover)) => hover,
+            _ => m.style,
+        };
+        let (foreground, background) = if over && m.hover_style.is_some() {
+            (paint.foreground, paint.background)
+        } else {
+            (m.foreground, m.background)
+        };
+
         modules.push(PlacedModule {
             x,
             y: inner_y,
@@ -300,9 +339,9 @@ fn place(sized: SizedGroup, mut x: f32, height: f32) -> PlacedGroup {
             icon: placed_icon,
             text: m.text,
             text_x: content_x + m.icon_advance,
-            foreground: m.foreground,
-            background: m.background,
-            radius: m.style.radius,
+            foreground,
+            background,
+            radius: paint.radius,
             block: Some(m.block),
         });
         x += m.width;
@@ -327,6 +366,7 @@ pub fn compute(
     width: f32,
     height: f32,
     text: &mut dyn Measure,
+    pointer: Option<(f32, f32)>,
 ) -> Frame {
     let gap = cfg.bar.gap;
     let mut frame = Frame::default();
@@ -359,7 +399,7 @@ pub fn compute(
     for (groups, mut x) in sized.into_iter().zip(starts) {
         for group in groups {
             let w = group.width;
-            frame.groups.push(place(group, x, height));
+            frame.groups.push(place(group, x, height, pointer));
             x += w + gap;
         }
     }
