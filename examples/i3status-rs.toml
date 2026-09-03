@@ -1,0 +1,31 @@
+# A minimal i3status-rs config to get dbar showing something.
+# Copy to ~/.config/i3status-rust/config.toml, or point dbar at it:
+#
+#   [status]
+#   command = "i3status-rs"
+#   args = ["/path/to/i3status-rs.toml"]
+
+# "native" leaves colors and separators to dbar instead of baking them into the
+# protocol output.
+[theme]
+theme = "native"
+
+[icons]
+icons = "none"
+
+[[block]]
+block = "cpu"
+format = " CPU $utilization "
+
+[[block]]
+block = "memory"
+format = " RAM $mem_used_percents "
+
+[[block]]
+block = "sound"
+format = " VOL $volume "
+
+[[block]]
+block = "time"
+interval = 5
+format = " $timestamp.datetime(f:'%a %d %b %H:%M') "

@@ -1,0 +1,47 @@
+# dbar default configuration.
+#
+# Copy to ~/.config/dbar/config.toml and edit. Every table is optional; anything
+# left out falls back to the built-in defaults.
+
+[bar]
+height = 34
+position = "top"
+margin = 6
+gap = 6
+font = "sans-serif 10"
+
+[bar.background]
+# Fully transparent, so the groups below read as floating islands.
+color = "#00000000"
+radius = 0
+
+# The status provider. Any i3bar-compatible program works here.
+[status]
+command = "i3status-rs"
+args = []
+
+[colors]
+background = "#1e1e2e"
+surface = "#313244cc"
+text = "#cdd6f4"
+accent = "#89b4fa"
+warning = "#f9e2af"
+critical = "#f38ba8"
+
+[right]
+groups = ["system"]
+
+[style.default]
+foreground = "$text"
+padding = 8
+
+[group.system]
+# "*" takes every block the status provider emits, in the order it sends them.
+modules = ["*"]
+background = "$surface"
+radius = 10
+padding = 4
+spacing = 0
+
+[module.default]
+style = "default"

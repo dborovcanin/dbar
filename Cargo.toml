@@ -1,0 +1,24 @@
+[package]
+name = "dbar"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.104"
+calloop = "0.14.4"
+calloop-wayland-source = "0.4.1"
+cosmic-text = "0.19.0"
+env_logger = "0.11.11"
+log = "0.4.34"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+smithay-client-toolkit = "0.21.1"
+tiny-skia = "0.12.0"
+toml = "1.1.5"
+wayland-client = "0.31.15"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
