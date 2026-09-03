@@ -1,0 +1,250 @@
+# dbar - every separator shape, side by side.
+#
+#   dbar -c examples/showcase.toml
+#
+# One group per shape, each holding the same two blocks with strongly contrasting
+# backgrounds, so the transition between them is unmistakable. This doubles as
+# the reference for every configuration key dbar understands.
+#
+# Blocks are selected by the names i3status-rs emits ("0", "1", ...), so install
+# the matching provider config first:
+#
+#   cp examples/i3status-rs.toml ~/.config/i3status-rust/config.toml
+#
+# If a group's module list matches nothing, dbar logs a warning naming the block
+# names the provider is really sending. Run with RUST_LOG=dbar=debug to see it.
+
+# ---------------------------------------------------------------------------
+# Bar surface
+# ---------------------------------------------------------------------------
+
+[bar]
+height = 36
+position = "top"        # "top" | "bottom"
+margin = 8              # gap between the bar and the screen edge; floats the bar
+gap = 12                # horizontal space between groups
+font = "Liberation Sans 10"
+exclusive = true        # reserve the space so windows do not sit under the bar
+
+[bar.background]
+# Drawn under every group. Transparent here, so the groups read as separate
+# floating islands.
+color = "#00000000"     # the last two hex digits are alpha
+radius = 0
+
+[status]
+command = "i3status-rs"
+# i3status-rs resolves a bare filename against $XDG_CONFIG_HOME/i3status-rust and
+# ignores the working directory, so pass an absolute path or leave this empty.
+args = []
+
+# ---------------------------------------------------------------------------
+# Named colors, referenced elsewhere as "$name"
+# ---------------------------------------------------------------------------
+
+[colors]
+background = "#1e1e2e"
+surface = "#313244cc"   # alpha cc, so SwayFX blur shows through
+text = "#cdd6f4"
+subtext = "#a6adc8"
+accent = "#89b4fa"
+warning = "#f9e2af"
+critical = "#f38ba8"
+
+# ---------------------------------------------------------------------------
+# Positions
+#
+# Each position holds an ordered list of groups, so one position can carry
+# several islands.
+# ---------------------------------------------------------------------------
+
+[left]
+groups = ["line", "slant"]
+
+[center]
+groups = ["chevron", "chevron_mirrored"]
+
+[right]
+groups = ["notch", "round", "curve"]
+
+# ---------------------------------------------------------------------------
+# Reusable styles
+#
+# Resolution order: built-in defaults, then the named style a module picks, then
+# that module's own inline keys.
+# ---------------------------------------------------------------------------
+
+[style.default]
+foreground = "$text"
+padding = 10
+
+[style.leading]
+background = "$accent"
+foreground = "$background"
+padding = 10
+min_width = 90
+
+[style.trailing]
+background = "$warning"
+foreground = "$background"
+padding = 10
+
+[style.warning]
+background = "$warning"
+foreground = "$background"
+padding = 10
+
+[style.critical]
+background = "$critical"
+foreground = "$background"
+padding = 10
+
+# ---------------------------------------------------------------------------
+# Groups, one per separator shape
+#
+# A separator is a transition between two neighbouring modules, drawn as vector
+# geometry rather than as a font glyph:
+#
+#   shape      none | line | slant | chevron | notch | round | curve
+#   width      horizontal space the transition occupies
+#   direction  "right" | "left"; mirrors the shape
+#   color      previous | next | foreground | background, or a color / "$name"
+#   overlap    bleed past each side, hiding antialiasing seams
+#
+# With shape = "none" the group falls back to its own `spacing` for the gap.
+#
+# Outer corners are a separate concept from the separators between modules:
+#
+#   left/right "round" | "none"
+#   radius     defaults to the group's own radius
+# ---------------------------------------------------------------------------
+
+# A hairline. It is never mirrored, and takes the separator color itself rather
+# than a neighbouring background.
+[group.line]
+modules = ["0", "1"]
+background = "$surface"
+radius = 12
+padding = 0
+spacing = 0
+
+[group.line.separator]
+shape = "line"
+width = 13
+direction = "right"
+color = "$background"
+overlap = 0
+
+# A squared trailing edge, to show that the two outer corners are independent.
+[group.line.edges]
+left = "round"
+right = "none"
+radius = 12
+
+[group.slant]
+modules = ["0", "1"]
+background = "$surface"
+radius = 12
+padding = 0
+spacing = 0
+
+[group.slant.separator]
+shape = "slant"
+width = 12
+direction = "right"
+color = "previous"
+overlap = 1
+
+# The classic Powerline wedge: the previous module's background, pointing into
+# the next one.
+[group.chevron]
+modules = ["0", "1"]
+background = "$surface"
+radius = 12
+padding = 0
+spacing = 0
+
+[group.chevron.separator]
+shape = "chevron"
+width = 12
+direction = "right"
+color = "previous"
+overlap = 1
+
+# The same shape mirrored, as a right-hand group would use it.
+[group.chevron_mirrored]
+modules = ["0", "1"]
+background = "$surface"
+radius = 12
+padding = 0
+spacing = 0
+
+[group.chevron_mirrored.separator]
+shape = "chevron"
+width = 12
+direction = "left"
+color = "previous"
+overlap = 1
+
+[group.notch]
+modules = ["0", "1"]
+background = "$surface"
+radius = 12
+padding = 0
+spacing = 0
+
+[group.notch.separator]
+shape = "notch"
+width = 12
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.round]
+modules = ["0", "1"]
+background = "$surface"
+radius = 18
+padding = 0
+spacing = 0
+
+[group.round.separator]
+shape = "round"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.round.edges]
+left = "round"
+right = "round"
+radius = 18
+
+[group.curve]
+modules = ["0", "1"]
+background = "$surface"
+radius = 12
+padding = 0
+spacing = 0
+
+[group.curve.separator]
+shape = "curve"
+width = 14
+direction = "left"
+color = "previous"
+overlap = 1
+
+# ---------------------------------------------------------------------------
+# Modules
+#
+# "style" names a [style.*] table; any other key overrides it for this module.
+# Module styles are keyed by block name, so the same two blocks carry the same
+# pair of colors through every group above.
+# ---------------------------------------------------------------------------
+
+[module.0]
+style = "leading"
+
+# Inline overrides on top of a named style.
+[module.1]
+style = "trailing"
+foreground = "$background"

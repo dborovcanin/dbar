@@ -5,7 +5,8 @@
 
 use crate::color::Color;
 use crate::config::{
-    Config, Direction, Edges, Group as GroupCfg, Separator, SeparatorColor, SeparatorShape, Style,
+    Config, Direction, EdgeShape, Edges, Group as GroupCfg, Separator, SeparatorColor,
+    SeparatorShape, Style,
 };
 use crate::status::Block;
 use crate::text::TextRenderer;
@@ -21,7 +22,8 @@ pub struct PlacedModule {
     pub background: Color,
     pub radius: f32,
     /// Index into the block list this module was built from, for click routing.
-    pub block: usize,
+    /// `None` for synthetic modules that no block produced.
+    pub block: Option<usize>,
 }
 
 /// A transition drawn in the gap between two neighbouring modules.
@@ -101,6 +103,9 @@ struct SizedModule {
     background: Color,
     block: usize,
 }
+
+/// Colour used for messages dbar generates itself, matching the i3bar convention.
+const FAULT_COLOR: Color = Color::rgba(0xf3, 0x8b, 0xa8, 0xff);
 
 /// Pick the blocks a group shows, in the order the group asks for.
 fn select_blocks<'a>(group: &GroupCfg, blocks: &'a [Block]) -> Vec<(usize, &'a Block, Style)> {
@@ -227,7 +232,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32) -> PlacedGroup {
             foreground: m.foreground,
             background: m.background,
             radius: m.style.radius,
-            block: m.block,
+            block: Some(m.block),
         });
         x += m.width;
     }
@@ -289,4 +294,42 @@ pub fn compute(
     }
 
     frame
+}
+
+/// A frame showing a single message from dbar itself.
+///
+/// Provider failures bypass the group configuration entirely: a fault reported as an ordinary
+/// block would be dropped by any group that selects modules by name, which is exactly when the
+/// message matters most.
+pub fn fault(message: &str, width: f32, height: f32, text: &mut TextRenderer) -> Frame {
+    let padding = 10.0;
+    let module_width = text.measure(message) + padding * 2.0;
+    let x = (width - module_width).max(0.0);
+
+    Frame {
+        groups: vec![PlacedGroup {
+            x,
+            y: 0.0,
+            width: module_width,
+            height,
+            background: Color::TRANSPARENT,
+            edges: Edges {
+                left: EdgeShape::None,
+                right: EdgeShape::None,
+                radius: 0.0,
+            },
+            modules: vec![PlacedModule {
+                x,
+                y: 0.0,
+                width: module_width,
+                height,
+                text: message.to_string(),
+                foreground: FAULT_COLOR,
+                background: Color::TRANSPARENT,
+                radius: 0.0,
+                block: None,
+            }],
+            separators: Vec::new(),
+        }],
+    }
 }

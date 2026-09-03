@@ -55,6 +55,10 @@ pub struct App {
     provider: I3BarProvider,
     blocks: Vec<Block>,
     frame: Frame,
+    /// Set when the status provider itself has failed; shown in place of the groups.
+    fault: Option<String>,
+    /// Block names from the last "nothing matched" warning, so it is not repeated per redraw.
+    warned_names: Option<Vec<String>>,
 
     /// Surface size in logical pixels.
     width: u32,
@@ -126,6 +130,8 @@ impl App {
             provider,
             blocks: Vec::new(),
             frame: Frame::default(),
+            fault: None,
+            warned_names: None,
             width: 0,
             height,
             scale: 1,
@@ -150,11 +156,13 @@ impl App {
             }
             StatusEvent::Blocks(blocks) => {
                 self.blocks = blocks;
+                self.fault = None;
                 self.invalidate();
             }
             StatusEvent::Stopped(reason) => {
                 log::error!("status provider stopped: {reason}");
-                self.blocks = vec![Block::error(format!("status provider stopped: {reason}"))];
+                self.blocks.clear();
+                self.fault = Some(format!("status provider stopped: {reason}"));
                 self.invalidate();
             }
         }
@@ -182,13 +190,16 @@ impl App {
     fn draw(&mut self) -> Result<()> {
         let scale = self.scale.max(1) as f32;
         self.text.set_scale(scale);
-        self.frame = layout::compute(
-            &self.config,
-            &self.blocks,
-            self.width as f32,
-            self.height as f32,
-            &mut self.text,
-        );
+        let (width, height) = (self.width as f32, self.height as f32);
+        self.frame = match &self.fault {
+            Some(message) => layout::fault(message, width, height, &mut self.text),
+            None => {
+                let frame =
+                    layout::compute(&self.config, &self.blocks, width, height, &mut self.text);
+                self.warn_if_nothing_matched(&frame);
+                frame
+            }
+        };
 
         log::debug!(
             "draw: {}x{} scale {}, {} blocks -> {} groups, {} modules",
@@ -237,6 +248,31 @@ impl App {
         Ok(())
     }
 
+    /// Point out a group list that selects nothing, which would otherwise leave a blank bar
+    /// with no explanation of why.
+    fn warn_if_nothing_matched(&mut self, frame: &Frame) {
+        let drawn: usize = frame.groups.iter().map(|g| g.modules.len()).sum();
+        if drawn > 0 || self.blocks.is_empty() {
+            self.warned_names = None;
+            return;
+        }
+        let names: Vec<String> = self
+            .blocks
+            .iter()
+            .map(|b| b.name.clone().unwrap_or_else(|| "<unnamed>".to_string()))
+            .collect();
+        if self.warned_names.as_ref() == Some(&names) {
+            return;
+        }
+        log::warn!(
+            "no configured module matched any of the {} block(s) the status provider is \
+             sending ({}); groups select blocks by name, and modules = [\"*\"] takes them all",
+            names.len(),
+            names.join(", ")
+        );
+        self.warned_names = Some(names);
+    }
+
     fn on_click(&mut self, x: f64, y: f64, button: u32) {
         let Some(i3_button) = i3bar_button(button) else {
             return;
@@ -249,7 +285,7 @@ impl App {
             return;
         };
         let (mx, my, mw, mh) = (module.x, module.y, module.width, module.height);
-        let Some(block) = self.blocks.get(module.block) else {
+        let Some(block) = module.block.and_then(|i| self.blocks.get(i)) else {
             return;
         };
 

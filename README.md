@@ -57,7 +57,14 @@ exec_always pkill -x dbar; dbar
 
 ## Configuration
 
-See [examples/config.toml](examples/config.toml) for the annotated default.
+[examples/config.toml](examples/config.toml) is the annotated default, and is
+also what dbar compiles in and uses when no config file exists.
+[examples/showcase.toml](examples/showcase.toml) exercises every key and every
+separator shape across all three positions:
+
+```sh
+dbar -c examples/showcase.toml
+```
 
 ```toml
 [bar]
@@ -140,3 +147,9 @@ style = "default"
 
 Block names come from the provider. `i3status-rs` numbers its blocks by
 default; set `name` on a block in its config to address it here.
+
+If a group's module list matches nothing, dbar logs a warning naming the block
+names the provider is actually sending, rather than leaving a blank bar with no
+explanation. Failures of the provider itself bypass the group configuration and
+are always drawn, so they cannot be hidden by a module list that filters them
+out.

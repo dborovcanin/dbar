@@ -46,15 +46,6 @@ impl Block {
         }
         Cow::Owned(strip_pango(&self.full_text))
     }
-
-    /// A synthetic block used to surface provider failures on the bar itself.
-    pub fn error(text: impl Into<String>) -> Block {
-        Block {
-            full_text: text.into(),
-            color: Some("#f38ba8".to_string()),
-            ..Block::default()
-        }
-    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
