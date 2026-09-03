@@ -864,7 +864,9 @@ colour modes and an overlap that hides antialiasing seams; per-side group edges
 with contents clipped to the group outline; reusable styles and named colours;
 a built-in vector icon set, including icons graded over five steps by a
 percentage read from the module's own text; module state styling keyed on a
-value or on the provider's urgent flag.
+value, on the provider's urgent flag, or on the pointer; workspaces and the
+focused window over the compositor's own IPC, with workspaces expanding into one
+clickable rectangle each.
 
 Two things were added that the specification did not anticipate:
 
@@ -900,11 +902,12 @@ needs per-module toggle state and somewhere to put the second form.
 does not yet do; theme files; derived colours such as lighten and darken.
 
 **On-click actions.** Running a command on click or scroll, per §10, instead of
-or alongside forwarding to the provider.
+or alongside forwarding to the provider. Workspace switching already does this
+for its own case, so the mechanism is half built.
 
-**Workspaces and focused window.** A Sway IPC subscription, workspace buttons
-that switch on click, and a window title module. Also the source of application
-identity, and so a prerequisite for application icons.
+**Application identity.** The focused window's `app_id` is available over the
+same IPC connection the window title arrives on, and is the prerequisite for
+application icons.
 
 **System tray.** StatusNotifierItem over D-Bus. Tray icons arrive as pixmaps or
 as icon-theme names, so this needs the raster arm of the icon artwork and, for
@@ -925,3 +928,7 @@ moving.
   warning.
 - Text is not clipped to the group outline. Backgrounds and separators are;
   text sits inside the padding, where it has not mattered.
+- No truncation. A centred run is now kept clear of its neighbours rather than
+  centred blindly, but nothing shortens a module that does not fit: `max_width`,
+  which §8 lists, is unimplemented, and a window title is unbounded, so enough
+  content still collides.

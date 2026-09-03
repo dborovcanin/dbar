@@ -33,6 +33,7 @@ use crate::config::{Config, Edge};
 use crate::layout::{self, Frame};
 use crate::render;
 use crate::status::{Block, ClickEvent, I3BarProvider, StatusEvent};
+use crate::sway::{self, SwayEvent, SwayState};
 use crate::text::TextRenderer;
 
 /// Linux input button codes, as delivered by `wl_pointer`.
@@ -54,6 +55,8 @@ pub struct App {
     text: TextRenderer,
     provider: I3BarProvider,
     blocks: Vec<Block>,
+    /// Workspaces and the focused window, when a compositor is talking to us.
+    sway: SwayState,
     frame: Frame,
     /// Set when the status provider itself has failed; shown in place of the groups.
     fault: Option<String>,
@@ -133,6 +136,7 @@ impl App {
             text,
             provider,
             blocks: Vec::new(),
+            sway: SwayState::default(),
             frame: Frame::default(),
             fault: None,
             warned_names: None,
@@ -170,6 +174,22 @@ impl App {
                 log::error!("status provider stopped: {reason}");
                 self.blocks.clear();
                 self.fault = Some(format!("status provider stopped: {reason}"));
+                self.invalidate();
+            }
+        }
+    }
+
+    /// Handle one message from the compositor.
+    pub fn on_sway(&mut self, event: SwayEvent) {
+        match event {
+            SwayEvent::State(state) => {
+                self.sway = *state;
+                self.invalidate();
+            }
+            SwayEvent::Stopped(reason) => {
+                // The bar keeps working without the compositor; only its modules go quiet.
+                log::warn!("sway IPC stopped: {reason}");
+                self.sway = SwayState::default();
                 self.invalidate();
             }
         }
@@ -242,6 +262,7 @@ impl App {
                 let frame = layout::compute(
                     &self.config,
                     &self.blocks,
+                    &self.sway,
                     width,
                     height,
                     &mut self.text,
@@ -342,6 +363,13 @@ impl App {
         let Some(module) = self.frame.module_at(x as f32, y as f32) else {
             return;
         };
+        // A module backed by the compositor acts on its own rather than forwarding.
+        if let Some(command) = module.command.clone() {
+            if button == 1 {
+                sway::run_command(&command);
+            }
+            return;
+        }
         let (mx, my, mw, mh) = (module.x, module.y, module.width, module.height);
         let Some(block) = module.block.and_then(|i| self.blocks.get(i)) else {
             return;

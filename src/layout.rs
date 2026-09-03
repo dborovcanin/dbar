@@ -6,10 +6,11 @@
 use crate::color::Color;
 use crate::config::{
     Config, Direction, EdgeShape, Edges, Group as GroupCfg, Module as ModuleCfg, Separator,
-    SeparatorColor, SeparatorShape, Style,
+    SeparatorColor, SeparatorShape, Source, StateFlags, Style,
 };
 use crate::icon::{self, Icon};
 use crate::status::Block;
+use crate::sway::SwayState;
 
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
 ///
@@ -46,6 +47,8 @@ pub struct PlacedModule {
     /// Index into the block list this module was built from, for click routing.
     /// `None` for synthetic modules that no block produced.
     pub block: Option<usize>,
+    /// A compositor command to run instead of forwarding the click to the provider.
+    pub command: Option<String>,
 }
 
 /// A transition drawn in the gap between two neighbouring modules.
@@ -128,6 +131,16 @@ struct SizedGroup {
 /// Space between an icon and the text beside it, as a fraction of the icon size.
 const ICON_GAP: f32 = 0.4;
 
+/// A colour the provider set on a block, if it set one.
+fn block_color(
+    blocks: &[Block],
+    index: Option<usize>,
+    pick: impl Fn(&Block) -> Option<&str>,
+) -> Option<Color> {
+    let block = blocks.get(index?)?;
+    Color::parse(pick(block)?).ok()
+}
+
 struct SizedModule {
     width: f32,
     text_width: f32,
@@ -140,47 +153,119 @@ struct SizedModule {
     style: Style,
     foreground: Color,
     background: Color,
-    block: usize,
+    block: Option<usize>,
+    command: Option<String>,
 }
 
 /// Colour used for messages dbar generates itself, matching the i3bar convention.
 const FAULT_COLOR: Color = Color::rgba(0xf3, 0x8b, 0xa8, 0xff);
 
-/// Pick the blocks a group shows, in the order the group asks for.
-fn select_blocks<'a, 'g>(
-    group: &'g GroupCfg,
-    blocks: &'a [Block],
-) -> Vec<(usize, &'a Block, &'g ModuleCfg)> {
+/// One thing a group will draw, before it has been measured.
+struct Candidate<'g> {
+    module: &'g ModuleCfg,
+    text: String,
+    flags: StateFlags,
+    /// Index of the block behind it, for routing clicks back to the provider.
+    block: Option<usize>,
+    /// A compositor command to run on click instead.
+    command: Option<String>,
+}
+
+/// Everything a group shows, in the order the group asks for.
+///
+/// A module drawn from the compositor expands here: `sway:workspaces` becomes one candidate
+/// per workspace, so each is its own rectangle with its own state and click target.
+fn collect<'g>(group: &'g GroupCfg, blocks: &[Block], sway: &SwayState) -> Vec<Candidate<'g>> {
     let mut out = Vec::new();
+
     if group.wildcard {
         if let Some(module) = group.modules.first() {
-            out.extend(blocks.iter().enumerate().map(|(i, b)| (i, b, module)));
+            out.extend(blocks.iter().enumerate().map(|(i, b)| Candidate {
+                module,
+                text: b.display_text().into_owned(),
+                flags: StateFlags {
+                    urgent: b.urgent,
+                    ..StateFlags::default()
+                },
+                block: Some(i),
+                command: None,
+            }));
         }
         return out;
     }
+
     for module in &group.modules {
-        for (i, block) in blocks.iter().enumerate() {
-            if block.selector() == Some(module.name.as_str()) {
-                out.push((i, block, module));
+        match module.source {
+            Source::Provider => {
+                for (i, block) in blocks.iter().enumerate() {
+                    if block.selector() == Some(module.name.as_str()) {
+                        out.push(Candidate {
+                            module,
+                            text: block.display_text().into_owned(),
+                            flags: StateFlags {
+                                urgent: block.urgent,
+                                ..StateFlags::default()
+                            },
+                            block: Some(i),
+                            command: None,
+                        });
+                    }
+                }
+            }
+            Source::SwayWindow => {
+                if let Some(title) = &sway.window {
+                    out.push(Candidate {
+                        module,
+                        text: title.clone(),
+                        flags: StateFlags::default(),
+                        block: None,
+                        command: None,
+                    });
+                }
+            }
+            Source::SwayWorkspaces => {
+                for workspace in &sway.workspaces {
+                    out.push(Candidate {
+                        module,
+                        text: workspace.name.clone(),
+                        flags: StateFlags {
+                            urgent: workspace.urgent,
+                            focused: workspace.focused,
+                            visible: workspace.visible,
+                        },
+                        block: None,
+                        // Switching is what clicking a workspace is for.
+                        command: Some(format!("workspace {}", quote(&workspace.name))),
+                    });
+                }
             }
         }
     }
     out
 }
 
+/// Wrap a workspace name for the compositor's command parser.
+fn quote(name: &str) -> String {
+    format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 fn size_group(
     group: &GroupCfg,
     blocks: &[Block],
+    sway: &SwayState,
     height: f32,
     text: &mut dyn Measure,
 ) -> Option<SizedGroup> {
     let mut modules = Vec::new();
-    for (index, block, module) in select_blocks(group, blocks) {
+    for candidate in collect(group, blocks, sway) {
+        let Candidate {
+            module,
+            text: content,
+            flags,
+            block: index,
+            command,
+        } = candidate;
         // The i3bar protocol uses an empty `full_text` to mean "hide this block".
-        if block.full_text.is_empty() {
-            continue;
-        }
-        let content = block.display_text().into_owned();
         if content.is_empty() {
             continue;
         }
@@ -190,7 +275,7 @@ fn size_group(
             module
                 .states
                 .iter()
-                .find(|rule| rule.matches(block.urgent, hovered, value))
+                .find(|rule| rule.matches(flags, hovered, value, &content))
                 .map(|rule| rule.style)
                 .unwrap_or(module.style)
         };
@@ -230,17 +315,12 @@ fn size_group(
             icon,
             text: content,
             style,
-            foreground: block
-                .color
-                .as_deref()
-                .and_then(|c| Color::parse(c).ok())
+            foreground: block_color(blocks, index, |b| b.color.as_deref())
                 .unwrap_or(style.foreground),
-            background: block
-                .background
-                .as_deref()
-                .and_then(|c| Color::parse(c).ok())
+            background: block_color(blocks, index, |b| b.background.as_deref())
                 .unwrap_or(style.background),
             block: index,
+            command,
         });
     }
     if modules.is_empty() {
@@ -342,7 +422,8 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             foreground,
             background,
             radius: paint.radius,
-            block: Some(m.block),
+            block: m.block,
+            command: m.command,
         });
         x += m.width;
     }
@@ -363,6 +444,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
 pub fn compute(
     cfg: &Config,
     blocks: &[Block],
+    sway: &SwayState,
     width: f32,
     height: f32,
     text: &mut dyn Measure,
@@ -378,7 +460,7 @@ pub fn compute(
         .map(|groups| {
             groups
                 .iter()
-                .filter_map(|g| size_group(g, blocks, height, text))
+                .filter_map(|g| size_group(g, blocks, sway, height, text))
                 .collect()
         })
         .collect();
@@ -390,11 +472,26 @@ pub fn compute(
         groups.iter().map(|g| g.width).sum::<f32>() + gap * (groups.len() - 1) as f32
     };
 
-    let starts = [
-        0.0,
-        ((width - run_width(&sized[1])) / 2.0).max(0.0),
-        (width - run_width(&sized[2])).max(0.0),
-    ];
+    // The centre run is centred on the bar, but pushed aside rather than allowed to sit on
+    // top of its neighbours: a wide right-hand run would otherwise overlap a centred clock
+    // long before the bar is actually full.
+    let (left_width, centre_width, right_width) = (
+        run_width(&sized[0]),
+        run_width(&sized[1]),
+        run_width(&sized[2]),
+    );
+    let right_start = (width - right_width).max(0.0);
+    let centre_lower = if left_width > 0.0 {
+        left_width + gap
+    } else {
+        0.0
+    };
+    let centre_upper = (right_start - gap - centre_width).max(centre_lower);
+    let centre_start = ((width - centre_width) / 2.0)
+        .max(0.0)
+        .clamp(centre_lower, centre_upper);
+
+    let starts = [0.0, centre_start, right_start];
 
     for (groups, mut x) in sized.into_iter().zip(starts) {
         for group in groups {
@@ -435,6 +532,7 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
                 width: module_width,
                 height,
                 icon: None,
+                command: None,
                 text: message.to_string(),
                 text_x: x + padding,
                 foreground: FAULT_COLOR,

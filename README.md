@@ -167,6 +167,42 @@ different face, leaving them mismatched in weight and size.
 This route leaves the provider choosing which glyph each block gets, and ties
 icon size to the font size. dbar's own icons are independent of both.
 
+### Workspaces and the focused window
+
+These come from the compositor rather than the status provider, so their modules
+say where they are from:
+
+```toml
+[module.workspaces]
+source = "sway:workspaces"
+style = "plain"
+
+[module.workspaces.states.focused]
+focused = true
+style = "accent"
+
+[module.workspaces.states.urgent]
+urgent = true
+style = "warning"
+
+[module.title]
+source = "sway:window"
+style = "plain"
+```
+
+A `sway:workspaces` module expands into one rectangle per workspace, each with
+its own state and its own click target - clicking switches to that workspace.
+`focused` and `visible` join `urgent` as state conditions.
+
+dbar speaks the compositor's IPC directly, so this costs no dependencies. It is
+optional: without a compositor to talk to, these modules simply show nothing and
+the rest of the bar is unaffected.
+
+A centred group is centred between its neighbours rather than on the bar, so a
+wide right-hand run pushes it aside instead of being drawn over it. Nothing
+truncates, though: window titles have no length limit and `max_width` is not
+implemented, so enough content still collides.
+
 ### Module states
 
 A module can restyle itself conditionally:
@@ -191,12 +227,23 @@ style = "critical"
 [module.wifi.states.hover]
 hover = true            # while the pointer is over the module
 style = "hovered"
+
+[module.volume.states.muted]
+contains = "MUTED"      # a substring of the module's own text
+icon = "volume-muted"
 ```
 
 A rule matches when every condition it states holds: `below` and `above`
-compare against a percentage in the module's text, `urgent` against the flag
-the provider sets, and `hover` against the pointer. A rule stating no condition
-never fires.
+compare against a percentage in the module's text, `contains` against the text
+itself, `urgent` against the flag the provider sets, `hover` against the
+pointer, and `focused` and `visible` against a workspace. A rule stating no
+condition never fires.
+
+`contains` is what lets one module cover a state the provider only spells out
+in words - a muted volume or a charging battery - instead of needing a second
+module for each. Give the provider distinct wording per state where it can, as
+`charging_format` does, so the match does not depend on which icon set is in
+use.
 
 Rules are checked tightest bound first, so `below = 15` wins over `below = 30`
 at 10%, whatever order they appear in the file. Urgent rules are checked before

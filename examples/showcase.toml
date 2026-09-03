@@ -26,6 +26,16 @@
 #   blocks = ["cpu", "memory", ...]
 # ---------------------------------------------------------------------------
 
+[bar]
+height = 34
+position = "top"
+margin = 6
+gap = 6
+# Kept font-agnostic, since this is the built-in default. Icon sizes follow it
+# unless [bar] icon_size says otherwise.
+font = "sans-serif 15"
+icon_size = 20
+
 [status]
 command = "i3status-rs"
 
@@ -44,8 +54,8 @@ name = "cpu"
 block = "cpu"
 format = " $icon $utilization "
 
-# format_alt toggles on click, and dbar forwards clicks, so this module expands
-# to used/total when clicked and collapses again.
+# format_alt toggles on click, and dbar forwards clicks, so this expands to
+# used/total when clicked and collapses again.
 [[status.block]]
 name = "memory"
 block = "memory"
@@ -58,25 +68,11 @@ block = "disk_space"
 path = "/"
 format = " $icon $free "
 
-# Signal strength, so dbar's graded wifi icon has a percentage to read.
+# Signal strength, so the graded wifi icon has a percentage to read.
 [[status.block]]
 name = "wifi"
 block = "net"
 format = " $icon $signal_strength "
-
-# Placeholders, so the showcase can demonstrate icons that nothing selects
-# automatically yet. A real config would drive these from actual state.
-[[status.block]]
-name = "ethernet"
-block = "custom"
-command = "echo LAN"
-interval = 3600
-
-[[status.block]]
-name = "offline"
-block = "custom"
-command = "echo offline"
-interval = 3600
 
 [[status.block]]
 name = "volume"
@@ -84,34 +80,18 @@ block = "sound"
 format = " $icon $volume "
 
 [[status.block]]
-name = "muted"
-block = "custom"
-command = "echo muted"
-interval = 3600
-
-[[status.block]]
-name = "headphones"
-block = "custom"
-command = "echo headphones"
-interval = 3600
-
-[[status.block]]
 name = "brightness"
 block = "backlight"
 format = " $icon $brightness "
 
+# Each state gets its own wording, so the module can tell them apart without
+# depending on which icon set is in use.
 [[status.block]]
 name = "battery"
 block = "battery"
 format = " $icon $percentage "
-
-# Reports a percentage, because the charging icon grades on it just as the plain
-# battery icon does.
-[[status.block]]
-name = "charging"
-block = "custom"
-command = "echo 72%"
-interval = 3600
+charging_format = " CHARGING $percentage "
+full_format = " $icon full "
 
 [[status.block]]
 name = "clock"
@@ -143,13 +123,13 @@ critical = "#f38ba8"
 # ---------------------------------------------------------------------------
 
 [left]
-groups = ["system", "network"]
+groups = ["desktop", "window"]
 
 [center]
-groups = ["media"]
+groups = ["time"]
 
 [right]
-groups = ["power", "time"]
+groups = ["system", "media", "power"]
 
 # ---------------------------------------------------------------------------
 # Reusable styles
@@ -224,13 +204,37 @@ padding = 9
 #   radius     defaults to the group's own radius
 # ---------------------------------------------------------------------------
 
+# Workspaces and the focused window come from the compositor rather than the
+# status provider, so their modules say where they are from. A workspace module
+# expands into one rectangle per workspace, each clickable.
+[group.desktop]
+modules = ["workspaces"]
+background = "$surface"
+radius = 12
+padding = 3
+spacing = 3
+
+[group.window]
+modules = ["title"]
+background = "$surface"
+radius = 12
+padding = 0
+spacing = 0
+
+[group.time]
+modules = ["clock"]
+background = "$surface"
+radius = 12
+padding = 0
+spacing = 0
+
 # CPU, memory and disk, joined by slanted transitions.
 [group.system]
 modules = ["cpu", "memory", "disk"]
 background = "$surface"
 radius = 12
 padding = 0
-spacing = 0                         # only used when the group has no separator
+spacing = 0             # only used when the group has no separator
 
 [group.system.separator]
 shape = "slant"
@@ -241,50 +245,29 @@ overlap = 1
 
 [group.system.edges]
 left = "round"
-right = "none" # a squared trailing edge
+right = "none"          # a squared trailing edge
 radius = 12
 
-# Connectivity. A hairline divides rather than transitioning between two
-# regions, so it takes the separator color itself and is never mirrored. It
-# suits modules that share a background: the group reads as one surface with a
-# divider in it, which is why these modules carry no background of their own.
-[group.network]
-modules = ["wifi", "ethernet", "offline"]
+# Wireless, volume and brightness share one surface, divided by hairlines. A
+# hairline divides rather than transitioning between two regions, so it takes
+# the separator colour itself and suits modules with no background of their own.
+[group.media]
+modules = ["wifi", "volume", "brightness"]
 background = "$surface"
 radius = 12
 padding = 0
 spacing = 0
 
-[group.network.separator]
+[group.media.separator]
 shape = "line"
 width = 11
 direction = "right"
 color = "$subtext"
 overlap = 0
 
-# Volume, joined by a rounded lobe.
-[group.media]
-modules = ["volume", "muted", "headphones"]
-background = "$surface"
-radius = 18
-padding = 0
-spacing = 0
-
-[group.media.separator]
-shape = "round"
-width = 13
-direction = "right"
-color = "previous"
-overlap = 1
-
-[group.media.edges]
-left = "round"
-right = "round"
-radius = 18
-
 # Right-hand groups conventionally point the other way.
 [group.power]
-modules = ["brightness", "battery", "charging"]
+modules = ["battery"]
 background = "$surface"
 radius = 12
 padding = 0
@@ -297,14 +280,6 @@ direction = "left"
 color = "previous"
 overlap = 1
 
-# A single module has no interior gap, so no separator is drawn.
-[group.time]
-modules = ["clock"]
-background = "$surface"
-radius = 12
-padding = 0
-spacing = 0
-
 # ---------------------------------------------------------------------------
 # Modules
 #
@@ -313,7 +288,28 @@ spacing = 0
 # share one style; here each block appears once.
 # ---------------------------------------------------------------------------
 
-# Fixed icons.
+# From the compositor. Clicking a workspace switches to it.
+[module.workspaces]
+source = "sway:workspaces"
+style = "plain"
+padding = 9
+
+[module.workspaces.states.focused]
+focused = true
+style = "cool"
+
+[module.workspaces.states.urgent]
+urgent = true
+style = "warning"
+
+[module.title]
+source = "sway:window"
+style = "plain"
+
+[module.clock]
+style = "cool"
+icon = "clock"
+
 [module.cpu]
 style = "cool"
 icon = "cpu"
@@ -326,75 +322,41 @@ icon = "memory"
 style = "mint"
 icon = "disk"
 
-[module.ethernet]
-style = "plain"
-icon = "ethernet"
-
-[module.ethernet.states.hover]
-hover = true
-style = "hovered"
-
-[module.clock]
-style = "cool"
-icon = "clock"
-icon_size = 18 # an explicit override; otherwise icons follow the font
-
-# The off states. Nothing picks these automatically yet, so they are named
-# outright; a value-driven variant is what module state styling will add.
-[module.offline]
-style = "plain"
-icon = "wifi-off"
-
-[module.offline.states.hover]
-hover = true
-style = "hovered"
-
-[module.muted]
-style = "warm"
-icon = "volume-muted"
-
-[module.charging]
-style = "cool"
-icon = "battery-charging"
-
-[module.headphones]
-style = "mint"
-icon = "headphones"
-
-# Graded icons. Each reads a percentage out of the text beside it and picks one
-# of five steps; a module whose text carries no percentage stays at the lowest.
+# Graded icons pick one of five steps from a percentage in their own text.
 [module.wifi]
 style = "plain"
 icon = "wifi"
 
-[module.wifi.states.hover]
-hover = true
-style = "hovered"
-
 [module.volume]
-style = "cool"
+style = "plain"
 icon = "volume"
 
+# The provider spells the muted state into the text, and a state rule reads it
+# there, so one module covers both cases instead of two modules covering one
+# each. Note this wording comes from the "none" icon set.
+[module.volume.states.muted]
+contains = "MUTED"
+icon = "volume-muted"
+
 [module.brightness]
-style = "mint"
+style = "plain"
 icon = "brightness"
 
 [module.battery]
 style = "stone"
 icon = "battery"
 
+[module.battery.states.charging]
+contains = "CHARGING"
+icon = "battery-charging"
+
 # A state overlays the module's own style rather than replacing it, so the icon
-# set above survives and keeps grading. Rules are checked tightest bound first,
-# so "below 15" wins over "below 30" at 10%.
+# above survives and keeps grading. Rules are checked tightest bound first, so
+# "below 15" wins over "below 30" at 10%.
 [module.battery.states.warning]
 below = 30
 style = "warning"
 
 [module.battery.states.critical]
 below = 15
-style = "critical"
-
-# A state can key on the provider's urgent flag instead of a value.
-[module.disk.states.full]
-urgent = true
 style = "critical"

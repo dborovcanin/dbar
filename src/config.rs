@@ -60,6 +60,18 @@ pub enum EdgeShape {
     None,
 }
 
+/// Where a module's content comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    /// A block from the status provider, matched by name.
+    #[default]
+    Provider,
+    /// The title of the focused window.
+    SwayWindow,
+    /// One entry per workspace, expanded at layout time.
+    SwayWorkspaces,
+}
+
 /// Where a separator takes its colour from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SeparatorColor {
@@ -217,6 +229,8 @@ struct RawEdges {
 struct RawModule {
     /// Name of a `[style.*]` table to inherit from.
     style: Option<String>,
+    /// Where the content comes from: the provider, or the compositor.
+    source: Option<String>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
     #[serde(default)]
     states: HashMap<String, RawState>,
@@ -238,6 +252,14 @@ struct RawState {
     /// Matches while the pointer is over the module.
     #[serde(default)]
     hover: bool,
+    /// Matches the focused workspace.
+    #[serde(default)]
+    focused: bool,
+    /// Matches a workspace shown on some output.
+    #[serde(default)]
+    visible: bool,
+    /// Matches when the module's text contains this.
+    contains: Option<String>,
     #[serde(flatten)]
     overrides: RawStyle,
 }
@@ -416,16 +438,29 @@ pub struct Edges {
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: String,
+    pub source: Source,
     pub style: Style,
     /// Checked in order; the first match replaces the module's style.
     pub states: Vec<StateRule>,
 }
 
+/// What a module currently is, for matching state rules against.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StateFlags {
+    pub urgent: bool,
+    pub focused: bool,
+    pub visible: bool,
+}
+
 /// One conditional restyling of a module.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct StateRule {
     pub urgent: bool,
     pub hover: bool,
+    pub focused: bool,
+    pub visible: bool,
+    /// Substring the module's text must contain.
+    pub contains: Option<String>,
     pub below: Option<f32>,
     pub above: Option<f32>,
     pub style: Style,
@@ -433,11 +468,22 @@ pub struct StateRule {
 
 impl StateRule {
     /// Every condition the rule states has to hold. A rule stating none never fires.
-    pub fn matches(&self, urgent: bool, hovered: bool, value: Option<u8>) -> bool {
-        if self.urgent && !urgent {
+    pub fn matches(&self, flags: StateFlags, hovered: bool, value: Option<u8>, text: &str) -> bool {
+        if self.urgent && !flags.urgent {
             return false;
         }
         if self.hover && !hovered {
+            return false;
+        }
+        if self.focused && !flags.focused {
+            return false;
+        }
+        if self.visible && !flags.visible {
+            return false;
+        }
+        if let Some(needle) = &self.contains
+            && !text.contains(needle.as_str())
+        {
             return false;
         }
         if let Some(limit) = self.below {
@@ -452,7 +498,13 @@ impl StateRule {
                 _ => return false,
             }
         }
-        self.urgent || self.hover || self.below.is_some() || self.above.is_some()
+        self.urgent
+            || self.hover
+            || self.focused
+            || self.visible
+            || self.contains.is_some()
+            || self.below.is_some()
+            || self.above.is_some()
     }
 
     /// How specific the rule is, for ordering. Urgent first, then the tightest bound; a
@@ -460,7 +512,7 @@ impl StateRule {
     /// critical state visible while the pointer is over it.
     fn specificity(&self) -> (bool, f32) {
         (
-            !self.urgent,
+            !(self.urgent || self.focused || self.contains.is_some()),
             self.below
                 .unwrap_or(f32::MAX)
                 .min(self.above.map(|a| 100.0 - a).unwrap_or(f32::MAX)),
@@ -709,6 +761,9 @@ fn resolve_group(
                 states.push(StateRule {
                     urgent: raw_state.urgent,
                     hover: raw_state.hover,
+                    focused: raw_state.focused,
+                    visible: raw_state.visible,
+                    contains: raw_state.contains.clone(),
                     below: raw_state.below,
                     above: raw_state.above,
                     style: state_style,
@@ -722,8 +777,23 @@ fn resolve_group(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
+        let source = match raw
+            .modules
+            .get(module_name)
+            .and_then(|m| m.source.as_deref())
+        {
+            None | Some("provider") => Source::Provider,
+            Some("sway:window") => Source::SwayWindow,
+            Some("sway:workspaces") => Source::SwayWorkspaces,
+            Some(other) => anyhow::bail!(
+                "module {module_name:?} has unknown source {other:?}; expected \"provider\", \
+                 \"sway:window\" or \"sway:workspaces\""
+            ),
+        };
+
         modules.push(Module {
             name: module_name.clone(),
+            source,
             style,
             states,
         });
@@ -773,6 +843,7 @@ fn resolve_group(
         modules: if wildcard && modules.is_empty() {
             vec![Module {
                 name: "*".to_string(),
+                source: Source::Provider,
                 style: fallback,
                 states: Vec::new(),
             }]

@@ -7,6 +7,7 @@ mod icon;
 mod layout;
 mod render;
 mod status;
+mod sway;
 mod text;
 
 use std::path::PathBuf;
@@ -98,6 +99,22 @@ fn main() -> Result<()> {
             }
         })
         .map_err(|e| anyhow::anyhow!("inserting the status source: {e}"))?;
+
+    // The compositor is optional: without it the workspace and window modules simply have
+    // nothing to show, and the rest of the bar is unaffected.
+    let (sway_tx, sway_rx) = calloop::channel::channel();
+    match crate::sway::spawn(sway_tx) {
+        Ok(()) => {
+            handle
+                .insert_source(sway_rx, |event, _, app: &mut App| {
+                    if let calloop::channel::Event::Msg(event) = event {
+                        app.on_sway(event);
+                    }
+                })
+                .map_err(|e| anyhow::anyhow!("inserting the sway source: {e}"))?;
+        }
+        Err(e) => log::warn!("compositor integration unavailable: {e}"),
+    }
 
     WaylandSource::new(conn, event_queue)
         .insert(handle)
