@@ -8,6 +8,7 @@ use crate::config::{
     Config, Direction, EdgeShape, Edges, Group as GroupCfg, Separator, SeparatorColor,
     SeparatorShape, Style,
 };
+use crate::icon::{self, Icon};
 use crate::status::Block;
 
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
@@ -19,13 +20,26 @@ pub trait Measure {
     fn measure(&mut self, text: &str) -> f32;
 }
 
+/// An icon placed inside a module, already resolved to the level it should draw at.
+#[derive(Clone, Copy, Debug)]
+pub struct PlacedIcon {
+    pub icon: Icon,
+    pub level: usize,
+    pub x: f32,
+    pub y: f32,
+    pub size: f32,
+}
+
 #[derive(Clone, Debug)]
 pub struct PlacedModule {
     pub x: f32,
     pub y: f32,
     pub width: f32,
     pub height: f32,
+    pub icon: Option<PlacedIcon>,
     pub text: String,
+    /// Left edge of the text, already offset past any icon.
+    pub text_x: f32,
     pub foreground: Color,
     pub background: Color,
     pub radius: f32,
@@ -103,8 +117,15 @@ struct SizedGroup {
     modules: Vec<SizedModule>,
 }
 
+/// Space between an icon and the text beside it, as a fraction of the icon size.
+const ICON_GAP: f32 = 0.4;
+
 struct SizedModule {
     width: f32,
+    text_width: f32,
+    /// Width of the icon plus its gap, or zero.
+    icon_advance: f32,
+    icon: Option<(Icon, usize)>,
     text: String,
     style: Style,
     foreground: Color,
@@ -149,9 +170,26 @@ fn size_group(
         if content.is_empty() {
             continue;
         }
-        let width = (text.measure(&content) + style.padding * 2.0).max(style.min_width);
+        // A graded icon reads its level from a percentage in the text it sits beside.
+        let icon = style.icon.map(|icon| {
+            let level = if icon.is_graded() {
+                icon::percent(&content).map(icon::level_of).unwrap_or(0)
+            } else {
+                0
+            };
+            (icon, level)
+        });
+        let icon_advance = match icon {
+            Some(_) if style.icon_size > 0.0 => style.icon_size * (1.0 + ICON_GAP),
+            _ => 0.0,
+        };
+        let text_width = text.measure(&content);
+        let width = (text_width + icon_advance + style.padding * 2.0).max(style.min_width);
         modules.push(SizedModule {
             width,
+            text_width,
+            icon_advance,
+            icon,
             text: content,
             style,
             foreground: block
@@ -231,12 +269,25 @@ fn place(sized: SizedGroup, mut x: f32, height: f32) -> PlacedGroup {
             }
             x += sized.advance;
         }
+        // Icon and text are centred together inside the module box.
+        let content_width = m.icon_advance + m.text_width;
+        let content_x = x + (m.width - content_width) / 2.0;
+        let placed_icon = m.icon.map(|(icon, level)| PlacedIcon {
+            icon,
+            level,
+            x: content_x,
+            y: inner_y + (inner_h - m.style.icon_size) / 2.0,
+            size: m.style.icon_size,
+        });
+
         modules.push(PlacedModule {
             x,
             y: inner_y,
             width: m.width,
             height: inner_h,
+            icon: placed_icon,
             text: m.text,
+            text_x: content_x + m.icon_advance,
             foreground: m.foreground,
             background: m.background,
             radius: m.style.radius,
@@ -331,7 +382,9 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
                 y: 0.0,
                 width: module_width,
                 height,
+                icon: None,
                 text: message.to_string(),
+                text_x: x + padding,
                 foreground: FAULT_COLOR,
                 background: Color::TRANSPARENT,
                 radius: 0.0,

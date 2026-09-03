@@ -23,6 +23,7 @@ height = 36
 position = "top"        # "top" | "bottom"
 margin = 8              # gap between the bar and the screen edge; floats the bar
 gap = 12                # horizontal space between groups
+# Icon sizes default to 1.4x this, so changing the font scales them with it.
 font = "Liberation Sans 10"
 # For glyph icons, set icons = "material-nf" in the provider config and name a
 # font that carries them here, e.g. "DejaVuSansM Nerd Font Propo 10".
@@ -41,7 +42,12 @@ command = "i3status-rs"
 # provider emits them. Groups and modules below select on these names, and a
 # reordering of the provider config becomes a one-line change here instead of a
 # silent mismatch. Without this, groups have to select on "0", "1", ...
-blocks = ["cpu", "memory", "disk", "load", "net", "volume", "uptime", "clock"]
+blocks = [
+    "cpu", "memory", "disk",
+    "wifi", "ethernet", "offline",
+    "volume", "muted", "headphones",
+    "brightness", "battery", "charging", "clock",
+]
 # i3status-rs resolves a bare filename against $XDG_CONFIG_HOME/i3status-rust and
 # ignores the working directory, so pass an absolute path or leave this empty.
 args = []
@@ -69,13 +75,13 @@ critical = "#f38ba8"
 # ---------------------------------------------------------------------------
 
 [left]
-groups = ["desktop", "storage"]
+groups = ["system", "network"]
 
 [center]
-groups = ["net"]
+groups = ["media"]
 
 [right]
-groups = ["system"]
+groups = ["power", "time"]
 
 # ---------------------------------------------------------------------------
 # Reusable styles
@@ -145,78 +151,86 @@ padding = 9
 #   radius     defaults to the group's own radius
 # ---------------------------------------------------------------------------
 
-# CPU and RAM, with a slanted transition.
-[group.desktop]
-modules = ["cpu", "memory"]
+# CPU, memory and disk, joined by slanted transitions.
+[group.system]
+modules = ["cpu", "memory", "disk"]
 background = "$surface"
 radius = 12
 padding = 0
 spacing = 0             # only used when the group has no separator
 
-[group.desktop.separator]
+[group.system.separator]
 shape = "slant"
 width = 11
 direction = "right"
 color = "previous"
 overlap = 1
 
-[group.desktop.edges]
+[group.system.edges]
 left = "round"
 right = "none"          # a squared trailing edge
 radius = 12
 
-# Disk and load. A hairline divides rather than transitioning between two
+# Connectivity. A hairline divides rather than transitioning between two
 # regions, so it takes the separator color itself and is never mirrored. It
 # suits modules that share a background: the group reads as one surface with a
-# divider in it, which is why these two modules carry no background of their own.
-[group.storage]
-modules = ["disk", "load"]
+# divider in it, which is why these modules carry no background of their own.
+[group.network]
+modules = ["wifi", "ethernet", "offline"]
 background = "$surface"
 radius = 12
 padding = 0
 spacing = 0
 
-[group.storage.separator]
+[group.network.separator]
 shape = "line"
 width = 11
 direction = "right"
 color = "$subtext"
 overlap = 0
 
-# Network and volume, joined by a rounded lobe.
-[group.net]
-modules = ["net", "volume"]
+# Volume, joined by a rounded lobe.
+[group.media]
+modules = ["volume", "muted", "headphones"]
 background = "$surface"
 radius = 18
 padding = 0
 spacing = 0
 
-[group.net.separator]
+[group.media.separator]
 shape = "round"
 width = 13
 direction = "right"
 color = "previous"
 overlap = 1
 
-[group.net.edges]
+[group.media.edges]
 left = "round"
 right = "round"
 radius = 18
 
-# Uptime and the clock. Right-hand groups conventionally point the other way.
-[group.system]
-modules = ["uptime", "clock"]
+# Right-hand groups conventionally point the other way.
+[group.power]
+modules = ["brightness", "battery", "charging"]
 background = "$surface"
 radius = 12
 padding = 0
 spacing = 0
 
-[group.system.separator]
+[group.power.separator]
 shape = "chevron"
 width = 11
 direction = "left"
 color = "previous"
 overlap = 1
+
+# A single module has no interior gap, so no separator is drawn.
+[group.time]
+modules = ["clock"]
+background = "$surface"
+radius = 12
+padding = 0
+spacing = 0
 
 # ---------------------------------------------------------------------------
 # Modules
@@ -226,28 +240,60 @@ overlap = 1
 # share one style; here each block appears once.
 # ---------------------------------------------------------------------------
 
+# Fixed icons.
 [module.cpu]
 style = "cool"
+icon = "cpu"
 
 [module.memory]
 style = "warm"
+icon = "memory"
 
 [module.disk]
-style = "plain"
-
-[module.load]
-style = "plain"
-
-[module.net]
 style = "mint"
+icon = "disk"
 
-[module.volume]
-style = "warm"
+[module.ethernet]
+style = "plain"
+icon = "ethernet"
 
-[module.uptime]
-style = "stone"
-
-# Inline overrides on top of a named style.
 [module.clock]
 style = "cool"
-min_width = 70
+icon = "clock"
+icon_size = 18          # an explicit override; otherwise icons follow the font
+
+# The off states. Nothing picks these automatically yet, so they are named
+# outright; a value-driven variant is what module state styling will add.
+[module.offline]
+style = "plain"
+icon = "wifi-off"
+
+[module.muted]
+style = "warm"
+icon = "volume-muted"
+
+[module.charging]
+style = "cool"
+icon = "battery-charging"
+
+[module.headphones]
+style = "mint"
+icon = "headphones"
+
+# Graded icons. Each reads a percentage out of the text beside it and picks one
+# of five steps; a module whose text carries no percentage stays at the lowest.
+[module.wifi]
+style = "plain"
+icon = "wifi"
+
+[module.volume]
+style = "cool"
+icon = "volume"
+
+[module.brightness]
+style = "mint"
+icon = "brightness"
+
+[module.battery]
+style = "stone"
+icon = "battery"

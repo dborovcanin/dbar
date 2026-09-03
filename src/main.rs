@@ -3,6 +3,7 @@
 mod app;
 mod color;
 mod config;
+mod icon;
 mod layout;
 mod render;
 mod status;

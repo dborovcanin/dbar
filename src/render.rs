@@ -4,11 +4,14 @@
 //! transform so HiDPI output stays sharp without the layout code knowing about it.
 
 use anyhow::{Context as _, Result};
-use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, PixmapMut, Rect, Transform};
+use tiny_skia::{
+    FillRule, LineCap, Mask, Paint, Path, PathBuilder, PixmapMut, Rect, Stroke, Transform,
+};
 
 use crate::color::Color;
 use crate::config::{Config, Direction, EdgeShape, SeparatorShape};
-use crate::layout::{Frame, PlacedSeparator};
+use crate::icon::{self, IconArt, Ink};
+use crate::layout::{Frame, PlacedIcon, PlacedSeparator};
 use crate::text::TextRenderer;
 
 /// Control-point ratio that turns a cubic into a quarter circle.
@@ -168,6 +171,51 @@ fn draw_separator(
     fill_path(pixmap, &path, over, transform, clip);
 }
 
+/// Draw one icon, tinted with the module's foreground.
+///
+/// Icon geometry is authored in a unit square, so a single transform puts it at its placed
+/// position and size. Stroke widths ride along with that scale.
+fn draw_icon(
+    pixmap: &mut PixmapMut<'_>,
+    placed: &PlacedIcon,
+    color: Color,
+    transform: Transform,
+    clip: Option<&Mask>,
+) {
+    if color.is_transparent() || placed.size <= 0.0 {
+        return;
+    }
+    let IconArt::Paths(paths) = icon::art(placed.icon, placed.level) else {
+        return;
+    };
+
+    let local = Transform::from_translate(placed.x, placed.y).pre_scale(placed.size, placed.size);
+    let ts = transform.pre_concat(local);
+
+    let mut paint = Paint::default();
+    paint.set_color(skia_color(color));
+    paint.anti_alias = true;
+
+    for item in &paths {
+        match item.ink {
+            Ink::Fill => {
+                pixmap.fill_path(&item.path, &paint, FillRule::Winding, ts, clip);
+            }
+            Ink::FillEvenOdd => {
+                pixmap.fill_path(&item.path, &paint, FillRule::EvenOdd, ts, clip);
+            }
+            Ink::Stroke(width) => {
+                let stroke = Stroke {
+                    width,
+                    line_cap: LineCap::Round,
+                    ..Stroke::default()
+                };
+                pixmap.stroke_path(&item.path, &paint, &stroke, ts, clip);
+            }
+        }
+    }
+}
+
 /// A coverage mask of `path`, used to clip a group's contents to its outline.
 fn clip_mask(pixmap: &PixmapMut<'_>, path: &Path, transform: Transform) -> Option<Mask> {
     let mut mask = Mask::new(pixmap.width(), pixmap.height())?;
@@ -306,11 +354,12 @@ fn render(
                 transform,
                 clip,
             );
-            // Center the text in the module box on both axes.
-            let text_width = text.measure_text(&module.text);
-            let tx = module.x + (module.width - text_width) / 2.0;
+            if let Some(icon) = &module.icon {
+                draw_icon(pixmap, icon, module.foreground, transform, clip);
+            }
+            // Layout already placed the text; only the vertical centring is ours.
             let ty = module.y + (module.height - line_height) / 2.0;
-            text.draw(pixmap, &module.text, tx, ty, module.foreground);
+            text.draw(pixmap, &module.text, module.text_x, ty, module.foreground);
         }
     }
 }

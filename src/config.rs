@@ -11,6 +11,7 @@ use anyhow::{Context as _, Result, anyhow};
 use serde::Deserialize;
 
 use crate::color::Color;
+use crate::icon::Icon;
 
 pub const DEFAULT_CONFIG: &str = include_str!("../examples/config.toml");
 
@@ -156,6 +157,8 @@ struct RawStyle {
     padding: Option<f32>,
     radius: Option<f32>,
     min_width: Option<f32>,
+    icon: Option<String>,
+    icon_size: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -350,6 +353,22 @@ pub struct Style {
     pub padding: f32,
     pub radius: f32,
     pub min_width: f32,
+    pub icon: Option<Icon>,
+    /// Icon edge length in logical pixels, independent of the font size.
+    pub icon_size: f32,
+}
+
+/// Icon edge length as a multiple of the font size, when a style does not set one.
+///
+/// Ties the two together so that changing `[bar] font` scales the icons with the text.
+const ICON_SIZE_RATIO: f32 = 1.4;
+
+/// The starting point of the cascade, with the icon size derived from the bar font.
+fn base_style(font_size: f32) -> Style {
+    Style {
+        icon_size: font_size * ICON_SIZE_RATIO,
+        ..Style::default()
+    }
 }
 
 impl Default for Style {
@@ -360,6 +379,8 @@ impl Default for Style {
             padding: 8.0,
             radius: 0.0,
             min_width: 0.0,
+            icon: None,
+            icon_size: 14.0,
         }
     }
 }
@@ -381,6 +402,15 @@ impl Style {
         }
         if let Some(v) = over.min_width {
             self.min_width = v;
+        }
+        if let Some(name) = &over.icon {
+            self.icon = match name.as_str() {
+                "none" => None,
+                other => Some(Icon::parse(other).ok_or_else(|| anyhow!("unknown icon {other:?}"))?),
+            };
+        }
+        if let Some(v) = over.icon_size {
+            self.icon_size = v.max(0.0);
         }
         Ok(self)
     }
@@ -447,9 +477,10 @@ impl Config {
         };
 
         // Named styles resolve against the built-in defaults, once.
+        let base = base_style(bar.font_size);
         let mut styles: HashMap<String, Style> = HashMap::new();
         for (name, raw_style) in &raw.styles {
-            let style = Style::default()
+            let style = base
                 .overlay(raw_style, &palette)
                 .with_context(|| format!("in [style.{name}]"))?;
             styles.insert(name.clone(), style);
@@ -466,7 +497,7 @@ impl Config {
                     .get(group_name)
                     .ok_or_else(|| anyhow!("group {group_name:?} is used but not defined"))?;
                 slot.push(resolve_group(
-                    group_name, raw_group, &raw, &palette, &styles,
+                    group_name, raw_group, &raw, &palette, &styles, base,
                 )?);
             }
         }
@@ -511,23 +542,25 @@ fn resolve_group(
     raw: &RawConfig,
     palette: &Palette,
     styles: &HashMap<String, Style>,
+    base: Style,
 ) -> Result<Group> {
     let wildcard = raw_group.modules.iter().any(|m| m == "*");
     let mut modules = Vec::new();
     for module_name in raw_group.modules.iter().filter(|m| *m != "*") {
         let style = match raw.modules.get(module_name) {
             Some(raw_module) => {
-                let base = match &raw_module.style {
+                let start = match &raw_module.style {
                     Some(style_name) => *styles.get(style_name).ok_or_else(|| {
                         anyhow!("module {module_name:?} references unknown style {style_name:?}")
                     })?,
-                    None => Style::default(),
+                    None => base,
                 };
-                base.overlay(&raw_module.overrides, palette)
+                start
+                    .overlay(&raw_module.overrides, palette)
                     .with_context(|| format!("in [module.{module_name}]"))?
             }
             // A module listed in a group but never configured still renders with defaults.
-            None => Style::default(),
+            None => base,
         };
         modules.push(Module {
             name: module_name.clone(),
@@ -536,7 +569,7 @@ fn resolve_group(
     }
 
     // Wildcard groups need a style for blocks that have no `[module.*]` table.
-    let fallback = styles.get("default").copied().unwrap_or_default();
+    let fallback = styles.get("default").copied().unwrap_or(base);
 
     let separator = match &raw_group.separator {
         Some(raw) => Separator {

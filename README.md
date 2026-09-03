@@ -106,10 +106,37 @@ picks, then that module's own keys.
 
 ### Icons
 
-dbar has no icon set of its own yet. Until it does, icons come from the status
-provider as text: i3status-rs ships several icon sets, and every block in
-[examples/i3status-rs.toml](examples/i3status-rs.toml) formats as `$icon $value`,
-so one line decides what you get.
+dbar draws its own icons as vector geometry, so they scale with `icon_size`
+rather than riding on a font:
+
+```toml
+[module.battery]
+icon = "battery"
+icon_size = 16          # optional; defaults to 1.4x the bar font size
+```
+
+Left unset, `icon_size` follows the font, so changing `[bar] font` scales icons
+along with the text. Setting it pins the icon independently.
+
+Fixed: `cpu`, `memory`, `disk`, `clock`, `ethernet`, `headphones`, `wifi-off`,
+`volume-muted`.
+
+Graded: `battery`, `battery-charging`, `wifi`, `volume`, `brightness`. These have five steps and
+pick one by reading a percentage out of the text beside them - a battery at
+`58%` draws a little over half full. Only an `NN%` pattern counts, so text such
+as `92GB`, `23:59` or `3h 5m` leaves a graded icon at its lowest step rather
+than grading on a number that means something else.
+
+`battery-charging` grades like `battery` and cuts its bolt out of the charge
+bar, so it reads at any level. Nothing selects the off states automatically
+yet; `wifi-off`, `volume-muted` and `headphones` are named outright. Value-driven selection belongs with module state styling.
+
+#### Provider glyph icons
+
+Alternatively the status provider can emit icons as text. i3status-rs ships
+several icon sets, and every block in
+[examples/i3status-rs.toml](examples/i3status-rs.toml) formats as
+`$icon $value`, so one line decides what you get:
 
 ```toml
 [icons]
@@ -128,12 +155,10 @@ font = "DejaVuSansM Nerd Font Propo 10"
 
 A font without those glyphs still works - dbar falls back per glyph - but on a
 system with many Nerd Fonts installed the fallback can source each icon from a
-different face, leaving them mismatched in weight and size. Naming one font that
-has everything avoids that.
+different face, leaving them mismatched in weight and size.
 
-This route is limited by design: the provider picks which glyph each block gets,
-and icon size is tied to the font size rather than being its own style property.
-A built-in vector icon set is the V1 plan.
+This route leaves the provider choosing which glyph each block gets, and ties
+icon size to the font size. dbar's own icons are independent of both.
 
 ### Separators
 
