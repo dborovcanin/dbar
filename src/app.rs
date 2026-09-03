@@ -154,7 +154,12 @@ impl App {
                 );
                 self.provider.set_accepts_clicks(header.click_events);
             }
-            StatusEvent::Blocks(blocks) => {
+            StatusEvent::Blocks(mut blocks) => {
+                // Positional names are all the protocol offers, so pin them to the
+                // configured names once, here, rather than at every use.
+                for (index, block) in blocks.iter_mut().enumerate() {
+                    block.alias = self.config.status.blocks.get(index).cloned();
+                }
                 self.blocks = blocks;
                 self.fault = None;
                 self.invalidate();
@@ -253,7 +258,7 @@ impl App {
         let names: Vec<String> = self
             .blocks
             .iter()
-            .map(|b| b.name.clone().unwrap_or_else(|| "<unnamed>".to_string()))
+            .map(|b| b.selector().unwrap_or("<unnamed>").to_string())
             .collect();
         if self.warned_names.as_ref() == Some(&names) {
             return;

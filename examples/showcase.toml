@@ -6,8 +6,8 @@
 # across four groups and all three positions, each group using a different
 # separator shape.
 #
-# Blocks are selected by the names i3status-rs emits ("0", "1", ... in the order
-# its config lists them), so install the matching provider config first:
+# Blocks are named by [status] blocks below, in the order the provider emits
+# them, so install the matching provider config first:
 #
 #   cp examples/i3status-rs.toml ~/.config/i3status-rust/config.toml
 #
@@ -36,6 +36,12 @@ radius = 0
 
 [status]
 command = "i3status-rs"
+# The i3bar protocol gives a provider no way to name its blocks usefully -
+# i3status-rs numbers them "0", "1", ... - so name them here, in the order the
+# provider emits them. Groups and modules below select on these names, and a
+# reordering of the provider config becomes a one-line change here instead of a
+# silent mismatch. Without this, groups have to select on "0", "1", ...
+blocks = ["cpu", "memory", "disk", "load", "net", "volume", "uptime", "clock"]
 # i3status-rs resolves a bare filename against $XDG_CONFIG_HOME/i3status-rust and
 # ignores the working directory, so pass an absolute path or leave this empty.
 args = []
@@ -141,7 +147,7 @@ padding = 9
 
 # CPU and RAM, with a slanted transition.
 [group.desktop]
-modules = ["0", "1"]
+modules = ["cpu", "memory"]
 background = "$surface"
 radius = 12
 padding = 0
@@ -164,7 +170,7 @@ radius = 12
 # suits modules that share a background: the group reads as one surface with a
 # divider in it, which is why these two modules carry no background of their own.
 [group.storage]
-modules = ["2", "3"]
+modules = ["disk", "load"]
 background = "$surface"
 radius = 12
 padding = 0
@@ -179,7 +185,7 @@ overlap = 0
 
 # Network and volume, joined by a rounded lobe.
 [group.net]
-modules = ["4", "5"]
+modules = ["net", "volume"]
 background = "$surface"
 radius = 18
 padding = 0
@@ -199,7 +205,7 @@ radius = 18
 
 # Uptime and the clock. Right-hand groups conventionally point the other way.
 [group.system]
-modules = ["6", "7"]
+modules = ["uptime", "clock"]
 background = "$surface"
 radius = 12
 padding = 0
@@ -220,28 +226,28 @@ overlap = 1
 # share one style; here each block appears once.
 # ---------------------------------------------------------------------------
 
-[module.0]
+[module.cpu]
 style = "cool"
 
-[module.1]
+[module.memory]
 style = "warm"
 
-[module.2]
+[module.disk]
 style = "plain"
 
-[module.3]
+[module.load]
 style = "plain"
 
-[module.4]
+[module.net]
 style = "mint"
 
-[module.5]
+[module.volume]
 style = "warm"
 
-[module.6]
+[module.uptime]
 style = "stone"
 
 # Inline overrides on top of a named style.
-[module.7]
+[module.clock]
 style = "cool"
 min_width = 70

@@ -125,7 +125,7 @@ fn select_blocks<'a>(group: &GroupCfg, blocks: &'a [Block]) -> Vec<(usize, &'a B
     }
     for module in &group.modules {
         for (i, block) in blocks.iter().enumerate() {
-            if block.name.as_deref() == Some(module.name.as_str()) {
+            if block.selector() == Some(module.name.as_str()) {
                 out.push((i, block, module.style));
             }
         }

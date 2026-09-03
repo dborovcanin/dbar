@@ -29,9 +29,21 @@ pub struct Block {
     /// Either `"none"` or `"pango"`; i3status-rs always sends the latter.
     #[serde(default)]
     pub markup: Option<String>,
+    /// The name this block is known by in the dbar config, from `[status] blocks`.
+    ///
+    /// Kept separate from `name`, because click events must carry the name the provider
+    /// gave the block or it cannot route them back.
+    #[serde(skip)]
+    pub alias: Option<String>,
 }
 
 impl Block {
+    /// The name a config selects this block by: its alias if it has one, else whatever
+    /// the provider called it.
+    pub fn selector(&self) -> Option<&str> {
+        self.alias.as_deref().or(self.name.as_deref())
+    }
+
     /// The text to actually draw.
     ///
     /// Providers that set `markup = "pango"` may wrap text in span tags and escape it as XML.

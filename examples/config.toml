@@ -22,6 +22,10 @@ radius = 0
 [status]
 command = "i3status-rs"
 args = []
+# Names for the provider's blocks, in the order it emits them, so groups can
+# select on "cpu" rather than "0". Unused here because the group below takes
+# every block with "*"; see examples/showcase.toml.
+# blocks = ["cpu", "memory", "disk", "load", "net", "volume", "uptime", "clock"]
 
 [colors]
 background = "#1e1e2e"

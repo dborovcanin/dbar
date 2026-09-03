@@ -176,8 +176,34 @@ modules = ["cpu", "memory", "time"]
 style = "default"
 ```
 
-Block names come from the provider. `i3status-rs` numbers its blocks by
-default; set `name` on a block in its config to address it here.
+### Naming blocks
+
+The i3bar protocol gives a provider no way to name its blocks usefully -
+`i3status-rs` numbers them `"0"`, `"1"`, ... and rejects a `name` key on a
+block - so a group selecting on those numbers silently follows a different
+block whenever the provider's config is reordered.
+
+Name them once, in the order the provider emits them:
+
+```toml
+[status]
+command = "i3status-rs"
+blocks = ["cpu", "memory", "disk", "load", "net", "volume", "uptime", "clock"]
+```
+
+Groups and modules then select on those names:
+
+```toml
+[group.desktop]
+modules = ["cpu", "memory"]
+
+[module.cpu]
+style = "accent"
+```
+
+The names are dbar's own. Click events still carry the name the provider gave
+the block, so it can route them back. Without `blocks`, groups select on
+whatever the provider sends, which for `i3status-rs` means `"0"`, `"1"`, ...
 
 If a group's module list matches nothing, dbar logs a warning naming the block
 names the provider is actually sending, rather than leaving a blank bar with no

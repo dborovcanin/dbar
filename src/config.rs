@@ -136,6 +136,9 @@ struct RawStatus {
     command: String,
     #[serde(default)]
     args: Vec<String>,
+    /// Names for the provider's blocks, in the order it emits them.
+    #[serde(default)]
+    blocks: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -250,6 +253,7 @@ impl Default for RawStatus {
         RawStatus {
             command: default_status_command(),
             args: Vec::new(),
+            blocks: Vec::new(),
         }
     }
 }
@@ -283,6 +287,12 @@ pub struct Bar {
 pub struct Status {
     pub command: String,
     pub args: Vec<String>,
+    /// Stable names for the provider's blocks, by position.
+    ///
+    /// The i3bar protocol has no way for a provider to name its blocks usefully -
+    /// i3status-rs numbers them - so groups would otherwise have to select on "0", "1",
+    /// and silently follow the wrong block whenever the provider's order changed.
+    pub blocks: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -466,6 +476,7 @@ impl Config {
             status: Status {
                 command: raw.status.command.clone(),
                 args: raw.status.args.clone(),
+                blocks: raw.status.blocks.clone(),
             },
             positions,
         })
