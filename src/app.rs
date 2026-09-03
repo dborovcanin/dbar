@@ -222,21 +222,15 @@ impl App {
             .create_buffer(pw, ph, stride, wl_shm::Format::Argb8888)
             .context("creating an shm buffer")?;
 
-        {
-            let mut pixmap = tiny_skia::PixmapMut::from_bytes(canvas, pw as u32, ph as u32)
-                .context("wrapping the shm buffer")?;
-            render::render(
-                &mut pixmap,
-                &self.config,
-                &self.frame,
-                scale,
-                &mut self.text,
-            );
-        }
-        // tiny-skia writes premultiplied RGBA; wl_shm ARGB8888 is BGRA in memory order.
-        for px in canvas.chunks_exact_mut(4) {
-            px.swap(0, 2);
-        }
+        render::render_to_buffer(
+            canvas,
+            pw as u32,
+            ph as u32,
+            &self.config,
+            &self.frame,
+            scale,
+            &mut self.text,
+        )?;
 
         let surface = self.layer.wl_surface();
         surface.set_buffer_scale(self.scale.max(1));

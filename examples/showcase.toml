@@ -1,13 +1,13 @@
-# dbar - every separator shape, side by side.
+# dbar - the full configuration surface.
 #
 #   dbar -c examples/showcase.toml
 #
-# One group per shape, each holding the same two blocks with strongly contrasting
-# backgrounds, so the transition between them is unmistakable. This doubles as
-# the reference for every configuration key dbar understands.
+# A realistic bar: every block the provider sends appears exactly once, spread
+# across four groups and all three positions, each group using a different
+# separator shape.
 #
-# Blocks are selected by the names i3status-rs emits ("0", "1", ...), so install
-# the matching provider config first:
+# Blocks are selected by the names i3status-rs emits ("0", "1", ... in the order
+# its config lists them), so install the matching provider config first:
 #
 #   cp examples/i3status-rs.toml ~/.config/i3status-rust/config.toml
 #
@@ -45,9 +45,11 @@ args = []
 [colors]
 background = "#1e1e2e"
 surface = "#313244cc"   # alpha cc, so SwayFX blur shows through
+slate = "#585b70ff"
 text = "#cdd6f4"
 subtext = "#a6adc8"
 accent = "#89b4fa"
+teal = "#94e2d5"
 warning = "#f9e2af"
 critical = "#f38ba8"
 
@@ -59,13 +61,13 @@ critical = "#f38ba8"
 # ---------------------------------------------------------------------------
 
 [left]
-groups = ["line", "slant"]
+groups = ["desktop", "storage"]
 
 [center]
-groups = ["chevron", "chevron_mirrored"]
+groups = ["net"]
 
 [right]
-groups = ["notch", "round", "curve"]
+groups = ["system"]
 
 # ---------------------------------------------------------------------------
 # Reusable styles
@@ -76,31 +78,46 @@ groups = ["notch", "round", "curve"]
 
 [style.default]
 foreground = "$text"
-padding = 10
+padding = 9
 
-[style.leading]
+# Filled transitions need neighbouring modules to contrast, so these alternate.
+[style.cool]
 background = "$accent"
 foreground = "$background"
-padding = 10
-min_width = 90
+padding = 9
 
-[style.trailing]
+[style.warm]
 background = "$warning"
 foreground = "$background"
-padding = 10
+padding = 9
+
+[style.mint]
+background = "$teal"
+foreground = "$background"
+padding = 9
+
+[style.stone]
+background = "$slate"
+foreground = "$text"
+padding = 9
+
+# No background of its own, so the group background shows through continuously.
+[style.plain]
+foreground = "$text"
+padding = 12
 
 [style.warning]
 background = "$warning"
 foreground = "$background"
-padding = 10
+padding = 9
 
 [style.critical]
 background = "$critical"
 foreground = "$background"
-padding = 10
+padding = 9
 
 # ---------------------------------------------------------------------------
-# Groups, one per separator shape
+# Groups
 #
 # A separator is a transition between two neighbouring modules, drawn as vector
 # geometry rather than as a font glyph:
@@ -112,6 +129,7 @@ padding = 10
 #   overlap    bleed past each side, hiding antialiasing seams
 #
 # With shape = "none" the group falls back to its own `spacing` for the gap.
+# Change any `shape` below to see the others; the geometry is the same for all.
 #
 # Outer corners are a separate concept from the separators between modules:
 #
@@ -119,116 +137,75 @@ padding = 10
 #   radius     defaults to the group's own radius
 # ---------------------------------------------------------------------------
 
-# A hairline. It is never mirrored, and takes the separator color itself rather
-# than a neighbouring background.
-[group.line]
+# CPU and RAM, with a slanted transition.
+[group.desktop]
 modules = ["0", "1"]
+background = "$surface"
+radius = 12
+padding = 0
+spacing = 0             # only used when the group has no separator
+
+[group.desktop.separator]
+shape = "slant"
+width = 11
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.desktop.edges]
+left = "round"
+right = "none"          # a squared trailing edge
+radius = 12
+
+# Disk and load. A hairline divides rather than transitioning between two
+# regions, so it takes the separator color itself and is never mirrored. It
+# suits modules that share a background: the group reads as one surface with a
+# divider in it, which is why these two modules carry no background of their own.
+[group.storage]
+modules = ["2", "3"]
 background = "$surface"
 radius = 12
 padding = 0
 spacing = 0
 
-[group.line.separator]
+[group.storage.separator]
 shape = "line"
-width = 13
+width = 11
 direction = "right"
-color = "$background"
+color = "$subtext"
 overlap = 0
 
-# A squared trailing edge, to show that the two outer corners are independent.
-[group.line.edges]
-left = "round"
-right = "none"
-radius = 12
-
-[group.slant]
-modules = ["0", "1"]
-background = "$surface"
-radius = 12
-padding = 0
-spacing = 0
-
-[group.slant.separator]
-shape = "slant"
-width = 12
-direction = "right"
-color = "previous"
-overlap = 1
-
-# The classic Powerline wedge: the previous module's background, pointing into
-# the next one.
-[group.chevron]
-modules = ["0", "1"]
-background = "$surface"
-radius = 12
-padding = 0
-spacing = 0
-
-[group.chevron.separator]
-shape = "chevron"
-width = 12
-direction = "right"
-color = "previous"
-overlap = 1
-
-# The same shape mirrored, as a right-hand group would use it.
-[group.chevron_mirrored]
-modules = ["0", "1"]
-background = "$surface"
-radius = 12
-padding = 0
-spacing = 0
-
-[group.chevron_mirrored.separator]
-shape = "chevron"
-width = 12
-direction = "left"
-color = "previous"
-overlap = 1
-
-[group.notch]
-modules = ["0", "1"]
-background = "$surface"
-radius = 12
-padding = 0
-spacing = 0
-
-[group.notch.separator]
-shape = "notch"
-width = 12
-direction = "right"
-color = "previous"
-overlap = 1
-
-[group.round]
-modules = ["0", "1"]
+# Network and volume, joined by a rounded lobe.
+[group.net]
+modules = ["4", "5"]
 background = "$surface"
 radius = 18
 padding = 0
 spacing = 0
 
-[group.round.separator]
+[group.net.separator]
 shape = "round"
-width = 14
+width = 13
 direction = "right"
 color = "previous"
 overlap = 1
 
-[group.round.edges]
+[group.net.edges]
 left = "round"
 right = "round"
 radius = 18
 
-[group.curve]
-modules = ["0", "1"]
+# Uptime and the clock. Right-hand groups conventionally point the other way.
+[group.system]
+modules = ["6", "7"]
 background = "$surface"
 radius = 12
 padding = 0
 spacing = 0
 
-[group.curve.separator]
-shape = "curve"
-width = 14
+[group.system.separator]
+shape = "chevron"
+width = 11
 direction = "left"
 color = "previous"
 overlap = 1
@@ -237,14 +214,32 @@ overlap = 1
 # Modules
 #
 # "style" names a [style.*] table; any other key overrides it for this module.
-# Module styles are keyed by block name, so the same two blocks carry the same
-# pair of colors through every group above.
+# Module styles are keyed by block name, so a block placed in two groups would
+# share one style; here each block appears once.
 # ---------------------------------------------------------------------------
 
 [module.0]
-style = "leading"
+style = "cool"
+
+[module.1]
+style = "warm"
+
+[module.2]
+style = "plain"
+
+[module.3]
+style = "plain"
+
+[module.4]
+style = "mint"
+
+[module.5]
+style = "warm"
+
+[module.6]
+style = "stone"
 
 # Inline overrides on top of a named style.
-[module.1]
-style = "trailing"
-foreground = "$background"
+[module.7]
+style = "cool"
+min_width = 70

@@ -3,6 +3,7 @@
 //! Everything here works in logical pixels; the scale factor is applied through a single
 //! transform so HiDPI output stays sharp without the layout code knowing about it.
 
+use anyhow::{Context as _, Result};
 use tiny_skia::{FillRule, Mask, Paint, Path, PathBuilder, PixmapMut, Rect, Transform};
 
 use crate::color::Color;
@@ -12,6 +13,10 @@ use crate::text::TextRenderer;
 
 /// Control-point ratio that turns a cubic into a quarter circle.
 const KAPPA: f32 = 0.552_285;
+
+fn skia_color(c: Color) -> tiny_skia::Color {
+    tiny_skia::Color::from_rgba8(c.r, c.g, c.b, c.a)
+}
 
 /// Width of the hairline drawn for `shape = "line"`, in logical pixels.
 const LINE_WIDTH: f32 = 1.0;
@@ -134,14 +139,18 @@ fn draw_separator(
         (sep.under, sep.fill)
     };
 
-    fill(
-        pixmap,
-        (x0, y0, x1 - x0, y1 - y0),
-        0.0,
-        under,
-        transform,
-        clip,
-    );
+    // A filled shape splits the gap between the two module colours. A hairline only
+    // divides, so the gap keeps the group background and the line stays centred in it.
+    if sep.shape != SeparatorShape::Line {
+        fill(
+            pixmap,
+            (x0, y0, x1 - x0, y1 - y0),
+            0.0,
+            under,
+            transform,
+            clip,
+        );
+    }
 
     let Some(path) = separator_path(sep.shape, x0, y0, x1, y1) else {
         return;
@@ -198,7 +207,7 @@ fn fill_path(
         return;
     }
     let mut paint = Paint::default();
-    paint.set_color(color.to_skia());
+    paint.set_color(skia_color(color));
     paint.anti_alias = true;
     pixmap.fill_path(path, &paint, FillRule::Winding, transform, clip);
 }
@@ -215,8 +224,33 @@ fn fill(
     fill_edged(pixmap, bounds, radius, radius, color, transform, clip);
 }
 
+/// Render `frame` into a `wl_shm` ARGB8888 buffer.
+///
+/// This owns the pixel format, so the Wayland code never has to know how the renderer
+/// lays out its bytes.
+pub fn render_to_buffer(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    cfg: &Config,
+    frame: &Frame,
+    scale: f32,
+    text: &mut TextRenderer,
+) -> Result<()> {
+    {
+        let mut pixmap =
+            PixmapMut::from_bytes(canvas, width, height).context("wrapping the shm buffer")?;
+        render(&mut pixmap, cfg, frame, scale, text);
+    }
+    // tiny-skia writes premultiplied RGBA; wl_shm ARGB8888 is BGRA in memory order.
+    for px in canvas.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    Ok(())
+}
+
 /// Draw the bar background, then every group and module, into `pixmap`.
-pub fn render(
+fn render(
     pixmap: &mut PixmapMut<'_>,
     cfg: &Config,
     frame: &Frame,
@@ -273,7 +307,7 @@ pub fn render(
                 clip,
             );
             // Center the text in the module box on both axes.
-            let text_width = text.measure(&module.text);
+            let text_width = text.measure_text(&module.text);
             let tx = module.x + (module.width - text_width) / 2.0;
             let ty = module.y + (module.height - line_height) / 2.0;
             text.draw(pixmap, &module.text, tx, ty, module.foreground);

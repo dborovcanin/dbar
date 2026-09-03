@@ -9,7 +9,15 @@ use crate::config::{
     SeparatorShape, Style,
 };
 use crate::status::Block;
-use crate::text::TextRenderer;
+
+/// What layout needs from a text backend: how wide a string is, and how tall a line is.
+///
+/// Layout is otherwise free of rendering concerns, so it can be exercised with a stub
+/// measurer and no font system.
+pub trait Measure {
+    /// Width of `text` in logical pixels.
+    fn measure(&mut self, text: &str) -> f32;
+}
 
 #[derive(Clone, Debug)]
 pub struct PlacedModule {
@@ -129,7 +137,7 @@ fn size_group(
     group: &GroupCfg,
     blocks: &[Block],
     height: f32,
-    text: &mut TextRenderer,
+    text: &mut dyn Measure,
 ) -> Option<SizedGroup> {
     let mut modules = Vec::new();
     for (index, block, style) in select_blocks(group, blocks) {
@@ -255,7 +263,7 @@ pub fn compute(
     blocks: &[Block],
     width: f32,
     height: f32,
-    text: &mut TextRenderer,
+    text: &mut dyn Measure,
 ) -> Frame {
     let gap = cfg.bar.gap;
     let mut frame = Frame::default();
@@ -301,7 +309,7 @@ pub fn compute(
 /// Provider failures bypass the group configuration entirely: a fault reported as an ordinary
 /// block would be dropped by any group that selects modules by name, which is exactly when the
 /// message matters most.
-pub fn fault(message: &str, width: f32, height: f32, text: &mut TextRenderer) -> Frame {
+pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> Frame {
     let padding = 10.0;
     let module_width = text.measure(message) + padding * 2.0;
     let x = (width - module_width).max(0.0);

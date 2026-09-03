@@ -39,8 +39,4 @@ impl Color {
     pub fn is_transparent(self) -> bool {
         self.a == 0
     }
-
-    pub fn to_skia(self) -> tiny_skia::Color {
-        tiny_skia::Color::from_rgba8(self.r, self.g, self.b, self.a)
-    }
 }

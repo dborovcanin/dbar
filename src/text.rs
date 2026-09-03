@@ -10,6 +10,7 @@ use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCach
 use tiny_skia::{PixmapMut, PremultipliedColorU8};
 
 use crate::color::Color;
+use crate::layout::Measure;
 
 pub struct TextRenderer {
     fonts: FontSystem,
@@ -123,7 +124,7 @@ impl TextRenderer {
     }
 
     /// Width of `text` in logical pixels.
-    pub fn measure(&mut self, text: &str) -> f32 {
+    pub fn measure_text(&mut self, text: &str) -> f32 {
         if let Some(w) = self.widths.get(text) {
             return *w;
         }
@@ -189,5 +190,11 @@ fn blend_rect(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: u32, h: u32, c: cos
             *slot =
                 PremultipliedColorU8::from_rgba(r as u8, g as u8, b as u8, a as u8).unwrap_or(dst);
         }
+    }
+}
+
+impl Measure for TextRenderer {
+    fn measure(&mut self, text: &str) -> f32 {
+        self.measure_text(text)
     }
 }
