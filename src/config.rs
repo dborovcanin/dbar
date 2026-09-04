@@ -934,6 +934,7 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         "provider" => Source::Provider,
         "sway:window" => Source::SwayWindow,
         "sway:workspaces" => Source::SwayWorkspaces,
+        "audio" => Source::Native(Which::Audio),
         "cpu" => Source::Native(Which::Cpu),
         "memory" => Source::Native(Which::Memory),
         "battery" => Source::Native(Which::Battery),

@@ -11,6 +11,7 @@
 # need nothing installed:
 #
 #   config.toml       the compiled-in default, read entirely by dbar
+#   daily.toml        an everyday bar, every module read by dbar itself
 #   separators.toml   all seven separator shapes, side by side
 #   powerline.toml    an edge-to-edge ribbon with pointed transitions
 #   islands.toml      translucent rounded panels floating over the wallpaper
@@ -386,7 +387,9 @@ max_width = 320
 #
 #   cpu               $utilization
 #   memory            $percent $used $total $available $swap_*
+#   battery           $percent $status $supply $power $time $health $threshold
 #   backlight         $brightness $device
+#   audio             $volume $muted $device
 #   time              $now
 #   provider          $text $percent
 #   sway:window       $title

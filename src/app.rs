@@ -282,6 +282,12 @@ impl App {
         self.native.next_due()
     }
 
+    /// Take a reading a source pushed of its own accord, like the volume from PipeWire.
+    pub fn on_audio(&mut self, reading: crate::collect::Reading) {
+        self.native.push(&Which::Audio, reading);
+        self.invalidate();
+    }
+
     /// Take the sources a watcher covers off the timer.
     pub fn on_watching(&mut self, covered: &[Which]) {
         for which in covered {

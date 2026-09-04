@@ -9,6 +9,7 @@
 //! block - D-Bus, PipeWire - get a thread each when they arrive, and reach the loop the
 //! same way the compositor connection already does.
 
+pub mod audio;
 pub mod backlight;
 pub mod battery;
 pub mod cpu;
@@ -34,6 +35,7 @@ use crate::status::{FieldSpec, Fields, State};
 /// same path share one reading while two watching different paths do not.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Which {
+    Audio,
     Cpu,
     Memory,
     Battery,
@@ -49,6 +51,7 @@ impl Which {
     /// The bare source name, without whatever it is pointed at.
     pub fn name(&self) -> &'static str {
         match self {
+            Which::Audio => "audio",
             Which::Cpu => "cpu",
             Which::Memory => "memory",
             Which::Battery => "battery",
@@ -74,6 +77,7 @@ impl Which {
 
     pub fn fields(&self) -> &'static [FieldSpec] {
         match self {
+            Which::Audio => audio::FIELDS,
             Which::Cpu => cpu::FIELDS,
             Which::Memory => memory::FIELDS,
             Which::Battery => battery::FIELDS,
@@ -107,6 +111,7 @@ impl Which {
     /// What the module says when the config does not give it a format.
     pub fn default_format(&self) -> &'static str {
         match self {
+            Which::Audio => " $volume ",
             Which::Cpu => " $utilization ",
             Which::Memory => " $percent ",
             Which::Battery => " $percent ",
@@ -122,6 +127,8 @@ impl Which {
     /// How often to read, when the config does not say.
     pub fn default_interval(&self) -> Duration {
         match self {
+            // Never used: PipeWire says when the volume moves, so nothing asks it.
+            Which::Audio => Duration::from_secs(60),
             Which::Cpu | Which::Memory | Which::Load | Which::Network(_) => Duration::from_secs(2),
             Which::Temperature(_) => Duration::from_secs(5),
             // A disk fills slowly, and reading it can wake a spinning one.
@@ -142,8 +149,17 @@ impl Which {
         matches!(self, Which::Time)
     }
 
+    /// Whether this source arrives on its own rather than being read.
+    ///
+    /// A pushed source is never on the timer and has no collector to call: what it knows
+    /// comes from a thread that is told, and the registry only holds the last of it.
+    pub fn pushed(&self) -> bool {
+        matches!(self, Which::Audio)
+    }
+
     fn open(&self) -> Box<dyn Collector> {
         match self {
+            Which::Audio => Box::new(Pushed),
             Which::Cpu => Box::new(cpu::Cpu::new()),
             Which::Memory => Box::new(memory::Memory),
             Which::Battery => Box::new(battery::Battery::new()),
@@ -166,6 +182,15 @@ pub struct Reading {
 
 pub trait Collector {
     fn read(&mut self) -> Result<Reading>;
+}
+
+/// A source that arrives rather than being read. Nothing asks it anything.
+struct Pushed;
+
+impl Collector for Pushed {
+    fn read(&mut self) -> Result<Reading> {
+        anyhow::bail!("this source is pushed rather than read")
+    }
 }
 
 /// The collectors a config asks for, and when each is next due.
@@ -208,8 +233,11 @@ impl Registry {
                 collector: which.open(),
                 interval,
                 reading: Reading::default(),
-                due: Some(now),
-                watched: false,
+                due: match which.pushed() {
+                    true => None,
+                    false => Some(now),
+                },
+                watched: which.pushed(),
                 which: which.clone(),
                 failures: 0,
                 reported: false,
@@ -265,6 +293,13 @@ impl Registry {
     pub fn refresh(&mut self, which: &Which) {
         if let Some(entry) = self.entries.iter_mut().find(|e| &e.which == which) {
             entry.due = Some(Instant::now());
+        }
+    }
+
+    /// Take a reading a source sent of its own accord.
+    pub fn push(&mut self, which: &Which, reading: Reading) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| &e.which == which) {
+            entry.reading = reading;
         }
     }
 

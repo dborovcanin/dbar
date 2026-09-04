@@ -1,0 +1,356 @@
+# dbar - a bar to actually live with.
+#
+# showcase.toml names every key dbar understands, which makes it a reference
+# rather than something to run: it mixes six separator shapes, and it needs an
+# external provider installed before it will start without an error.
+#
+# This is the other thing - one coherent bar, every module read by dbar itself,
+# nothing to install and nothing to configure elsewhere. Everything on it is a
+# real reading from this machine.
+#
+# The bar is quiet by default: colour means something is wrong, so on an idle
+# machine there is none. Thresholds are set where a person would actually want
+# to look, not where they make a screenshot colourful.
+
+[bar]
+height = 34
+position = "top"
+margin = 3
+gap = 3
+font = "sans-serif 15"
+icon_size = 20
+
+# ---------------------------------------------------------------------------
+# Colours
+# ---------------------------------------------------------------------------
+
+[colors]
+background = "#1e1e2e"
+surface = "#313244cc"   # alpha cc, so SwayFX blur shows through
+raised = "#45475acc"    # a pill sitting on that surface
+divider = "#585b70"
+text = "#cdd6f4"
+subtext = "#a6adc8"
+accent = "#89b4fa"
+warning = "#f9e2af"
+critical = "#f38ba8"
+
+[left]
+groups = ["desktop", "window"]
+
+[right]
+groups = ["system", "storage", "power", "time"]
+
+# ---------------------------------------------------------------------------
+# Styles
+#
+# `panel` is what everything wears; the two alarms are what a state rule swaps
+# in when a reading stops being ordinary. The rest exist for the workspaces,
+# which are the one place on the bar where several things are true at once.
+# ---------------------------------------------------------------------------
+
+[style.panel]
+foreground = "$text"
+padding = 8
+
+[style.warning]
+background = "$warning"
+foreground = "$background"
+padding = 8
+
+[style.critical]
+background = "$critical"
+foreground = "$background"
+padding = 8
+
+# A pill inside a panel: its own rounded background, sitting on the group's. The
+# workspaces use it to say which ones exist on another output.
+[style.pill]
+background = "$raised"
+foreground = "$text"
+padding = 10
+radius = 12
+
+[style.focused]
+background = "$accent"
+foreground = "$background"
+padding = 10
+radius = 12
+
+[style.dim]
+foreground = "$subtext"
+padding = 10
+
+# The pointer picks a module out without moving anything: hover is paint-only,
+# so nothing resizes as the mouse crosses the bar.
+[style.hovered]
+background = "$raised"
+foreground = "$text"
+
+# ---------------------------------------------------------------------------
+# Groups
+#
+# Every group is the same island: one surface, both corners rounded, hairlines
+# between the modules inside it. Uniformity is the point - a shape that differs
+# should mean something differs, and here nothing does.
+# ---------------------------------------------------------------------------
+
+[group.desktop]
+modules = ["workspaces"]
+background = "$surface"
+radius = 12
+padding = 3
+spacing = 3
+
+[group.desktop.edges]
+left = "round"
+right = "round"
+
+[group.window]
+modules = ["title"]
+background = "$surface"
+radius = 12
+
+[group.window.edges]
+left = "round"
+right = "round"
+
+# The processor's three numbers share one island and one icon, because there is
+# no icon for a load average or a temperature and inventing one per module
+# would say they are three unrelated things.
+[group.system]
+modules = ["cpu", "load", "temperature"]
+background = "$surface"
+radius = 12
+
+[group.system.separator]
+shape = "line"
+width = 13
+color = "$divider"
+
+[group.system.edges]
+left = "round"
+right = "round"
+
+[group.storage]
+modules = ["memory", "disk", "network"]
+background = "$surface"
+radius = 12
+
+[group.storage.separator]
+shape = "line"
+width = 13
+color = "$divider"
+
+[group.storage.edges]
+left = "round"
+right = "round"
+
+[group.power]
+modules = ["volume", "brightness", "battery"]
+background = "$surface"
+radius = 12
+
+[group.power.separator]
+shape = "line"
+width = 13
+color = "$divider"
+
+[group.power.edges]
+left = "round"
+right = "round"
+
+# The clock is what the eye goes to, so it is the one thing that carries a
+# colour of its own.
+[group.time]
+modules = ["clock"]
+background = "$accent"
+radius = 12
+
+[group.time.edges]
+left = "round"
+right = "round"
+
+# ---------------------------------------------------------------------------
+# Modules
+#
+# Fixed widths where a number moves, so the bar does not shuffle sideways every
+# time a percentage crosses ten. A left click swaps `format_alt` in and back.
+# ---------------------------------------------------------------------------
+
+# Three states, so a glance says which workspace is here, which is on the other
+# screen and which is asking for attention. Everything else is a quiet number.
+[module.workspaces]
+source = "sway:workspaces"
+style = "dim"
+min_width = 34
+
+[module.workspaces.states.focused]
+focused = true
+style = "focused"
+
+[module.workspaces.states.visible]
+visible = true
+style = "pill"
+
+[module.workspaces.states.urgent]
+urgent = true
+style = "critical"
+radius = 12
+
+[module.title]
+source = "sway:window"
+style = "panel"
+max_width = 420
+
+[module.cpu]
+source = "cpu"
+interval = "2s"
+format = " $utilization.n(w:4) "
+style = "panel"
+icon = "cpu"
+
+[module.cpu.states.busy]
+above = 85
+style = "warning"
+
+[module.cpu.states.unreadable]
+state = "error"
+style = "critical"
+
+# The raw load average is what is shown; the threshold keys on the same figure
+# against the core count, since 4.0 saturates a quad-core and idles a sixteen.
+[module.load]
+source = "load"
+interval = "5s"
+format = " $one.n(d:2) "
+style = "panel"
+
+[module.load.states.busy]
+field = "percent"
+above = 90
+style = "warning"
+
+# The processor's own sensor, found by driver name. A laptop sits in the
+# fifties and sixties all day, so the collector's own rating decides when this
+# is worth colouring rather than a number picked here.
+[module.temperature]
+source = "temperature"
+interval = "5s"
+format = " $temp.n(d:0) "
+format_alt = " $temp.n(d:0) $label "
+style = "panel"
+
+[module.temperature.states.warm]
+state = "warning"
+style = "warning"
+
+[module.temperature.states.hot]
+state = "critical"
+style = "critical"
+
+# Click for what is actually in use rather than the share.
+[module.memory]
+source = "memory"
+interval = "5s"
+format = " $percent.n(w:4) "
+format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
+style = "panel"
+icon = "memory"
+
+[module.memory.states.full]
+above = 90
+style = "warning"
+
+# What an ordinary program can still write, which leaves out the reserve only
+# root may touch.
+[module.disk]
+source = "disk"
+path = "/"
+interval = "1m"
+format = " $available "
+format_alt = " $percent.n(w:4) of $total.n(d:0) "
+style = "panel"
+icon = "disk"
+
+[module.disk.states.filling]
+above = 90
+style = "warning"
+
+# Follows whichever interface is actually up, so unplugging a cable moves it to
+# the wireless card without a restart.
+[module.network]
+source = "network"
+interval = "2s"
+format = " $down{  $up} "
+format_alt = " $device $state "
+style = "panel"
+icon = "wifi"
+
+[module.network.states.offline]
+field = "state"
+equals = "down"
+icon = "wifi-off"
+
+# PipeWire says when the volume moves, so this is never sampled: it follows the
+# default output, which is what the volume keys move, and follows it to a headset
+# the moment one is plugged in.
+[module.volume]
+source = "audio"
+format = " $volume.n(w:4) "
+format_alt = " $volume.n(w:4)  $device "
+style = "panel"
+icon = "volume"
+
+# Muted is not a volume of zero - the level is still there, waiting - so the icon
+# says so and the number goes quiet rather than changing.
+[module.volume.states.muted]
+field = "muted"
+equals = "yes"
+foreground = "$subtext"
+icon = "volume-muted"
+
+# The kernel reports a brightness change, so this is read when it moves and
+# never in between - no interval, and nothing to press after a brightness key.
+[module.brightness]
+source = "backlight"
+format = " $brightness.n(w:4) "
+style = "panel"
+icon = "brightness"
+
+# Braces hold what should disappear rather than draw half a sentence: a machine
+# on mains has no time remaining to report and does not mention one.
+[module.battery]
+source = "battery"
+interval = "30s"
+format = " $percent.n(w:4){  $time.dur(style:short) left} "
+format_alt = " $percent.n(w:4)  $status{  $power.n(d:1)}  health $health.n(d:0) "
+style = "panel"
+icon = "battery"
+
+# On the mains, not charging: a battery held at full, or at whatever cap a
+# charge threshold sets, still reports `not charging`, and the icon should say
+# the charger is in rather than that the battery is on its own.
+[module.battery.states.plugged]
+field = "supply"
+equals = "mains"
+icon = "battery-charging"
+
+# The battery rates its own situation and only alarms while it is draining: the
+# same 10% with the charger in is fine.
+[module.battery.states.warning]
+state = "warning"
+style = "warning"
+
+[module.battery.states.critical]
+state = "critical"
+style = "critical"
+
+[module.clock]
+source = "time"
+# On the minute, rather than drifting from whenever dbar started.
+interval = "1m"
+format = " $now.time(f:'%a %d %b  %H:%M') "
+style = "panel"
+foreground = "$background"
+icon = "clock"

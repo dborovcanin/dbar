@@ -116,7 +116,8 @@ fn main() -> Result<()> {
         None
     };
 
-    let collectors = !config.collectors().is_empty();
+    let config_collectors = config.collectors();
+    let collectors = !config_collectors.is_empty();
     let listening = provider.is_some();
     // A signal brings a reading forward: after `brightnessctl set`, the bar should say so
     // now rather than when the interval next comes round.
@@ -143,6 +144,20 @@ fn main() -> Result<()> {
                 }
             })
             .map_err(|e| anyhow::anyhow!("inserting the signal source: {e}"))?;
+    }
+
+    // The volume is not read at all: PipeWire says when it moves, from a thread of its
+    // own, and the reading arrives here finished.
+    if config_collectors.contains_key(&crate::collect::Which::Audio) {
+        let (audio_tx, audio_rx) = calloop::channel::channel();
+        crate::collect::audio::spawn(audio_tx)?;
+        handle
+            .insert_source(audio_rx, |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(reading) = event {
+                    app.on_audio(reading);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("inserting the audio source: {e}"))?;
     }
 
     // Sources the kernel reports changes on are read when they change and never in

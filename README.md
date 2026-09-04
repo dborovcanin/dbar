@@ -2,7 +2,7 @@
 
 A small, event-driven Wayland status bar for Sway/SwayFX. It renders with
 `tiny-skia` on a `wlr-layer-shell` surface and reads what it shows itself, from
-`/proc` and `/sys`. Any i3bar-compatible provider can supply the rest.
+`/proc`, `/sys` and PipeWire. Any i3bar-compatible provider can supply the rest.
 
 This is the **V0** milestone from [spec.md](spec.md).
 
@@ -13,8 +13,11 @@ This is the **V0** milestone from [spec.md](spec.md).
 - per-pixel transparency, so SwayFX blur shows through
 - text rendering with shaping and font fallback (`cosmic-text`)
 - native collectors for cpu, memory, battery, backlight, load, temperature,
-  disk, network and the clock, read on one shared timer that wakes only when
-  something is due
+  disk, network, volume and the clock, read on one shared timer that wakes only
+  when something is due
+- sources that are told rather than asked, and cost no wake-ups at all: the
+  backlight through `poll()` on sysfs, the battery through the kernel's uevent
+  broadcast, and the volume through PipeWire
 - i3bar input under `[i3bar]`: any i3bar-compatible provider, `i3status-rs` by
   default. A config that reads nothing from one starts no child process at all
 - module state styling, keyed on a value, on a named field, on how the source
@@ -33,9 +36,9 @@ This is the **V0** milestone from [spec.md](spec.md).
   formatting, `{groups}` that disappear when a field has nothing to report, and
   `$a|$b|'fallback'` chains
 
-Not yet implemented: collectors for battery, disk, temperature, network, audio
-and the rest; animations; command modules; multi-monitor. See
-[dbar-native.md](dbar-native.md) for where this is going.
+Not yet implemented: a media player, Bluetooth, a wireless network's name and
+strength, command modules, multi-monitor. See [dbar-native.md](dbar-native.md)
+for where this is going.
 
 ## Build
 
@@ -78,6 +81,7 @@ else installed:
 
 | | |
 |---|---|
+| [daily.toml](examples/daily.toml) | an everyday bar, every module read by dbar itself |
 | [separators.toml](examples/separators.toml) | all seven separator shapes, side by side |
 | [powerline.toml](examples/powerline.toml) | an edge-to-edge ribbon with pointed transitions |
 | [islands.toml](examples/islands.toml) | translucent rounded panels floating over the wallpaper |
@@ -392,14 +396,15 @@ source = "cpu"
 interval = "2s"       # how often dbar reads it; a unit is required
 ```
 
-These are read by dbar itself, from `/proc` and `/sys`:
+These are read by dbar itself, from `/proc`, `/sys` and PipeWire:
 
 | source | fields |
 |---|---|
 | `cpu` | `$utilization` |
 | `memory` | `$percent` `$used` `$total` `$available` `$swap_percent` `$swap_used` `$swap_total` |
-| `battery` | `$percent` `$status` `$power` `$time` `$health` `$threshold` |
+| `battery` | `$percent` `$status` `$supply` `$power` `$time` `$health` `$threshold` |
 | `backlight` | `$brightness` `$device` |
+| `audio` | `$volume` `$muted` `$device` |
 | `load` | `$one` `$five` `$fifteen` `$percent` |
 | `temperature` | `$temp` `$average` `$label` `$chip` |
 | `disk` | `$percent` `$used` `$total` `$available` `$free` `$path` |
@@ -458,8 +463,8 @@ module names no source at all.
 
 ### The i3bar provider
 
-For what dbar cannot read yet — disk, network, audio, battery — point `[i3bar]`
-at a provider with its own configuration:
+For what dbar cannot read yet — a media player, Bluetooth, the weather — point
+`[i3bar]` at a provider with its own configuration:
 
 ```toml
 [i3bar]
