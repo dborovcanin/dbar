@@ -70,8 +70,27 @@ exec_always pkill -x dbar; dbar
 
 [examples/config.toml](examples/config.toml) is the annotated default, and is
 also what dbar compiles in and uses when no config file exists.
-[examples/showcase.toml](examples/showcase.toml) exercises every key and every
-separator shape across all three positions:
+
+The rest of `examples/` is a gallery. Each one is a complete bar in a different
+style, annotated with why it looks the way it does, and each runs with nothing
+else installed:
+
+| | |
+|---|---|
+| [separators.toml](examples/separators.toml) | all seven separator shapes, side by side |
+| [powerline.toml](examples/powerline.toml) | an edge-to-edge ribbon with pointed transitions |
+| [islands.toml](examples/islands.toml) | translucent rounded panels floating over the wallpaper |
+| [minimal.toml](examples/minimal.toml) | text and hairlines, along the bottom of the screen |
+| [states.toml](examples/states.toml) | modules that restyle themselves as values move |
+
+```sh
+dbar -c examples/islands.toml
+```
+
+[examples/showcase.toml](examples/showcase.toml) is the reference: every key
+dbar understands appears in it at least once. It is the one example that needs
+an external provider, so point its `[i3bar] args` at a real configuration
+before running it.
 
 ```sh
 dbar -c examples/showcase.toml
@@ -323,6 +342,22 @@ radius = 12           # defaults to the group's own radius
 
 Group contents are clipped to the group outline, so square module corners and
 separator overlap never spill past a rounded edge.
+
+A group can also come to a point where it meets the bar, which is what turns a
+run of blocks into a ribbon:
+
+```toml
+[group.system.ends]
+left = "chevron"      # any separator shape, or "none"
+right = "none"
+width = 14            # defaults to the separator's width
+overlap = 1
+```
+
+An end is the same transition as between two modules, drawn between a module
+and whatever is behind the bar. The shapes face the way the group's separators
+do, and the space they need is reserved beside the modules rather than taken
+from them.
 
 Instead of `"*"`, a group may list block names to select and order them
 explicitly:

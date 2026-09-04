@@ -1,0 +1,166 @@
+# Floating islands.
+#
+#   dbar -c examples/islands.toml
+#
+# The opposite of the Powerline look: the bar itself is invisible, and what you
+# see are separate rounded panels hovering over the wallpaper. Three things do
+# it - a fully transparent bar background, a `margin` that lifts the whole
+# surface off the screen edge, and a `gap` that keeps the groups apart.
+#
+# Every colour here carries alpha in its last two hex digits, so on SwayFX the
+# compositor's blur shows through. dbar draws per-pixel alpha, so this costs
+# nothing extra.
+
+[bar]
+height = 38
+position = "top"
+# Lifts the surface away from the screen edge, so the panels look detached.
+margin = 8
+# Space between one group and the next.
+gap = 10
+font = "sans-serif 10"
+
+[bar.background]
+# Nothing at all: only the groups below are painted.
+color = "#00000000"
+
+[colors]
+panel = "#313244bb"
+raised = "#45475acc"
+text = "#cdd6f4"
+dim = "#a6adc8"
+accent = "#89b4fa"
+mint = "#94e2d5"
+peach = "#fab387"
+red = "#f38ba8"
+
+[style.plain]
+foreground = "$text"
+padding = 10
+
+[style.dim]
+foreground = "$dim"
+padding = 10
+
+# A pill inside a panel: its own rounded background, sitting on the group's.
+[style.pill]
+background = "$raised"
+foreground = "$text"
+padding = 10
+radius = 12
+
+[style.focused]
+background = "$accent"
+foreground = "#1e1e2e"
+padding = 10
+radius = 12
+
+[module.workspaces]
+source = "sway:workspaces"
+style = "dim"
+min_width = 34
+
+[module.workspaces.states.focused]
+focused = true
+style = "focused"
+
+[module.workspaces.states.visible]
+visible = true
+style = "pill"
+
+[module.title]
+source = "sway:window"
+style = "plain"
+max_width = 420
+
+[module.cpu]
+source = "cpu"
+interval = "2s"
+format = " $utilization.n(w:4) "
+style = "plain"
+icon = "cpu"
+
+[module.cpu.states.busy]
+above = 70
+foreground = "$peach"
+
+[module.memory]
+source = "memory"
+interval = "5s"
+format = " $percent.n(w:4) "
+format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
+style = "plain"
+icon = "memory"
+
+[module.memory.states.high]
+above = 85
+foreground = "$red"
+
+[module.backlight]
+source = "backlight"
+signal = 8
+format = " $brightness.n(w:4) "
+style = "plain"
+icon = "brightness"
+
+[module.clock]
+source = "time"
+interval = "1m"
+format = " $now.time(f:'%H:%M') "
+style = "plain"
+icon = "clock"
+
+[module.date]
+source = "time"
+interval = "1h"
+format = " $now.time(f:'%a %d %b') "
+style = "dim"
+
+[left]
+groups = ["desktop", "window"]
+
+[center]
+groups = ["clock"]
+
+[right]
+groups = ["system"]
+
+# Each group is its own island: a rounded, translucent panel.
+[group.desktop]
+modules = ["workspaces"]
+background = "$panel"
+radius = 14
+padding = 4
+spacing = 2
+
+[group.window]
+modules = ["title"]
+background = "$panel"
+radius = 14
+padding = 4
+
+[group.clock]
+modules = ["clock", "date"]
+background = "$panel"
+radius = 14
+padding = 4
+spacing = 0
+
+# A hairline is enough between items that share a panel; a filled shape would
+# fight the rounded outline.
+[group.clock.separator]
+shape = "line"
+width = 13
+color = "$dim"
+
+[group.system]
+modules = ["cpu", "memory", "backlight"]
+background = "$panel"
+radius = 14
+padding = 4
+spacing = 0
+
+[group.system.separator]
+shape = "line"
+width = 13
+color = "$dim"

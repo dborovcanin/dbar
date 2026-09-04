@@ -1,0 +1,97 @@
+# As little as possible.
+#
+#   dbar -c examples/minimal.toml
+#
+# No panels, no fills, no rounding: a thin strip along the bottom of the screen
+# with text on it. Nothing is drawn except the glyphs, the icons and a hairline
+# between items, which makes this the cheapest thing dbar can render and the
+# easiest to live with over a wallpaper.
+#
+# It is also the shortest useful configuration: `[bar]` is optional, every style
+# key has a default, and a module that wants the ordinary thing says only where
+# it comes from.
+
+[bar]
+# Bottom instead of top. The margin and the exclusive zone follow it.
+position = "bottom"
+height = 26
+margin = 0
+gap = 22
+font = "sans-serif 9"
+
+[bar.background]
+# A wash rather than a panel: mostly transparent, just enough to keep text
+# legible over a bright wallpaper.
+color = "#11111b99"
+
+[colors]
+text = "#bac2de"
+dim = "#585b70"
+accent = "#89b4fa"
+
+[style.default]
+foreground = "$text"
+padding = 6
+
+[style.dim]
+foreground = "$dim"
+padding = 6
+
+[module.workspaces]
+source = "sway:workspaces"
+style = "dim"
+min_width = 22
+
+[module.workspaces.states.focused]
+focused = true
+foreground = "$accent"
+
+[module.title]
+source = "sway:window"
+style = "dim"
+max_width = 460
+
+[module.cpu]
+source = "cpu"
+interval = "3s"
+# No icon: the label does the work, which is the whole idea here.
+format = "cpu $utilization.n(w:4)"
+style = "default"
+
+[module.memory]
+source = "memory"
+interval = "5s"
+format = "mem $percent.n(w:4)"
+style = "default"
+
+[module.backlight]
+source = "backlight"
+signal = 8
+format = "lum $brightness.n(w:4)"
+style = "default"
+
+[module.clock]
+source = "time"
+interval = "1m"
+format = "$now.time(f:'%H:%M')"
+style = "default"
+
+[left]
+groups = ["desktop"]
+
+[right]
+groups = ["system"]
+
+[group.desktop]
+modules = ["workspaces", "title"]
+spacing = 8
+
+[group.system]
+modules = ["cpu", "memory", "backlight", "clock"]
+spacing = 0
+
+# With nothing filled, a hairline is the only divider that makes sense.
+[group.system.separator]
+shape = "line"
+width = 21
+color = "$dim"

@@ -1,0 +1,196 @@
+# Every separator shape, side by side.
+#
+#   dbar -c examples/separators.toml
+#
+# Seven groups, each naming the transition drawn between its two modules.
+#
+# Separators are real geometry, not font glyphs, so they scale with the bar,
+# take their colour from the modules around them, and need no Nerd Font. A
+# filled shape only reads when the two sides differ, which is why each group
+# pairs a dark caption with a light value.
+
+[bar]
+height = 34
+position = "top"
+margin = 6
+gap = 12
+font = "sans-serif 9"
+
+[bar.background]
+color = "#00000000"
+
+[colors]
+surface = "#313244"
+name = "#45475a"
+value = "#89b4fa"
+ink = "#1e1e2e"
+text = "#cdd6f4"
+hair = "#7f849c"
+
+# The caption. A format naming no field is a constant, which is all a label
+# needs; the source still has to be something, so it is the cheapest one on an
+# interval long enough never to matter.
+[style.name]
+background = "$name"
+foreground = "$text"
+padding = 8
+
+[style.value]
+background = "$value"
+foreground = "$ink"
+padding = 8
+
+# Unfilled, so a hairline between two of these has somewhere to show.
+[style.bare]
+foreground = "$text"
+padding = 8
+
+[module.value]
+source = "memory"
+interval = "5s"
+format = "$percent.n(w:4)"
+style = "value"
+
+[module.bare_value]
+source = "memory"
+interval = "5s"
+format = "$percent.n(w:4)"
+style = "bare"
+
+[module.none]
+source = "time"
+interval = "1h"
+format = "none"
+style = "name"
+
+[module.line]
+source = "time"
+interval = "1h"
+format = "line"
+style = "bare"
+
+[module.slant]
+source = "time"
+interval = "1h"
+format = "slant"
+style = "name"
+
+[module.chevron]
+source = "time"
+interval = "1h"
+format = "chevron"
+style = "name"
+
+[module.notch]
+source = "time"
+interval = "1h"
+format = "notch"
+style = "name"
+
+[module.round]
+source = "time"
+interval = "1h"
+format = "round"
+style = "name"
+
+[module.curve]
+source = "time"
+interval = "1h"
+format = "curve"
+style = "name"
+
+[left]
+groups = ["none", "line", "slant", "chevron", "notch", "round", "curve"]
+
+# `none` is the default: `spacing` decides how far apart neighbours sit, and
+# nothing is drawn between them.
+[group.none]
+modules = ["none", "value"]
+background = "$surface"
+radius = 6
+padding = 3
+spacing = 0
+
+# A hairline rather than a fill, so it divides without weight. `color` here
+# names a palette entry; the fill modes below name a neighbour instead.
+[group.line]
+modules = ["line", "bare_value"]
+background = "$surface"
+radius = 6
+padding = 3
+
+[group.line.separator]
+shape = "line"
+width = 17
+color = "$hair"
+
+[group.slant]
+modules = ["slant", "value"]
+background = "$surface"
+radius = 6
+padding = 3
+
+# `color = "previous"` fills the shape with the background of the module before
+# it, which is what makes one module look like it flows into the next.
+# `overlap` bleeds it a fraction past the boundary, hiding the seam where two
+# antialiased edges meet.
+[group.slant.separator]
+shape = "slant"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.chevron]
+modules = ["chevron", "value"]
+background = "$surface"
+radius = 6
+padding = 3
+
+[group.chevron.separator]
+shape = "chevron"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.notch]
+modules = ["notch", "value"]
+background = "$surface"
+radius = 6
+padding = 3
+
+[group.notch.separator]
+shape = "notch"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.round]
+modules = ["round", "value"]
+background = "$surface"
+radius = 6
+padding = 3
+
+[group.round.separator]
+shape = "round"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+# Any shape mirrors with `direction = "left"`, for a bar that reads the other
+# way; `color = "next"` fills from the module after it instead of before.
+[group.curve]
+modules = ["curve", "value"]
+background = "$surface"
+radius = 6
+padding = 3
+
+[group.curve.separator]
+shape = "curve"
+width = 16
+direction = "right"
+color = "previous"
+overlap = 1

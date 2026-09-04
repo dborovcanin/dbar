@@ -1,0 +1,215 @@
+# Modules that restyle themselves.
+#
+#   dbar -c examples/states.toml
+#
+# A state rule is a condition and a set of style keys to apply while it holds.
+# Rules overlay the module's own style rather than replacing it, so an icon set
+# on the module survives and keeps grading while the colours change.
+#
+# Rules are checked tightest bound first, whatever order they appear in the
+# file, so `above = 90` wins over `above = 60` at 95%. That means a ramp can be
+# written in any order and still reads as one.
+#
+# What a rule can match on:
+#
+#   above / below   the value the source nominated as its main one
+#   field           point those at any other number the source publishes
+#   state           how the source rates itself: idle info good warning
+#                   critical error
+#   hover           while the pointer is over the module
+#   focused         a workspace with focus
+#   visible         a workspace shown on some output
+#   urgent          the provider's own alarm flag, or an urgent workspace
+#   contains        a substring of the text - i3bar modules only, because
+#                   rendered text is all that protocol carries
+
+[bar]
+height = 34
+position = "top"
+margin = 6
+gap = 8
+font = "sans-serif 10"
+
+[bar.background]
+color = "#00000000"
+
+[colors]
+surface = "#313244cc"
+raised = "#45475a"
+text = "#cdd6f4"
+dim = "#7f849c"
+ink = "#11111b"
+good = "#a6e3a1"
+info = "#89b4fa"
+warn = "#f9e2af"
+crit = "#f38ba8"
+
+[style.default]
+foreground = "$text"
+padding = 9
+
+[style.dim]
+foreground = "$dim"
+padding = 9
+
+[style.good]
+background = "$good"
+foreground = "$ink"
+padding = 9
+radius = 8
+
+[style.info]
+background = "$info"
+foreground = "$ink"
+padding = 9
+radius = 8
+
+[style.warn]
+background = "$warn"
+foreground = "$ink"
+padding = 9
+radius = 8
+
+[style.crit]
+background = "$crit"
+foreground = "$ink"
+padding = 9
+radius = 8
+
+# Hover is paint-only: it may change background, foreground and radius, and
+# nothing else. A hover style that changed padding would resize the module
+# under the pointer, which can move the pointer off it and oscillate, so the
+# metrics always come from the unhovered style.
+[style.hovered]
+background = "$raised"
+foreground = "$text"
+radius = 8
+
+# A full ramp. Whichever step is true right now is the one drawn; the rest are
+# waiting. `min_width` keeps the module from resizing as it moves between them.
+[module.cpu]
+source = "cpu"
+interval = "2s"
+format = " $utilization.n(w:4) "
+style = "default"
+icon = "cpu"
+min_width = 92
+
+[module.cpu.states.quiet]
+below = 25
+style = "good"
+
+[module.cpu.states.working]
+above = 25
+style = "info"
+
+[module.cpu.states.busy]
+above = 60
+style = "warn"
+
+[module.cpu.states.pegged]
+above = 90
+style = "crit"
+
+# The same ramp on a different source, plus a rule that reads a value other
+# than the main one. `field` has to name a number this source publishes, and
+# saying otherwise is a startup error rather than a rule that never fires.
+[module.memory]
+source = "memory"
+interval = "5s"
+format = " $percent.n(w:4) "
+format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
+style = "default"
+icon = "memory"
+min_width = 92
+
+[module.memory.states.roomy]
+below = 50
+style = "good"
+
+[module.memory.states.filling]
+above = 50
+style = "warn"
+
+[module.memory.states.full]
+above = 85
+style = "crit"
+
+[module.memory.states.swapping]
+field = "swap_percent"
+above = 20
+style = "crit"
+
+# A collector that stops answering keeps its last reading on screen and rates
+# itself `error`. Unplug the panel this reads and the module turns red rather
+# than quietly freezing on a stale number.
+[module.backlight]
+source = "backlight"
+signal = 8
+format = " $brightness.n(w:4) "
+style = "default"
+icon = "brightness"
+min_width = 92
+
+[module.backlight.states.unreadable]
+state = "error"
+style = "crit"
+
+# Nothing but hover: the module sits flat until the pointer arrives.
+[module.clock]
+source = "time"
+interval = "1m"
+format = " $now.time(f:'%a %d %b  %H:%M') "
+style = "default"
+icon = "clock"
+
+[module.clock.states.hover]
+hover = true
+style = "hovered"
+
+# Workspaces carry their own flags. `focused` is the one with focus, `visible`
+# is shown on some other output, `urgent` is asking for attention.
+[module.workspaces]
+source = "sway:workspaces"
+style = "dim"
+min_width = 32
+
+[module.workspaces.states.focused]
+focused = true
+style = "info"
+
+[module.workspaces.states.visible]
+visible = true
+style = "dim"
+background = "$raised"
+radius = 8
+
+[module.workspaces.states.urgent]
+urgent = true
+style = "crit"
+
+[left]
+groups = ["desktop"]
+
+[right]
+groups = ["system", "clock"]
+
+[group.desktop]
+modules = ["workspaces"]
+background = "$surface"
+radius = 12
+padding = 4
+spacing = 2
+
+[group.system]
+modules = ["cpu", "memory", "backlight"]
+background = "$surface"
+radius = 12
+padding = 4
+spacing = 4
+
+[group.clock]
+modules = ["clock"]
+background = "$surface"
+radius = 12
+padding = 4

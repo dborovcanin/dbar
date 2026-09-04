@@ -1,0 +1,166 @@
+# A Powerline bar, without the Powerline font.
+#
+#   dbar -c examples/powerline.toml
+#
+# The classic look: an edge-to-edge bar, blocks that run into one another
+# through pointed transitions, and a colour ramp that gets hotter towards the
+# right. Everything here is drawn as geometry, so there is no Nerd Font to
+# install and no glyph that renders a pixel off at some font sizes.
+#
+# The two things that make it read as one continuous ribbon are `spacing = 0`
+# with `padding = 0` on the group, so nothing shows between blocks, and
+# `color = "previous"`, so each transition is filled with the block behind it.
+
+[bar]
+height = 30
+position = "top"
+# Edge to edge: no margin, no gap, no rounding anywhere.
+margin = 0
+gap = 0
+font = "sans-serif 10"
+
+[bar.background]
+color = "$base"
+radius = 0
+
+[colors]
+base = "#1e1e2e"
+ink = "#11111b"
+text = "#cdd6f4"
+step1 = "#585b70"
+step2 = "#89b4fa"
+step3 = "#94e2d5"
+step4 = "#a6e3a1"
+step5 = "#f9e2af"
+step6 = "#f38ba8"
+
+[style.step1]
+background = "$step1"
+foreground = "$text"
+padding = 10
+
+[style.step2]
+background = "$step2"
+foreground = "$ink"
+padding = 10
+
+[style.step3]
+background = "$step3"
+foreground = "$ink"
+padding = 10
+
+[style.step4]
+background = "$step4"
+foreground = "$ink"
+padding = 10
+
+[style.step5]
+background = "$step5"
+foreground = "$ink"
+padding = 10
+
+[style.step6]
+background = "$step6"
+foreground = "$ink"
+padding = 10
+
+[module.workspaces]
+source = "sway:workspaces"
+style = "step1"
+
+[module.workspaces.states.focused]
+focused = true
+style = "step2"
+
+[module.title]
+source = "sway:window"
+style = "step1"
+# A title has no length of its own, so it is capped rather than allowed to push
+# the rest of the bar off the screen.
+max_width = 400
+
+[module.cpu]
+source = "cpu"
+interval = "2s"
+format = " $utilization.n(w:4) "
+style = "step3"
+icon = "cpu"
+
+[module.memory]
+source = "memory"
+interval = "5s"
+format = " $percent.n(w:4) "
+format_alt = " $used.n(d:1) of $total.n(d:0) "
+style = "step4"
+icon = "memory"
+
+[module.backlight]
+source = "backlight"
+signal = 8
+format = " $brightness.n(w:4) "
+style = "step5"
+icon = "brightness"
+
+[module.clock]
+source = "time"
+interval = "1m"
+format = " $now.time(f:'%a %d %b  %H:%M') "
+style = "step6"
+icon = "clock"
+
+[left]
+groups = ["desktop"]
+
+[right]
+groups = ["system"]
+
+# The left ribbon points right, away from the screen edge it grows from.
+[group.desktop]
+modules = ["workspaces", "title"]
+padding = 0
+spacing = 0
+
+[group.desktop.separator]
+shape = "chevron"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.desktop.edges]
+left = "none"
+right = "none"
+
+# The point on the end of the ribbon: the same transition as between two
+# modules, but between the last module and the bar behind it. Nothing is drawn
+# at the left end, because that one runs off the edge of the screen.
+[group.desktop.ends]
+right = "chevron"
+
+# The right ribbon points left, back towards the middle, so both ribbons flow
+# away from the screen edge they grow from.
+#
+# `direction` mirrors the boundary curve; it does not move the colours, which
+# stay on their own sides. So `color = "previous"` still means "the region on
+# the previous module's side is the previous module's colour", whichever way
+# the point faces. `color = "next"` swaps the two, for a ribbon that reads as
+# flowing backwards.
+[group.system]
+modules = ["cpu", "memory", "backlight", "clock"]
+padding = 0
+spacing = 0
+
+[group.system.separator]
+shape = "chevron"
+width = 14
+direction = "left"
+color = "previous"
+overlap = 1
+
+[group.system.edges]
+left = "none"
+right = "none"
+
+# This ribbon points left, so its own point is on the left end.
+[group.system.ends]
+left = "chevron"

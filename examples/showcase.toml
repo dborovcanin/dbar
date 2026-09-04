@@ -1,14 +1,21 @@
 # dbar - the full configuration surface.
 #
-#   dbar -c examples/showcase.toml
+# A reference rather than a starting point: every key dbar understands appears
+# here at least once. A realistic bar, mixing the two kinds of module dbar has -
+# the ones it reads itself, and the ones an external i3bar-protocol provider
+# sends - across six groups and all three positions, each group using a
+# different separator shape.
 #
-# A realistic bar, mixing the two kinds of module dbar has: the ones it reads
-# itself, and the ones an external i3bar-protocol provider sends. Everything
-# appears exactly once, spread across six groups and all three positions, each
-# group using a different separator shape.
+# To run it, point [i3bar] args at a real i3status-rs configuration first; the
+# path below is a placeholder, and tildes are not expanded. The other examples
+# need nothing installed:
 #
-# See examples/config.toml for a bar that reads everything itself and starts no
-# child process at all.
+#   config.toml       the compiled-in default, read entirely by dbar
+#   separators.toml   all seven separator shapes, side by side
+#   powerline.toml    an edge-to-edge ribbon with pointed transitions
+#   islands.toml      translucent rounded panels floating over the wallpaper
+#   minimal.toml      text and hairlines, along the bottom of the screen
+#   states.toml       modules that restyle themselves as values move
 
 [bar]
 height = 34
@@ -341,6 +348,17 @@ overlap = 1
 left = "round"
 right = "round"
 radius = 12
+
+# `ends` is the transition where the group meets the bar, drawn with the same
+# shapes as `separator` but between a module and nothing. It is what gives a
+# Powerline ribbon its point; see examples/powerline.toml. The ends face the
+# way the group's separators do, and take their width and overlap from the
+# separator unless told otherwise.
+[group.power.ends]
+left = "none"
+right = "none"
+width = 10
+overlap = 1
 
 [module.workspaces]
 source = "sway:workspaces"
