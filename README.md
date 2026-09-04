@@ -12,8 +12,8 @@ This is the **V0** milestone from [spec.md](spec.md).
   exclusive zone
 - per-pixel transparency, so SwayFX blur shows through
 - text rendering with shaping and font fallback (`cosmic-text`)
-- native collectors for cpu, memory, backlight and the clock, read on one shared
-  timer that wakes only when something is due
+- native collectors for cpu, memory, battery, backlight and the clock, read on
+  one shared timer that wakes only when something is due
 - i3bar input under `[i3bar]`: any i3bar-compatible provider, `i3status-rs` by
   default. A config that reads nothing from one starts no child process at all
 - module state styling, keyed on a value, on a named field, on how the source
@@ -273,7 +273,8 @@ icon = "battery-charging"
 
 A rule matches when every condition it states holds: `below` and `above`
 compare against the value the source nominated as its main one, `field` points
-them at a different value it publishes, `state` matches how the source rates
+them - or `equals` - at a different value it publishes, `state` matches how the
+source rates
 what it is reporting, `contains` matches the module's own text, `urgent`
 matches the flag the provider sets, `hover` matches the pointer, and `focused`
 and `visible` match a workspace. A rule stating no condition never fires.
@@ -284,10 +285,20 @@ field = "swap_percent"  # any number the source publishes
 above = 20
 style = "warning"
 
+[module.battery.states.charging]
+field = "status"        # or any word it publishes
+equals = "charging"
+icon = "battery-charging"
+
 [module.cpu.states.unreadable]
 state = "error"         # idle, info, good, warning, critical, error
 style = "critical"
 ```
+
+`equals` and `contains` both match on a word, and the difference matters:
+`equals` compares a field the source published, while `contains` searches the
+text a format produced. Only the first is reading what was actually measured,
+so it is the one a native module uses.
 
 `contains` and `strip` are only allowed on a module fed by an external
 provider, because rendered text is all that protocol carries. They are what
@@ -376,12 +387,12 @@ A module says where its content comes from:
 
 ```toml
 [module.cpu]
-source = "cpu"        # cpu, memory, backlight, time
+source = "cpu"        # cpu, memory, battery, backlight, time
 interval = "2s"       # how often dbar reads it; a unit is required
 ```
 
-`cpu`, `memory`, `backlight` and `time` are read by dbar itself, from `/proc`
-and `/sys`. They share one timer, which wakes when the earliest is due, reads
+`cpu`, `memory`, `battery`, `backlight` and `time` are read by dbar itself, from
+`/proc` and `/sys`. They share one timer, which wakes when the earliest is due, reads
 everything that has come due and redraws once — ten modules on one interval
 cost one wake-up between them. The clock lands its readings on the wall clock,
 so a module showing minutes changes when the minute does.

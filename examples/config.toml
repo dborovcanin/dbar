@@ -45,6 +45,7 @@ padding = 8
 #   cpu         $utilization
 #   memory      $percent $used $total $available
 #               $swap_percent $swap_used $swap_total
+#   battery     $percent $status $power $time $health $threshold
 #   backlight   $brightness $device
 #   time        $now
 [module.cpu]
@@ -84,6 +85,34 @@ format = " $brightness.n(w:4) "
 style = "default"
 icon = "brightness"
 
+# A machine with no battery publishes nothing for it, so this module simply is
+# not drawn on a desktop. Braces hold the parts that only apply sometimes: no
+# time remaining while it sits on mains, and no cap unless something is holding
+# charging back, as TLP does.
+[module.battery]
+source = "battery"
+interval = "30s"
+format = " $percent.n(w:4){  $time.dur(style:short) left}{  cap $threshold} "
+style = "default"
+icon = "battery"
+
+# `equals` matches a word the source published, rather than the wording a format
+# happened to produce.
+[module.battery.states.charging]
+field = "status"
+equals = "charging"
+icon = "battery-charging"
+
+# The battery decides for itself when it is worth alarming about, and only does
+# so while actually draining: 10% with the charger in is not a problem.
+[module.battery.states.low]
+state = "warning"
+foreground = "$warning"
+
+[module.battery.states.flat]
+state = "critical"
+foreground = "$critical"
+
 [module.clock]
 source = "time"
 # Read once a minute, and the reading lands on the minute rather than drifting
@@ -97,7 +126,7 @@ icon = "clock"
 groups = ["system", "clock"]
 
 [group.system]
-modules = ["cpu", "memory", "backlight"]
+modules = ["cpu", "memory", "backlight", "battery"]
 background = "$surface"
 radius = 10
 padding = 4

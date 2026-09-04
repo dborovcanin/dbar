@@ -352,18 +352,14 @@ fn size_group(
         if content.is_empty() {
             continue;
         }
-        // The state rules and the graded icons both key on the source's own numbers, not
-        // on whatever the text happens to say. A rule naming a field reads that one; the
-        // rest read whichever value the source is mainly about.
-        let bound = |rule: &crate::config::StateRule| match &rule.field {
-            Some(name) => values.get(name).and_then(|v| v.num()),
-            None => values.primary().and_then(|v| v.num()),
-        };
+        // The state rules and the graded icons both key on what the source published, not
+        // on whatever the text ended up saying; a rule reads the field it names, or the
+        // value the source is mainly about.
         let resolve = |hovered: bool, text: &str| {
             module
                 .states
                 .iter()
-                .find(|rule| rule.matches(flags, hovered, bound(rule), text))
+                .find(|rule| rule.matches(flags, hovered, &values, text))
                 .map(|rule| rule.style)
                 .unwrap_or(module.style)
         };
@@ -375,7 +371,7 @@ fn size_group(
         let content = match module
             .states
             .iter()
-            .find(|rule| rule.strip && rule.matches(flags, false, bound(rule), &content))
+            .find(|rule| rule.strip && rule.matches(flags, false, &values, &content))
         {
             Some(rule) => {
                 let needle = rule.contains.as_deref().unwrap_or_default();
@@ -1146,6 +1142,55 @@ foreground = "$bad"
             frame_with(config, &[], broken).groups[0].modules[0].foreground,
             Color::rgba(0xff, 0, 0, 0xff)
         );
+    }
+
+    #[test]
+    fn a_rule_can_match_a_word_the_source_published() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["bat"]
+
+[module.bat]
+source = "battery"
+format = "x"
+icon = "battery"
+
+[module.bat.states.charging]
+field = "status"
+equals = "charging"
+icon = "battery-charging"
+"##;
+        let charging = |status: &str| {
+            let mut fields = Fields::default();
+            fields.set(
+                "percent",
+                Value::Num {
+                    v: 50.0,
+                    unit: crate::status::Unit::Percent,
+                },
+            );
+            fields.set("status", Value::Text(status.to_string()));
+            fields.set_primary("percent");
+            Registry::fixture(
+                Which::Battery,
+                Reading {
+                    fields,
+                    state: State::Idle,
+                },
+            )
+        };
+
+        let on = frame_with(config, &[], charging("charging"));
+        assert_eq!(
+            on.groups[0].modules[0].icon.unwrap().icon,
+            Icon::BatteryCharging
+        );
+
+        let off = frame_with(config, &[], charging("discharging"));
+        assert_eq!(off.groups[0].modules[0].icon.unwrap().icon, Icon::Battery);
     }
 
     #[test]

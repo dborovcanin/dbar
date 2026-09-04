@@ -15,7 +15,7 @@ use crate::collect::Which;
 use crate::color::Color;
 use crate::format::Format;
 use crate::icon::Icon;
-use crate::status::{FieldSpec, State};
+use crate::status::{FieldSpec, Fields, State, Value};
 
 pub const DEFAULT_CONFIG: &str = include_str!("../examples/config.toml");
 
@@ -302,9 +302,11 @@ struct RawState {
     /// Matches when the source itself rates what it is reporting this way: "good",
     /// "warning", "critical", "error".
     state: Option<String>,
-    /// The field a threshold applies to. Without it, thresholds read whichever value the
-    /// source nominated as the one it is mainly about.
+    /// The field a bound applies to. Without it, `above` and `below` read whichever value
+    /// the source nominated as the one it is mainly about.
     field: Option<String>,
+    /// Matches when the named field reads exactly this, ignoring case.
+    equals: Option<String>,
     /// Matches when the block's percentage is under this.
     below: Option<f32>,
     /// Matches when the block's percentage is over this.
@@ -530,6 +532,8 @@ pub struct StateRule {
     pub state: Option<State>,
     /// The field the bounds read. Without one they read the source's primary value.
     pub field: Option<String>,
+    /// What the named field has to say, compared without case.
+    pub equals: Option<String>,
     /// Substring the module's text must contain.
     pub contains: Option<String>,
     /// Whether that substring is removed from the drawn text once matched.
@@ -541,13 +545,16 @@ pub struct StateRule {
 
 impl StateRule {
     /// Every condition the rule states has to hold. A rule stating none never fires.
-    pub fn matches(
-        &self,
-        flags: StateFlags,
-        hovered: bool,
-        value: Option<f64>,
-        text: &str,
-    ) -> bool {
+    /// Whether this rule applies right now.
+    ///
+    /// `fields` is what the source published and `text` is what the format made of it. Every
+    /// condition but `contains` reads the former, because a rule keyed on the wording would
+    /// be reading dbar's own output rather than anything that was measured.
+    pub fn matches(&self, flags: StateFlags, hovered: bool, fields: &Fields, text: &str) -> bool {
+        let value = match &self.field {
+            Some(name) => fields.get(name).and_then(|v| v.num()),
+            None => fields.primary().and_then(|v| v.num()),
+        };
         if self.urgent && !flags.urgent {
             return false;
         }
@@ -570,6 +577,16 @@ impl StateRule {
         {
             return false;
         }
+        if let Some(wanted) = &self.equals {
+            let said = match &self.field {
+                Some(name) => fields.get(name),
+                None => fields.primary(),
+            };
+            match said {
+                Some(Value::Text(t)) if t.eq_ignore_ascii_case(wanted) => {}
+                _ => return false,
+            }
+        }
         if let Some(limit) = self.below {
             match value {
                 Some(v) if v < limit as f64 => {}
@@ -588,6 +605,7 @@ impl StateRule {
             || self.visible
             || self.state.is_some()
             || self.contains.is_some()
+            || self.equals.is_some()
             || self.below.is_some()
             || self.above.is_some()
     }
@@ -597,7 +615,11 @@ impl StateRule {
     /// critical state visible while the pointer is over it.
     fn specificity(&self) -> (bool, f32) {
         (
-            !(self.urgent || self.focused || self.state.is_some() || self.contains.is_some()),
+            !(self.urgent
+                || self.focused
+                || self.state.is_some()
+                || self.contains.is_some()
+                || self.equals.is_some()),
             self.below
                 .unwrap_or(f32::MAX)
                 .min(self.above.map(|a| 100.0 - a).unwrap_or(f32::MAX)),
@@ -931,7 +953,8 @@ fn resolve_group(
             Some(name) => Source::parse(name).ok_or_else(|| {
                 anyhow!(
                     "module {module_name:?} has unknown source {name:?}; expected one of \
-                     cpu, memory, backlight, time, provider, sway:window or sway:workspaces"
+                     cpu, memory, battery, backlight, time, provider, sway:window or \
+                     sway:workspaces"
                 )
             })?,
         };
@@ -978,21 +1001,37 @@ fn resolve_group(
                     })?),
                     None => None,
                 };
-                // A field a threshold reads has to be one this source publishes, and it has
-                // to be a number, or the rule could never fire.
+                // A field a rule reads has to be one this source publishes, and has to hold
+                // the kind of thing the rule asks of it, or the rule could never fire.
                 if let Some(field) = &raw_state.field {
                     let known = source.fields().iter().find(|f| f.name == field);
-                    match known.map(|f| f.kind) {
-                        Some(crate::status::Kind::Num(_)) => {}
-                        Some(kind) => bail!(
-                            "[module.{module_name}.states.{state_name}] keys on ${field}, \
-                             which is {} rather than a number",
-                            kind.describe()
-                        ),
-                        None => bail!(
+                    let Some(kind) = known.map(|f| f.kind) else {
+                        bail!(
                             "[module.{module_name}.states.{state_name}] keys on ${field}, \
                              which this module's source does not publish"
-                        ),
+                        );
+                    };
+                    let wants_number = raw_state.above.is_some() || raw_state.below.is_some();
+                    let wants_text = raw_state.equals.is_some();
+                    if wants_number && !matches!(kind, crate::status::Kind::Num(_)) {
+                        bail!(
+                            "[module.{module_name}.states.{state_name}] compares ${field} \
+                             against a number, but it is {}",
+                            kind.describe()
+                        );
+                    }
+                    if wants_text && !matches!(kind, crate::status::Kind::Text) {
+                        bail!(
+                            "[module.{module_name}.states.{state_name}] compares ${field} \
+                             against a word, but it is {}",
+                            kind.describe()
+                        );
+                    }
+                    if !wants_number && !wants_text {
+                        bail!(
+                            "[module.{module_name}.states.{state_name}] names ${field} but \
+                             says nothing about it; add `above`, `below` or `equals`"
+                        );
                     }
                 }
                 // Matching on text is what a rule has to do when text is all there is. A
@@ -1015,6 +1054,7 @@ fn resolve_group(
                     visible: raw_state.visible,
                     state: rule_state,
                     field: raw_state.field.clone(),
+                    equals: raw_state.equals.clone(),
                     contains: raw_state.contains.clone(),
                     strip: raw_state.strip,
                     below: raw_state.below,
@@ -1390,6 +1430,46 @@ above = 10
 "##;
         let e = Config::parse(wrong_kind).expect_err("a bound on a time could never fire");
         assert!(format!("{e:#}").contains("number"), "{e:#}");
+    }
+
+    #[test]
+    fn a_rule_comparing_a_word_needs_a_field_that_holds_one() {
+        let template = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["bat"]
+
+[module.bat]
+source = "battery"
+
+[module.bat.states.rule]
+field = "FIELD"
+COMPARE
+"##;
+        let ok = template
+            .replace("FIELD", "status")
+            .replace("COMPARE", "equals = \"charging\"");
+        assert!(Config::parse(&ok).is_ok());
+
+        // A word against a number, and a number against a word, are both mistakes.
+        let wrong_kind = template
+            .replace("FIELD", "percent")
+            .replace("COMPARE", "equals = \"charging\"");
+        let e = Config::parse(&wrong_kind).expect_err("percent holds no word");
+        assert!(format!("{e:#}").contains("word"), "{e:#}");
+
+        let wrong_bound = template
+            .replace("FIELD", "status")
+            .replace("COMPARE", "above = 10");
+        let e = Config::parse(&wrong_bound).expect_err("status holds no number");
+        assert!(format!("{e:#}").contains("number"), "{e:#}");
+
+        // Naming a field and then saying nothing about it can never fire.
+        let silent = template.replace("FIELD", "status").replace("COMPARE", "");
+        let e = Config::parse(&silent).expect_err("a rule with no comparison is a mistake");
+        assert!(format!("{e:#}").contains("equals"), "{e:#}");
     }
 
     #[test]

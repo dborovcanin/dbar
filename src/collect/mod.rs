@@ -10,6 +10,7 @@
 //! same way the compositor connection already does.
 
 pub mod backlight;
+pub mod battery;
 pub mod cpu;
 pub mod memory;
 pub mod time;
@@ -26,6 +27,7 @@ use crate::status::{FieldSpec, Fields, State};
 pub enum Which {
     Cpu,
     Memory,
+    Battery,
     Backlight,
     Time,
 }
@@ -35,6 +37,7 @@ impl Which {
         Some(match name {
             "cpu" => Which::Cpu,
             "memory" => Which::Memory,
+            "battery" => Which::Battery,
             "backlight" => Which::Backlight,
             "time" => Which::Time,
             _ => return None,
@@ -45,6 +48,7 @@ impl Which {
         match self {
             Which::Cpu => "cpu",
             Which::Memory => "memory",
+            Which::Battery => "battery",
             Which::Backlight => "backlight",
             Which::Time => "time",
         }
@@ -54,6 +58,7 @@ impl Which {
         match self {
             Which::Cpu => cpu::FIELDS,
             Which::Memory => memory::FIELDS,
+            Which::Battery => battery::FIELDS,
             Which::Backlight => backlight::FIELDS,
             Which::Time => time::FIELDS,
         }
@@ -64,6 +69,7 @@ impl Which {
         match self {
             Which::Cpu => " $utilization ",
             Which::Memory => " $percent ",
+            Which::Battery => " $percent ",
             Which::Backlight => " $brightness ",
             Which::Time => " $now.time(f:'%a %d %b %H:%M') ",
         }
@@ -73,6 +79,8 @@ impl Which {
     pub fn default_interval(self) -> Duration {
         match self {
             Which::Cpu | Which::Memory => Duration::from_secs(2),
+            // A battery moves slowly, and reading it wakes the embedded controller.
+            Which::Battery => Duration::from_secs(30),
             // A backlight only changes when something changes it.
             Which::Backlight => Duration::from_secs(5),
             Which::Time => Duration::from_secs(60),
@@ -91,6 +99,7 @@ impl Which {
         match self {
             Which::Cpu => Box::new(cpu::Cpu::new()),
             Which::Memory => Box::new(memory::Memory),
+            Which::Battery => Box::new(battery::Battery::new()),
             Which::Backlight => Box::new(backlight::Backlight::new()),
             Which::Time => Box::new(time::Time),
         }
@@ -286,9 +295,18 @@ fn read_to_string(path: impl AsRef<std::path::Path>) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// Every source, so a new one cannot be added without the checks below covering it.
+    const ALL: [Which; 5] = [
+        Which::Cpu,
+        Which::Memory,
+        Which::Battery,
+        Which::Backlight,
+        Which::Time,
+    ];
+
     #[test]
     fn every_source_has_a_default_format_it_can_actually_render() {
-        for which in [Which::Cpu, Which::Memory, Which::Backlight, Which::Time] {
+        for which in ALL {
             let format = crate::format::Format::parse(which.default_format())
                 .unwrap_or_else(|e| panic!("{} default format: {e:#}", which.name()));
             format
@@ -299,7 +317,7 @@ mod tests {
 
     #[test]
     fn source_names_round_trip() {
-        for which in [Which::Cpu, Which::Memory, Which::Backlight, Which::Time] {
+        for which in ALL {
             assert_eq!(Which::parse(which.name()), Some(which));
         }
         assert_eq!(Which::parse("nonesuch"), None);

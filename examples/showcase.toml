@@ -31,8 +31,8 @@ exclusive = true       # default: true; reserve the space so windows do not sit 
 # ---------------------------------------------------------------------------
 # External status provider
 #
-# Only needed for what dbar cannot yet read itself: here, disk, wifi, volume and
-# battery. The provider is started with `args` and its own configuration file.
+# Only needed for what dbar cannot yet read itself: here, disk, wifi and volume.
+# The provider is started with `args` and its own configuration file.
 #
 # The i3bar protocol gives blocks no names worth selecting on - i3status-rs
 # numbers them - so `names` says what they are, in the order the provider emits
@@ -43,7 +43,7 @@ exclusive = true       # default: true; reserve the space so windows do not sit 
 [i3bar]
 command = "i3status-rs"
 args = ["~/.config/i3status-rust/config.toml"]
-names = ["disk", "wifi", "volume", "battery"]
+names = ["disk", "wifi", "volume"]
 
 # ---------------------------------------------------------------------------
 # Named colors, referenced elsewhere as "$name"
@@ -483,22 +483,35 @@ contains = "HEAD"
 strip = true
 icon = "headphones"
 
+# Braces hold what should disappear rather than draw half a sentence. A machine
+# on mains has no time to report, one allowed to charge to full has no cap, and
+# neither is mentioned; a laptop under TLP says "80% not charging  cap 80%".
 [module.battery]
+source = "battery"
+interval = "30s"
+format = " $percent.n(w:4){  $time.dur(style:short) left}{  cap $threshold} "
+format_alt = " $percent.n(w:4)  $status{  $power.n(d:1)}  health $health.n(d:0) "
 style = "stone"
 icon = "battery"
 
+# `equals` compares a field the source published, where `contains` searches the
+# text a format produced. Both say "match on a word", but only this one is
+# reading what was measured, so it is the one a native module uses.
 [module.battery.states.charging]
-contains = "CHARGING"
-strip = true
+field = "status"
+equals = "charging"
 icon = "battery-charging"
 
+# A battery rates its own situation, and only alarms while it is actually
+# draining: the same 10% with the charger in is fine. Keying on that rather
+# than on a number here means the thresholds live in one place.
+#
 # A state overlays the module's own style rather than replacing it, so the icon
-# above survives and keeps grading. Rules are checked tightest bound first, so
-# "below 15" wins over "below 30" at 10%.
+# above survives and keeps grading.
 [module.battery.states.warning]
-below = 30
+state = "warning"
 style = "warning"
 
 [module.battery.states.critical]
-below = 15
+state = "critical"
 style = "critical"
