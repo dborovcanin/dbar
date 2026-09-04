@@ -10,7 +10,8 @@
 //! `if` is expressed two ways instead:
 //!
 //! - a **group** in braces disappears whole when a field inside it has nothing to report, so
-//!   `{of $total}` is simply absent on a machine that cannot say what the total is;
+//!   `{of $total}` is simply absent on a machine that cannot say what the total is - and the
+//!   format itself is a group, so a module with nothing to report draws nothing at all;
 //! - a **chain** falls through alternatives, so `$ssid|$device|'offline'` says the best thing
 //!   it can.
 //!
@@ -101,6 +102,12 @@ struct StrArgs {
     ellipsis: Option<String>,
 }
 
+/// A strftime pattern, checked when the config is read.
+#[derive(Clone, Debug)]
+struct TimeArgs {
+    pattern: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum DurStyle {
     /// `1:23:45`, dropping leading parts that are zero.
@@ -114,6 +121,7 @@ enum DurStyle {
 enum Func {
     Num(NumArgs),
     Str(StrArgs),
+    Time(TimeArgs),
     Dur(DurStyle),
     Upper,
     Lower,
@@ -124,6 +132,7 @@ impl Func {
         match self {
             Func::Num(_) => "n",
             Func::Str(_) => "str",
+            Func::Time(_) => "time",
             Func::Dur(_) => "dur",
             Func::Upper => "up",
             Func::Lower => "low",
@@ -136,6 +145,7 @@ impl Func {
         match self {
             Func::Num(_) => matches!(kind, Kind::Num(_)),
             Func::Str(_) | Func::Upper | Func::Lower => matches!(kind, Kind::Text),
+            Func::Time(_) => matches!(kind, Kind::Time),
             Func::Dur(_) => matches!(kind, Kind::Dur),
         }
     }
@@ -450,6 +460,18 @@ fn build_func(name: &str, args: &[(String, String)]) -> Result<Func> {
             }
             Ok(Func::Str(out))
         }
+        "time" => {
+            let mut pattern = None;
+            for (key, value) in args {
+                match key.as_str() {
+                    "f" => pattern = Some(value.clone()),
+                    other => bail!(".time() takes f, not {other:?}"),
+                }
+            }
+            let pattern = pattern.ok_or_else(|| anyhow!(".time() needs a pattern, as f:'%R'"))?;
+            check_pattern(&pattern)?;
+            Ok(Func::Time(TimeArgs { pattern }))
+        }
         "dur" => {
             let mut style = DurStyle::default();
             for (key, value) in args {
@@ -648,9 +670,15 @@ impl Format {
     /// A field the source did not set reads the same as one it set to `Absent`: it has
     /// nothing to report, which is ordinary rather than an error. Naming a field the source
     /// could never publish is the error, and `check` catches it when the config is read.
+    ///
+    /// The whole format is itself a group, so a module whose fields have nothing to report
+    /// says nothing at all rather than drawing the spaces around the number that is
+    /// missing. Whatever should survive a missing field goes in braces.
     pub fn render(&self, fields: &crate::status::Fields) -> String {
         let mut out = String::new();
-        render_items(&self.items, fields, &mut out);
+        if !render_items(&self.items, fields, &mut out) {
+            out.clear();
+        }
         out
     }
 }
@@ -705,10 +733,11 @@ fn render_value(value: &Value, func: Option<&Func>) -> Option<String> {
         (Value::Text(text), Some(Func::Upper)) => Some(text.to_uppercase()),
         (Value::Text(text), Some(Func::Lower)) => Some(text.to_lowercase()),
         (Value::Text(text), None) => Some(text.clone()),
+        (Value::Time(t), Some(Func::Time(args))) => format_time(*t, &args.pattern),
+        (Value::Time(t), None) => format_time(*t, "%H:%M"),
         (Value::Dur(d), Some(Func::Dur(style))) => Some(format_dur(*d, *style)),
         (Value::Dur(d), None) => Some(format_dur(*d, DurStyle::default())),
         (Value::Flag(b), None) => Some(if *b { "yes" } else { "no" }.to_string()),
-        (Value::Time(_), _) => None,
         // `check` rejects these when the config is read; a source that publishes a
         // different kind than it declared falls through to saying nothing.
         _ => None,
@@ -783,6 +812,38 @@ fn format_str(text: &str, args: &StrArgs) -> String {
         out.push_str(&" ".repeat(width));
     }
     out
+}
+
+/// Reject a strftime pattern that would draw itself instead of the time.
+///
+/// An unknown specifier is written out literally rather than reported, so a mistyped `%Q`
+/// would leave a clock reading `%Q` forever. Since a real `%` has to be written `%%`, a
+/// pattern that has no `%%` and still produces one did not consume something.
+///
+/// A pattern that mixes `%%` with a typo goes unreported. It still prints the `%%`
+/// correctly, and chasing the remainder would mean keeping our own list of every
+/// specifier the calendar understands.
+fn check_pattern(pattern: &str) -> Result<()> {
+    let at = jiff::Timestamp::UNIX_EPOCH.to_zoned(jiff::tz::TimeZone::UTC);
+    let rendered = jiff::fmt::strtime::format(pattern, &at)
+        .map_err(|e| anyhow!("in .time(f:{pattern:?}): {e}"))?;
+    if !pattern.contains("%%") && rendered.contains('%') {
+        bail!("in .time(f:{pattern:?}): the calendar does not know one of these specifiers");
+    }
+    Ok(())
+}
+
+/// Render an instant in the machine's own time zone.
+fn strftime(pattern: &str, at: jiff::Timestamp) -> Result<String> {
+    let zoned = at.to_zoned(jiff::tz::TimeZone::system());
+    jiff::fmt::strtime::format(pattern, &zoned).map_err(|e| anyhow!("{e}"))
+}
+
+fn format_time(at: std::time::SystemTime, pattern: &str) -> Option<String> {
+    let timestamp = jiff::Timestamp::try_from(at).ok()?;
+    // The pattern was checked when the config was read, so a failure here is a clock the
+    // calendar cannot express rather than a typo.
+    strftime(pattern, timestamp).ok()
 }
 
 fn format_dur(d: std::time::Duration, style: DurStyle) -> String {
@@ -899,6 +960,27 @@ mod tests {
     }
 
     #[test]
+    fn times_render_through_a_strftime_pattern() {
+        let epoch = std::time::UNIX_EPOCH;
+        let f = fields(&[("now", Value::Time(epoch))]);
+        // Rendered in the machine's own zone, so assert on what cannot drift: the pattern
+        // is honoured and the fixed parts come through.
+        assert_eq!(render("$now.time(f:'%Y')", &f), "1970");
+        assert_eq!(render("$now.time(f:'day %j')", &f), "day 001");
+        assert_eq!(render("$now.time(f:'%H:%M')", &f).len(), 5);
+        assert_eq!(render("$now", &f).len(), 5);
+    }
+
+    #[test]
+    fn a_time_pattern_is_checked_when_it_is_written() {
+        assert!(Format::parse("$now.time(f:'%R')").is_ok());
+        assert!(Format::parse("$now.time()").is_err());
+        assert!(Format::parse("$now.time(f:'%+')").is_err());
+        // A real percent sign has to be written `%%`, and still works.
+        assert!(Format::parse("$now.time(f:'%H%%')").is_ok());
+    }
+
+    #[test]
     fn durations_have_two_styles() {
         let f = fields(&[
             ("long", Value::Dur(Duration::from_secs(5025))),
@@ -925,6 +1007,15 @@ mod tests {
     fn a_field_the_source_never_set_reads_as_absent() {
         let f = fields(&[("used", num(4.0, Unit::Bytes))]);
         assert_eq!(render("$used{ of $total}", &f), "4.00 B");
+    }
+
+    #[test]
+    fn a_format_with_nothing_to_report_says_nothing_at_all() {
+        let f = fields(&[("used", Value::Absent)]);
+        // Not " B " - the padding around a missing number would draw an empty box.
+        assert_eq!(render(" $used ", &f), "");
+        // Braces are how the part that should survive is marked.
+        assert_eq!(render(" mem{ $used} ", &f), " mem ");
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # dbar
 
 A small, event-driven Wayland status bar for Sway/SwayFX. It renders with
-`tiny-skia` on a `wlr-layer-shell` surface and takes its data from
-`i3status-rs` over the standard i3bar protocol.
+`tiny-skia` on a `wlr-layer-shell` surface and reads what it shows itself, from
+`/proc` and `/sys`. Any i3bar-compatible provider can supply the rest.
 
 This is the **V0** milestone from [spec.md](spec.md).
 
@@ -12,7 +12,10 @@ This is the **V0** milestone from [spec.md](spec.md).
   exclusive zone
 - per-pixel transparency, so SwayFX blur shows through
 - text rendering with shaping and font fallback (`cosmic-text`)
-- i3bar input: any i3bar-compatible provider, `i3status-rs` by default
+- native collectors for cpu, memory, backlight and the clock, read on one shared
+  timer that wakes only when something is due
+- i3bar input: any i3bar-compatible provider, `i3status-rs` by default. A config
+  that reads nothing from one starts no child process at all
 - `left` / `center` / `right` positions holding groups of modules
 - rounded group and module backgrounds
 - click forwarding back to the provider (left, middle, right, scroll)
@@ -25,8 +28,9 @@ This is the **V0** milestone from [spec.md](spec.md).
   formatting, `{groups}` that disappear when a field has nothing to report, and
   `$a|$b|'fallback'` chains
 
-Not yet implemented: vector icons, hover states, module state styling,
-animations, command modules, multi-monitor. Those are V1 and V1.x in the spec.
+Not yet implemented: collectors for battery, disk, temperature, network, audio
+and the rest; animations; command modules; multi-monitor. See
+[dbar-native.md](dbar-native.md) for where this is going.
 
 ## Build
 

@@ -451,15 +451,24 @@ icon = "memory"
 # `format` is what a module says, written against the fields its source
 # publishes. Every source has a default, so most modules never need one:
 #
+#   cpu               $utilization
+#   memory            $percent $used $total $available $swap_*
+#   backlight         $brightness $device
+#   time              $now
 #   provider          $text, $percent
 #   sway:window       $title
 #   sway:workspaces   $name
+#
+# The first four are read by dbar itself and take an `interval`; see
+# examples/native.toml. The rest arrive from elsewhere, and how often is not
+# dbar's business.
 #
 # A field can be formatted: $percent.n(w:3) pads to a fixed width so the module
 # stops resizing as the number changes, and $title.str(max:40) caps its length
 # in characters. Text in {braces} disappears whole when a field inside it has
 # nothing to report, and $a|$b|'fallback' says the best thing it can. Write a
-# literal $ or { as $$ or {{.
+# literal $ or { as $$ or {{. The whole format is itself a group, so a module
+# with nothing to report draws nothing rather than an empty box.
 #
 # The provider sends rendered text, so $text is nearly always what to use here.
 # Native sources publish real values, and formats come into their own there.
@@ -471,15 +480,24 @@ format = "$text"
 # `format` is what a module says, written against the fields its source
 # publishes. Every source has a default, so most modules never need one:
 #
+#   cpu               $utilization
+#   memory            $percent $used $total $available $swap_*
+#   backlight         $brightness $device
+#   time              $now
 #   provider          $text, $percent
 #   sway:window       $title
 #   sway:workspaces   $name
+#
+# The first four are read by dbar itself and take an `interval`; see
+# examples/native.toml. The rest arrive from elsewhere, and how often is not
+# dbar's business.
 #
 # A field can be formatted: $percent.n(w:3) pads to a fixed width so the module
 # stops resizing as the number changes, and $title.str(max:40) caps its length
 # in characters. Text in {braces} disappears whole when a field inside it has
 # nothing to report, and $a|$b|'fallback' says the best thing it can. Write a
-# literal $ or { as $$ or {{.
+# literal $ or { as $$ or {{. The whole format is itself a group, so a module
+# with nothing to report draws nothing rather than an empty box.
 #
 # The provider sends rendered text, so $text is nearly always what to use here.
 # Native sources publish real values, and formats come into their own there.

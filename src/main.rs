@@ -1,6 +1,7 @@
 //! dbar - a small, event-driven Wayland status bar.
 
 mod app;
+mod collect;
 mod color;
 mod config;
 mod format;
@@ -87,19 +88,43 @@ fn main() -> Result<()> {
     let mut event_loop: EventLoop<App> = EventLoop::try_new().context("creating the event loop")?;
     let handle = event_loop.handle();
 
-    // The provider's reader thread pushes updates in through this channel.
+    // An external provider is started only when something in the config reads from one.
+    // A native configuration runs no child process at all.
     let (status_tx, status_rx) = calloop::channel::channel();
-    let provider = I3BarProvider::spawn(&config.status, status_tx)?;
+    let provider = if config.needs_provider() {
+        Some(I3BarProvider::spawn(&config.status, status_tx)?)
+    } else {
+        log::info!("no module reads from a status provider, so none is started");
+        None
+    };
 
+    let collectors = !config.collectors().is_empty();
+    let listening = provider.is_some();
     let mut app = App::new(&globals, &qh, conn.clone(), config, provider)?;
 
-    handle
-        .insert_source(status_rx, |event, _, app: &mut App| {
-            if let calloop::channel::Event::Msg(event) = event {
-                app.on_status(event);
-            }
-        })
-        .map_err(|e| anyhow::anyhow!("inserting the status source: {e}"))?;
+    if listening {
+        handle
+            .insert_source(status_rx, |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(event) = event {
+                    app.on_status(event);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("inserting the status source: {e}"))?;
+    }
+
+    // Collectors share one timer: it fires when the earliest is due, reads everything that
+    // has come due, and is set again for whatever is next.
+    if collectors {
+        handle
+            .insert_source(
+                calloop::timer::Timer::immediate(),
+                |_, _, app: &mut App| match app.on_collect() {
+                    Some(next) => calloop::timer::TimeoutAction::ToInstant(next),
+                    None => calloop::timer::TimeoutAction::Drop,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("inserting the collector timer: {e}"))?;
+    }
 
     // The compositor is optional: without it the workspace and window modules simply have
     // nothing to show, and the rest of the bar is unaffected.

@@ -6,10 +6,12 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result, anyhow, bail};
 use serde::Deserialize;
 
+use crate::collect::Which;
 use crate::color::Color;
 use crate::format::Format;
 use crate::icon::Icon;
@@ -65,7 +67,9 @@ pub enum EdgeShape {
 /// Where a module's content comes from.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Source {
-    /// A block from the status provider, matched by name.
+    /// Something dbar measures itself.
+    Native(Which),
+    /// A block from an external status provider, matched by name.
     #[default]
     Provider,
     /// The title of the focused window.
@@ -75,9 +79,19 @@ pub enum Source {
 }
 
 impl Source {
+    fn parse(name: &str) -> Option<Source> {
+        Some(match name {
+            "provider" => Source::Provider,
+            "sway:window" => Source::SwayWindow,
+            "sway:workspaces" => Source::SwayWorkspaces,
+            other => Source::Native(Which::parse(other)?),
+        })
+    }
+
     /// What a format written against this source may name.
     pub fn fields(self) -> &'static [FieldSpec] {
         match self {
+            Source::Native(which) => which.fields(),
             Source::Provider => crate::status::i3bar::FIELDS,
             Source::SwayWindow => crate::sway::WINDOW_FIELDS,
             Source::SwayWorkspaces => crate::sway::WORKSPACE_FIELDS,
@@ -86,10 +100,11 @@ impl Source {
 
     /// What the module says when the config does not give it a format.
     ///
-    /// Each source has one field that is the obvious thing to show, so the common case
-    /// needs no `format` line at all.
+    /// Each source has one thing it is obviously for, so the common case needs no `format`
+    /// line at all.
     fn default_format(self) -> &'static str {
         match self {
+            Source::Native(which) => which.default_format(),
             Source::Provider => "$text",
             Source::SwayWindow => "$title",
             Source::SwayWorkspaces => "$name",
@@ -255,10 +270,13 @@ struct RawEdges {
 struct RawModule {
     /// Name of a `[style.*]` table to inherit from.
     style: Option<String>,
-    /// Where the content comes from: the provider, or the compositor.
+    /// Where the content comes from: something dbar measures, an external provider, or
+    /// the compositor.
     source: Option<String>,
     /// What the module says, written against the source's fields.
     format: Option<String>,
+    /// How often to read, for a source dbar measures itself: "2s", "500ms", "1m".
+    interval: Option<String>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
     #[serde(default)]
     states: HashMap<String, RawState>,
@@ -470,6 +488,9 @@ pub struct Edges {
 pub struct Module {
     pub name: String,
     pub source: Source,
+    /// How often the source behind this module is read. Only native sources are read by
+    /// dbar, so this is `None` for everything else.
+    pub interval: Option<Duration>,
     /// What the module says, already parsed and checked against the source's fields.
     pub format: Format,
     pub style: Style,
@@ -677,6 +698,37 @@ fn parse_font(s: &str) -> (String, f32) {
 }
 
 impl Config {
+    /// Every module in the config, wherever it sits.
+    pub fn modules(&self) -> impl Iterator<Item = &Module> {
+        self.positions.iter().flatten().flat_map(|g| &g.modules)
+    }
+
+    /// The collectors this config needs, each at the shortest interval any module asked
+    /// it for. Two modules showing the same thing are read once.
+    pub fn collectors(&self) -> HashMap<Which, Duration> {
+        let mut wanted: HashMap<Which, Duration> = HashMap::new();
+        for module in self.modules() {
+            let Source::Native(which) = module.source else {
+                continue;
+            };
+            let interval = module.interval.unwrap_or_else(|| which.default_interval());
+            wanted
+                .entry(which)
+                .and_modify(|current| *current = (*current).min(interval))
+                .or_insert(interval);
+        }
+        wanted
+    }
+
+    /// Whether anything in this config comes from an external status provider.
+    ///
+    /// Nothing does on a native configuration, and then there is no child process to run.
+    pub fn needs_provider(&self) -> bool {
+        self.positions.iter().flatten().any(|group| {
+            group.wildcard || group.modules.iter().any(|m| m.source == Source::Provider)
+        })
+    }
+
     pub fn parse(text: &str) -> Result<Config> {
         let raw: RawConfig = toml::from_str(text).context("parsing config")?;
         let palette = Palette::new(&raw.colors)?;
@@ -758,6 +810,32 @@ impl Config {
     }
 }
 
+/// Parse a duration written the way a person would: "500ms", "2s", "1m", "1h".
+///
+/// A bare number is refused. `interval = 2` reads as two of something, and which something
+/// is exactly the thing worth being explicit about.
+fn parse_duration(written: &str) -> Result<Duration> {
+    let text = written.trim();
+    let split = text
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .ok_or_else(|| anyhow!("{text:?} needs a unit: try {text:?}s, or ms, m or h"))?;
+    let (number, unit) = text.split_at(split);
+    let value: f64 = number
+        .parse()
+        .map_err(|_| anyhow!("{number:?} in {text:?} is not a number"))?;
+    if !value.is_finite() || value <= 0.0 {
+        bail!("{text:?} must be a positive length of time");
+    }
+    let seconds = match unit.trim() {
+        "ms" => value / 1000.0,
+        "s" => value,
+        "m" => value * 60.0,
+        "h" => value * 3600.0,
+        other => bail!("unknown unit {other:?} in {text:?}; use ms, s, m or h"),
+    };
+    Ok(Duration::from_secs_f64(seconds))
+}
+
 /// Parse a module's format and check it against what its source can publish.
 ///
 /// Checking here means a typo in a field name is a message when dbar starts, rather than a
@@ -835,19 +913,34 @@ fn resolve_group(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let source = match raw
-            .modules
-            .get(module_name)
-            .and_then(|m| m.source.as_deref())
-        {
-            None | Some("provider") => Source::Provider,
-            Some("sway:window") => Source::SwayWindow,
-            Some("sway:workspaces") => Source::SwayWorkspaces,
-            Some(other) => anyhow::bail!(
-                "module {module_name:?} has unknown source {other:?}; expected \"provider\", \
-                 \"sway:window\" or \"sway:workspaces\""
-            ),
+        let raw_module = raw.modules.get(module_name);
+        let source = match raw_module.and_then(|m| m.source.as_deref()) {
+            None => Source::Provider,
+            Some(name) => Source::parse(name).ok_or_else(|| {
+                anyhow!(
+                    "module {module_name:?} has unknown source {name:?}; expected one of \
+                     cpu, memory, backlight, time, provider, sway:window or sway:workspaces"
+                )
+            })?,
         };
+
+        let interval = match raw_module.and_then(|m| m.interval.as_deref()) {
+            Some(written) => Some(
+                parse_duration(written)
+                    .with_context(|| format!("in [module.{module_name}] interval"))?,
+            ),
+            // Only dbar's own collectors are on a schedule dbar controls.
+            None => match source {
+                Source::Native(which) => Some(which.default_interval()),
+                _ => None,
+            },
+        };
+        if interval.is_some() && !matches!(source, Source::Native(_)) {
+            bail!(
+                "module {module_name:?} sets an interval, but its source is not one dbar \
+                 reads; how often it updates is the provider's own business"
+            );
+        }
 
         let format = resolve_format(
             source,
@@ -860,6 +953,7 @@ fn resolve_group(
         modules.push(Module {
             name: module_name.clone(),
             source,
+            interval,
             format,
             style,
             states,
@@ -911,6 +1005,7 @@ fn resolve_group(
             vec![Module {
                 name: "*".to_string(),
                 source: Source::Provider,
+                interval: None,
                 format: resolve_format(Source::Provider, None)?,
                 style: fallback,
                 states: Vec::new(),
@@ -1042,6 +1137,99 @@ format = "$text"
         // `$text` is the provider's field; the window module publishes `$title`.
         let e = Config::parse(config).expect_err("the wrong source's field must be reported");
         assert!(format!("{e:#}").contains("title"), "{e:#}");
+    }
+
+    #[test]
+    fn durations_need_a_unit() {
+        assert_eq!(parse_duration("2s").unwrap(), Duration::from_secs(2));
+        assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
+        assert_eq!(parse_duration("1m").unwrap(), Duration::from_secs(60));
+        assert_eq!(parse_duration(" 1h ").unwrap(), Duration::from_secs(3600));
+        assert_eq!(parse_duration("0.5s").unwrap(), Duration::from_millis(500));
+
+        // "2" reads as two of something, and which something is the point.
+        assert!(parse_duration("2").is_err());
+        assert!(parse_duration("2w").is_err());
+        assert!(parse_duration("0s").is_err());
+        assert!(parse_duration("-1s").is_err());
+        assert!(parse_duration("s").is_err());
+    }
+
+    #[test]
+    fn a_collector_is_read_once_however_many_modules_show_it() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["a", "b"]
+
+[module.a]
+source = "cpu"
+interval = "5s"
+
+[module.b]
+source = "cpu"
+interval = "1s"
+"##;
+        let collectors = Config::parse(config).expect("parses").collectors();
+        assert_eq!(collectors.len(), 1);
+        // The shortest interval anyone asked for wins, so nobody waits longer than they said.
+        assert_eq!(collectors[&Which::Cpu], Duration::from_secs(1));
+    }
+
+    #[test]
+    fn a_native_config_needs_no_provider() {
+        let native = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["clock"]
+
+[module.clock]
+source = "time"
+"##;
+        assert!(!Config::parse(native).expect("parses").needs_provider());
+        assert!(
+            Config::parse(DEFAULT_CONFIG)
+                .expect("parses")
+                .needs_provider()
+        );
+    }
+
+    #[test]
+    fn an_interval_on_a_source_dbar_does_not_read_is_rejected() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+interval = "1s"
+"##;
+        let e = Config::parse(config).expect_err("an interval on a provider module is a mistake");
+        assert!(format!("{e:#}").contains("interval"), "{e:#}");
+    }
+
+    #[test]
+    fn an_unknown_source_says_what_the_sources_are() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["x"]
+
+[module.x]
+source = "nonesuch"
+"##;
+        let e = Config::parse(config).expect_err("an unknown source is a mistake");
+        let message = format!("{e:#}");
+        assert!(message.contains("nonesuch"), "{message}");
+        assert!(message.contains("cpu"), "{message}");
     }
 
     #[test]

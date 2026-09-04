@@ -29,8 +29,9 @@ use wayland_client::{
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
 
+use crate::collect::Registry;
 use crate::config::{Config, Edge};
-use crate::layout::{self, Frame};
+use crate::layout::{self, Frame, Inputs};
 use crate::render;
 use crate::status::{ActionTarget, ClickEvent, I3BarProvider, StatusEvent, StatusItem, i3bar};
 use crate::sway::{self, SwayEvent, SwayState};
@@ -53,8 +54,11 @@ pub struct App {
 
     config: Config,
     text: TextRenderer,
-    provider: I3BarProvider,
+    /// The external status provider, when the config asks for one.
+    provider: Option<I3BarProvider>,
     items: Vec<StatusItem>,
+    /// What dbar measures for itself.
+    native: Registry,
     /// Workspaces and the focused window, when a compositor is talking to us.
     sway: SwayState,
     frame: Frame,
@@ -85,7 +89,7 @@ impl App {
         qh: &QueueHandle<App>,
         conn: Connection,
         config: Config,
-        provider: I3BarProvider,
+        provider: Option<I3BarProvider>,
     ) -> Result<App> {
         let compositor =
             CompositorState::bind(globals, qh).context("wl_compositor is not available")?;
@@ -96,6 +100,7 @@ impl App {
         let surface = compositor.create_surface(qh);
         let layer = layer_shell.create_layer_surface(qh, surface, Layer::Top, Some("dbar"), None);
 
+        let config_collectors = config.collectors();
         let bar = &config.bar;
         let edge = match bar.position {
             Edge::Top => Anchor::TOP,
@@ -134,6 +139,7 @@ impl App {
             qh: qh.clone(),
             config,
             text,
+            native: Registry::new(&config_collectors),
             provider,
             items: Vec::new(),
             sway: SwayState::default(),
@@ -162,7 +168,9 @@ impl App {
                     header.version,
                     header.click_events
                 );
-                self.provider.set_accepts_clicks(header.click_events);
+                if let Some(provider) = self.provider.as_mut() {
+                    provider.set_accepts_clicks(header.click_events);
+                }
             }
             StatusEvent::Blocks(blocks) => {
                 self.warn_about_names(&blocks);
@@ -224,6 +232,17 @@ impl App {
         self.name_count_warned = true;
     }
 
+    /// Read every collector that has come due, and say when the next one is.
+    ///
+    /// One pass over the whole set, then one redraw: ten modules sharing an interval cost
+    /// one wake-up between them.
+    pub fn on_collect(&mut self) -> Option<std::time::Instant> {
+        if self.native.tick() {
+            self.invalidate();
+        }
+        self.native.next_due()
+    }
+
     /// Mark the bar as needing a redraw and draw immediately if the compositor is ready.
     fn invalidate(&mut self) {
         self.dirty = true;
@@ -250,10 +269,14 @@ impl App {
         self.frame = match &self.fault {
             Some(message) => layout::fault(message, width, height, &mut self.text),
             None => {
+                let inputs = Inputs {
+                    items: &self.items,
+                    native: &self.native,
+                    sway: &self.sway,
+                };
                 let frame = layout::compute(
                     &self.config,
-                    &self.items,
-                    &self.sway,
+                    &inputs,
                     width,
                     height,
                     &mut self.text,
@@ -309,7 +332,7 @@ impl App {
     /// with no explanation of why.
     fn warn_if_nothing_matched(&mut self, frame: &Frame) {
         let drawn: usize = frame.groups.iter().map(|g| g.modules.len()).sum();
-        if drawn > 0 || self.items.is_empty() {
+        if drawn > 0 || self.items.is_empty() || !self.native.is_empty() {
             self.warned_names = None;
             return;
         }
@@ -385,7 +408,9 @@ impl App {
                     event.name,
                     event.instance
                 );
-                self.provider.send_click(&event);
+                if let Some(provider) = self.provider.as_mut() {
+                    provider.send_click(&event);
+                }
             }
         }
     }

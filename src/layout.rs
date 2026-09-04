@@ -3,6 +3,7 @@
 //! The result is purely geometric: the renderer draws it and the pointer code hit-tests it,
 //! neither needs to know about config or where the items came from.
 
+use crate::collect::Registry;
 use crate::color::Color;
 use crate::config::{
     Config, Direction, EdgeShape, Edges, Group as GroupCfg, Module as ModuleCfg, Separator,
@@ -11,6 +12,18 @@ use crate::config::{
 use crate::icon::{self, Icon};
 use crate::status::{ActionTarget, Fields, StatusItem, Value};
 use crate::sway::SwayState;
+
+/// Everything the bar currently knows, whoever it came from.
+///
+/// One struct rather than a growing argument list, so adding a source does not touch every
+/// signature between here and the event loop.
+pub struct Inputs<'a> {
+    /// Items from an external status provider.
+    pub items: &'a [StatusItem],
+    /// The latest reading from each collector dbar runs itself.
+    pub native: &'a Registry,
+    pub sway: &'a SwayState,
+}
 
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
 ///
@@ -199,7 +212,7 @@ struct Candidate<'g> {
 ///
 /// A module drawn from the compositor expands here: `sway:workspaces` becomes one candidate
 /// per workspace, so each is its own rectangle with its own state and click target.
-fn collect<'g>(group: &'g GroupCfg, items: &[StatusItem], sway: &SwayState) -> Vec<Candidate<'g>> {
+fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
     let mut out = Vec::new();
 
     let from_item = |module: &'g ModuleCfg, item: &StatusItem| Candidate {
@@ -217,22 +230,37 @@ fn collect<'g>(group: &'g GroupCfg, items: &[StatusItem], sway: &SwayState) -> V
 
     if group.wildcard {
         if let Some(module) = group.modules.first() {
-            out.extend(items.iter().map(|item| from_item(module, item)));
+            out.extend(inputs.items.iter().map(|item| from_item(module, item)));
         }
         return out;
     }
 
     for module in &group.modules {
         match module.source {
+            Source::Native(which) => {
+                // A collector that has not read yet has nothing to show, which is the same
+                // as a provider that has not spoken: the module simply is not there.
+                if let Some(reading) = inputs.native.reading(which) {
+                    out.push(Candidate {
+                        module,
+                        text: module.format.render(&reading.fields),
+                        flags: StateFlags::default(),
+                        value: reading.fields.primary().and_then(|v| v.num()),
+                        foreground: None,
+                        background: None,
+                        action: None,
+                    });
+                }
+            }
             Source::Provider => {
-                for item in items {
+                for item in inputs.items {
                     if item.id.as_deref() == Some(module.name.as_str()) {
                         out.push(from_item(module, item));
                     }
                 }
             }
             Source::SwayWindow => {
-                if let Some(title) = &sway.window {
+                if let Some(title) = &inputs.sway.window {
                     let mut fields = Fields::default();
                     fields.set("title", Value::Text(title.clone()));
                     out.push(Candidate {
@@ -247,7 +275,7 @@ fn collect<'g>(group: &'g GroupCfg, items: &[StatusItem], sway: &SwayState) -> V
                 }
             }
             Source::SwayWorkspaces => {
-                for workspace in &sway.workspaces {
+                for workspace in &inputs.sway.workspaces {
                     let mut fields = Fields::default();
                     fields.set("name", Value::Text(workspace.name.clone()));
                     out.push(Candidate {
@@ -281,13 +309,12 @@ fn quote(name: &str) -> String {
 
 fn size_group(
     group: &GroupCfg,
-    items: &[StatusItem],
-    sway: &SwayState,
+    inputs: &Inputs<'_>,
     height: f32,
     text: &mut dyn Measure,
 ) -> Option<SizedGroup> {
     let mut modules = Vec::new();
-    for candidate in collect(group, items, sway) {
+    for candidate in collect(group, inputs) {
         let Candidate {
             module,
             text: content,
@@ -506,8 +533,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
 /// Lay the whole bar out for a surface of `width` x `height` logical pixels.
 pub fn compute(
     cfg: &Config,
-    items: &[StatusItem],
-    sway: &SwayState,
+    inputs: &Inputs<'_>,
     width: f32,
     height: f32,
     text: &mut dyn Measure,
@@ -523,7 +549,7 @@ pub fn compute(
         .map(|groups| {
             groups
                 .iter()
-                .filter_map(|g| size_group(g, items, sway, height, text))
+                .filter_map(|g| size_group(g, inputs, height, text))
                 .collect()
         })
         .collect();
@@ -610,6 +636,7 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::collect::{Reading, Which};
     use crate::status::{ActionTarget, Fields, State, StatusItem, Unit, Value};
 
     /// A text backend with no fonts: every character is one unit wide.
@@ -651,16 +678,17 @@ mod tests {
     }
 
     fn frame_of(config: &str, items: &[StatusItem]) -> Frame {
+        frame_with(config, items, Registry::new(&Default::default()))
+    }
+
+    fn frame_with(config: &str, items: &[StatusItem], native: Registry) -> Frame {
         let cfg = Config::parse(config).expect("test config parses");
-        compute(
-            &cfg,
+        let inputs = Inputs {
             items,
-            &SwayState::default(),
-            200.0,
-            10.0,
-            &mut Fixed,
-            None,
-        )
+            native: &native,
+            sway: &SwayState::default(),
+        };
+        compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
     }
 
     const BASIC: &str = r##"
@@ -676,6 +704,57 @@ padding = 0
 [module.mem]
 padding = 0
 "##;
+
+    #[test]
+    fn a_native_module_draws_what_its_collector_measured() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+source = "cpu"
+padding = 0
+format = "$utilization.n(d:0)"
+"##;
+        let mut fields = Fields::default();
+        fields.set(
+            "utilization",
+            Value::Num {
+                v: 42.0,
+                unit: crate::status::Unit::Percent,
+            },
+        );
+        fields.set_primary("utilization");
+        let native = Registry::fixture(
+            Which::Cpu,
+            Reading {
+                fields,
+                state: crate::status::State::Idle,
+            },
+        );
+        let frame = frame_with(config, &[], native);
+        assert_eq!(frame.groups[0].modules[0].text, "42%");
+    }
+
+    #[test]
+    fn a_native_module_that_has_not_read_yet_draws_nothing() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+source = "cpu"
+"##;
+        let native = Registry::fixture(Which::Cpu, Reading::default());
+        // No fields yet, so the format renders empty and the module is not there.
+        assert!(frame_with(config, &[], native).groups.is_empty());
+    }
 
     #[test]
     fn modules_select_items_by_name() {

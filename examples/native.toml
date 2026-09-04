@@ -1,0 +1,106 @@
+# dbar with no status provider.
+#
+#   dbar -c examples/native.toml
+#
+# Every module here is read by dbar itself, so nothing is spawned and there is
+# no second configuration file to keep in step. Modules that need an external
+# provider have not gone anywhere - see config.toml and showcase.toml - and the
+# two can be mixed in one bar.
+
+[bar]
+height = 34
+position = "top"
+margin = 6
+gap = 6
+font = "sans-serif 10"
+
+[bar.background]
+color = "#00000000"
+radius = 0
+
+[colors]
+surface = "#313244cc"
+text = "#cdd6f4"
+warm = "#f9e2af"
+hot = "#f38ba8"
+
+[style.default]
+foreground = "$text"
+padding = 8
+
+# `source` names what dbar reads. `interval` is how often; it needs a unit, so
+# that "2s" cannot be misread as two of something else. Each source has a
+# sensible default for both the interval and the format, so a module that wants
+# the ordinary thing says only where it comes from.
+#
+# The fields a format may name are the ones its source publishes:
+#
+#   cpu         $utilization
+#   memory      $percent $used $total $available
+#               $swap_percent $swap_used $swap_total
+#   backlight   $brightness $device
+#   time        $now
+[module.cpu]
+source = "cpu"
+interval = "2s"
+# A fixed width stops the module resizing every time the number crosses ten.
+format = " $utilization.n(w:4) "
+style = "default"
+icon = "cpu"
+
+[module.cpu.states.busy]
+above = 80
+foreground = "$hot"
+
+[module.memory]
+source = "memory"
+interval = "5s"
+# Braces hold what should disappear rather than draw half a sentence: a machine
+# with no swap simply does not mention it.
+format = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
+style = "default"
+icon = "memory"
+
+[module.memory.states.high]
+above = 85
+foreground = "$warm"
+
+# A machine with no backlight publishes nothing for it, and a module with
+# nothing to report is not drawn at all.
+[module.backlight]
+source = "backlight"
+format = " $brightness.n(w:4) "
+style = "default"
+icon = "brightness"
+
+[module.clock]
+source = "time"
+# Read once a minute, and the reading lands on the minute rather than drifting
+# from whenever dbar happened to start.
+interval = "1m"
+format = " $now.time(f:'%a %d %b  %H:%M') "
+style = "default"
+icon = "clock"
+
+[right]
+groups = ["system", "clock"]
+
+[group.system]
+modules = ["cpu", "memory", "backlight"]
+background = "$surface"
+radius = 10
+padding = 4
+spacing = 0
+
+[group.system.separator]
+shape = "chevron"
+width = 10
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.clock]
+modules = ["clock"]
+background = "$surface"
+radius = 10
+padding = 4
