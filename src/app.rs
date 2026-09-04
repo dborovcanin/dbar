@@ -55,7 +55,8 @@ pub struct App {
     qh: QueueHandle<App>,
 
     config: Config,
-    text: TextRenderer,
+    /// What the renderer keeps between frames: the text backend and its spare layer.
+    painter: render::Painter,
     /// The external status provider, when the config asks for one.
     provider: Option<I3BarProvider>,
     items: Vec<StatusItem>,
@@ -163,7 +164,7 @@ impl App {
             conn,
             qh: qh.clone(),
             config,
-            text,
+            painter: render::Painter::new(text),
             native: Registry::new(&config_collectors),
             alt: std::collections::HashMap::new(),
             collapsed: std::collections::HashSet::new(),
@@ -430,10 +431,10 @@ impl App {
 
     fn draw(&mut self) -> Result<()> {
         let scale = self.scale.max(1) as f32;
-        self.text.set_scale(scale);
+        self.painter.text.set_scale(scale);
         let (width, height) = (self.width as f32, self.height as f32);
         self.frame = match &self.fault {
-            Some(message) => layout::fault(message, width, height, &mut self.text),
+            Some(message) => layout::fault(message, width, height, &mut self.painter.text),
             None => {
                 let inputs = Inputs {
                     items: &self.items,
@@ -447,7 +448,7 @@ impl App {
                     &inputs,
                     width,
                     height,
-                    &mut self.text,
+                    &mut self.painter.text,
                     self.pointer_at,
                 );
                 self.warn_if_nothing_matched(&frame);
@@ -483,7 +484,7 @@ impl App {
             &self.config,
             &self.frame,
             scale,
-            &mut self.text,
+            &mut self.painter,
         )?;
 
         let surface = self.layer.wl_surface();

@@ -461,7 +461,19 @@ GPU backend:
    which should build neutral paths and let the backend rasterize.
 
 Text is already isolated behind `Measure` for layout; a GPU backend reuses
-cosmic-text with a glyph atlas rather than its software rasterizer.
+cosmic-text with a glyph atlas rather than its software rasterizer. Note that it
+is not isolated for *drawing*: `TextRenderer::draw` places glyphs at its own
+scale and ignores the transform the rest of `render.rs` goes through, so
+anything that moves the drawing target has to move the text by hand. A backend
+trait should close that gap rather than inherit it.
+
+A group with an `opacity` is drawn opaque onto a spare pixmap and composited
+once, which is the only way a filled separator and a translucent island can
+coexist: fills that are already translucent composite where they overlap, and a
+filled separator lays its ground across the whole gap and its shape over the
+top. A GPU backend does the same thing with a render target and one textured
+quad. The layer is sized to the widest island that asks for one and grown only,
+so no redraw allocates.
 
 ---
 

@@ -93,6 +93,8 @@ pub struct PlacedGroup {
     pub width: f32,
     pub height: f32,
     pub background: Color,
+    /// How much of the finished island reaches the screen, 0.0 to 1.0.
+    pub opacity: f32,
     pub edges: Edges,
     pub modules: Vec<PlacedModule>,
     pub separators: Vec<PlacedSeparator>,
@@ -138,6 +140,7 @@ impl Frame {
 struct SizedGroup {
     width: f32,
     background: Color,
+    opacity: f32,
     edges: Edges,
     padding: f32,
     /// Horizontal space between neighbouring modules.
@@ -538,6 +541,7 @@ fn size_group(
     Some(SizedGroup {
         width,
         background: group.background,
+        opacity: group.opacity,
         edges: group.edges,
         padding: group.padding,
         advance,
@@ -672,6 +676,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         width: sized.width,
         height,
         background: sized.background,
+        opacity: sized.opacity,
         edges: sized.edges,
         modules,
         separators,
@@ -805,6 +810,7 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
             width: module_width,
             height,
             background: Color::TRANSPARENT,
+            opacity: 1.0,
             edges: Edges {
                 left: EdgeShape::None,
                 right: EdgeShape::None,

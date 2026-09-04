@@ -194,6 +194,14 @@ icon_size = 20             # default: 1.4x the font size
 #
 #   left/right "round" | "none"
 #   radius     defaults to the group's own radius
+#
+# `opacity` fades a whole island, 0.0 to 1.0, and defaults to 1.0. The group is
+# drawn opaque and composited once at that alpha, so everything inside it meets
+# everything else at full strength. That is what a translucent bar wants and
+# alpha on a colour cannot give: a filled separator lays its ground across the
+# whole gap and its shape over the top, so two already-translucent fills would
+# composite where they overlap and leave the shape heavier than the modules it
+# runs between. Reach for it rather than an alpha on `background`.
 # ---------------------------------------------------------------------------
 
 # Workspaces and the focused window come from the compositor rather than the
@@ -203,6 +211,7 @@ icon_size = 20             # default: 1.4x the font size
 modules = ["workspaces", "language"]
 background = "$surface"
 radius = 12
+opacity = 1.0
 padding = 3
 spacing = 3
 

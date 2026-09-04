@@ -39,6 +39,8 @@ This is the **V0** milestone from [spec.md](spec.md).
   `round` and `curve`, each mirrorable, with Powerline colour modes and an
   overlap that hides antialiasing seams
 - per-side group edges, with group contents clipped to the group outline
+- `opacity` per group: the island is drawn opaque and faded once, so a
+  see-through bar can still use filled separators
 - a format grammar for what each module says: typed fields, number and text
   formatting, `{groups}` that disappear when a field has nothing to report, and
   `$a|$b|'fallback'` chains
@@ -93,6 +95,7 @@ else installed:
 | [islands.toml](examples/islands.toml) | translucent rounded panels floating over the wallpaper |
 | [minimal.toml](examples/minimal.toml) | text and hairlines, along the bottom of the screen |
 | [states.toml](examples/states.toml) | modules that restyle themselves as values move |
+| [advanced.toml](examples/advanced.toml) | Gruvbox islands, curved transitions, translucent over the wallpaper |
 
 ```sh
 dbar -c examples/islands.toml
@@ -389,6 +392,24 @@ radius = 12           # defaults to the group's own radius
 
 Group contents are clipped to the group outline, so square module corners and
 separator overlap never spill past a rounded edge.
+
+A group can also be faded as a whole:
+
+```toml
+[group.system]
+opacity = 0.8         # 0.0 to 1.0, default 1.0
+```
+
+The island is drawn opaque and composited once at that alpha, so everything
+inside it meets everything else at full strength. That is what a translucent bar
+wants and what an alpha on a colour cannot give: a filled separator lays its
+ground across the whole gap and its shape over the top, so two fills that were
+each already translucent would composite where they overlap and leave the shape
+heavier than the modules it runs between. Reach for `opacity` rather than an
+alpha on `background`, and keep filled separators and translucent colours apart.
+
+Fading costs a redraw a copy of the island's own rectangle, and a buffer as
+large as the widest faded island - nothing at all for a bar that asks for none.
 
 A group can also come to a point where it meets the bar, which is what turns a
 run of blocks into a ribbon:

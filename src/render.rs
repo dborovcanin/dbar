@@ -5,13 +5,14 @@
 
 use anyhow::{Context as _, Result};
 use tiny_skia::{
-    FillRule, LineCap, Mask, Paint, Path, PathBuilder, PixmapMut, Rect, Stroke, Transform,
+    FillRule, LineCap, Mask, Paint, Path, PathBuilder, Pixmap, PixmapMut, PixmapRef,
+    PremultipliedColorU8, Rect, Stroke, Transform,
 };
 
 use crate::color::Color;
 use crate::config::{Config, Direction, EdgeShape, SeparatorShape};
 use crate::icon::{self, IconArt, Ink};
-use crate::layout::{Frame, PlacedIcon, PlacedSeparator};
+use crate::layout::{Frame, PlacedGroup, PlacedIcon, PlacedSeparator};
 use crate::text::TextRenderer;
 
 /// Control-point ratio that turns a cubic into a quarter circle.
@@ -118,9 +119,24 @@ fn separator_path(shape: SeparatorShape, x0: f32, y0: f32, x1: f32, y1: f32) -> 
     pb.finish()
 }
 
+/// Put a logical-pixel edge on a whole device pixel.
+///
+/// Two fills that meet on a shared edge are rasterised independently, so at a fractional
+/// position each takes part of that pixel's coverage. Opaque fills survive it - the two
+/// partial covers still add up to the pixel - but translucent ones are composited over the
+/// wallpaper separately, and the pixel ends up lighter than either of them. Snapping the
+/// edge both sides were laid out against gives each of them whole pixels to cover.
+fn snap(v: f32, scale: f32) -> f32 {
+    if scale <= 0.0 {
+        return v;
+    }
+    (v * scale).round() / scale
+}
+
 fn draw_separator(
     pixmap: &mut PixmapMut<'_>,
     sep: &PlacedSeparator,
+    scale: f32,
     transform: Transform,
     clip: Option<&Mask>,
 ) {
@@ -128,8 +144,8 @@ fn draw_separator(
         return;
     }
     // Bleed past both sides so neither antialiased edge leaves a hairline of wallpaper.
-    let x0 = sep.x - sep.overlap;
-    let x1 = sep.x + sep.width + sep.overlap;
+    let x0 = snap(sep.x - sep.overlap, scale);
+    let x1 = snap(sep.x + sep.width + sep.overlap, scale);
     let (y0, y1) = (sep.y, sep.y + sep.height);
 
     // A left-pointing separator is the mirror image of a right-pointing one with its two
@@ -144,6 +160,13 @@ fn draw_separator(
 
     // A filled shape splits the gap between the two module colours. A hairline only
     // divides, so the gap keeps the group background and the line stays centred in it.
+    //
+    // The ground goes down across the whole gap and the shape over the top of it, rather
+    // than the shape being cut out of it. Two fills meeting on a shared antialiased edge
+    // each take part of that edge's pixels, and two partial covers never add back up to
+    // one, so cutting the shape out would leave a seam of wallpaper along every boundary.
+    // The cost is that the two colours are composited where they overlap, which is why a
+    // filled separator wants opaque module colours: see `fill_edged`'s callers.
     if sep.shape != SeparatorShape::Line {
         fill(
             pixmap,
@@ -283,12 +306,12 @@ pub fn render_to_buffer(
     cfg: &Config,
     frame: &Frame,
     scale: f32,
-    text: &mut TextRenderer,
+    painter: &mut Painter,
 ) -> Result<()> {
     {
         let mut pixmap =
             PixmapMut::from_bytes(canvas, width, height).context("wrapping the shm buffer")?;
-        render(&mut pixmap, cfg, frame, scale, text);
+        render(&mut pixmap, cfg, frame, scale, painter);
     }
     // tiny-skia writes premultiplied RGBA; wl_shm ARGB8888 is BGRA in memory order.
     for px in canvas.chunks_exact_mut(4) {
@@ -303,7 +326,7 @@ fn render(
     cfg: &Config,
     frame: &Frame,
     scale: f32,
-    text: &mut TextRenderer,
+    painter: &mut Painter,
 ) {
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
     let transform = Transform::from_scale(scale, scale);
@@ -319,47 +342,353 @@ fn render(
         None,
     );
 
+    // Split up front: drawing an island needs the text backend and the layer at the same
+    // time, and they are two independent halves of the painter.
+    let Painter { text, scratch } = painter;
     let line_height = text.line_height();
+    let (pw, ph) = (pixmap.width(), pixmap.height());
+
     for group in &frame.groups {
-        let radius = |shape: EdgeShape| match shape {
-            EdgeShape::Round => group.edges.radius,
-            EdgeShape::None => 0.0,
+        // An island that is all there goes straight onto the surface. One that is not is
+        // drawn opaque on a layer of its own and composited once, so that the modules and
+        // separators inside it meet each other at full opacity however they overlap, and
+        // only the finished island is faded. Alpha carried on the colours instead would be
+        // applied once per fill, and a filled separator overlaps its neighbours by design.
+        let bounds = match group.opacity < 1.0 {
+            true => device_bounds(group, scale, pw, ph),
+            false => None,
         };
-        let (rl, rr) = (radius(group.edges.left), radius(group.edges.right));
-        let Some(outline) = edged_rect(group.x, group.y, group.width, group.height, rl, rr) else {
+
+        // No bounds means the group is opaque, or has nothing to cover. Either way it goes
+        // straight down.
+        let Some((bx, by, bw, bh)) = bounds else {
+            draw_group(pixmap, group, scale, transform, text, line_height);
             continue;
         };
-        fill_path(pixmap, &outline, group.background, transform, None);
-
-        // Square module corners and separator overlap would otherwise spill past a
-        // rounded group edge, so clip the group's contents to its own outline.
-        let clip = if rl > 0.0 || rr > 0.0 {
-            clip_mask(pixmap, &outline, transform)
-        } else {
-            None
+        let Some(layer) = layer(scratch, bw, bh) else {
+            // Nowhere to draw: an island at full strength is a worse bar than one at the
+            // asked-for alpha, but it is still a readable one.
+            draw_group(pixmap, group, scale, transform, text, line_height);
+            continue;
         };
-        let clip = clip.as_ref();
 
-        // Separators go down before the modules, so any overlap is covered by them.
-        for separator in &group.separators {
-            draw_separator(pixmap, separator, transform, clip);
+        // The island is drawn into the layer's own corner, so the layer only ever has to
+        // be as big as the widest island rather than as big as the bar.
+        clear(layer, bw, bh);
+        let local = transform.post_translate(-(bx as f32), -(by as f32));
+        draw_group(&mut layer.as_mut(), group, scale, local, text, line_height);
+        composite(pixmap, layer.as_ref(), (bx, by, bw, bh), group.opacity);
+    }
+}
+
+/// Draw one island: its background, then its separators, then its modules.
+///
+/// Everything vector goes through `transform`, but the text backend rasterises glyphs at
+/// its own scale and places them itself, so text is the one thing `transform` cannot move.
+/// Its translation is taken off the transform and applied by hand, which keeps the two in
+/// step wherever the target is: drawing onto a layer only moves the transform.
+fn draw_group(
+    pixmap: &mut PixmapMut<'_>,
+    group: &PlacedGroup,
+    scale: f32,
+    transform: Transform,
+    text: &mut TextRenderer,
+    line_height: f32,
+) {
+    let offset = match scale > 0.0 {
+        true => (transform.tx / scale, transform.ty / scale),
+        false => (0.0, 0.0),
+    };
+    let radius = |shape: EdgeShape| match shape {
+        EdgeShape::Round => group.edges.radius,
+        EdgeShape::None => 0.0,
+    };
+    let (rl, rr) = (radius(group.edges.left), radius(group.edges.right));
+    let Some(outline) = edged_rect(group.x, group.y, group.width, group.height, rl, rr) else {
+        return;
+    };
+    fill_path(pixmap, &outline, group.background, transform, None);
+
+    // Square module corners and separator overlap would otherwise spill past a
+    // rounded group edge, so clip the group's contents to its own outline.
+    let clip = if rl > 0.0 || rr > 0.0 {
+        clip_mask(pixmap, &outline, transform)
+    } else {
+        None
+    };
+    let clip = clip.as_ref();
+
+    // Separators go down before the modules, so any overlap is covered by them.
+    for separator in &group.separators {
+        draw_separator(pixmap, separator, scale, transform, clip);
+    }
+
+    for module in &group.modules {
+        // Snapped against the same grid as the separators, so the edge a module shares
+        // with the gap beside it is one edge rather than two.
+        let (mx0, mx1) = (snap(module.x, scale), snap(module.x + module.width, scale));
+        fill(
+            pixmap,
+            (mx0, module.y, mx1 - mx0, module.height),
+            module.radius,
+            module.background,
+            transform,
+            clip,
+        );
+        if let Some(icon) = &module.icon {
+            draw_icon(pixmap, icon, module.foreground, transform, clip);
+        }
+        // Layout already placed the text; only the vertical centring is ours.
+        let ty = module.y + (module.height - line_height) / 2.0;
+        text.draw(
+            pixmap,
+            &module.text,
+            module.text_x + offset.0,
+            ty + offset.1,
+            module.foreground,
+        );
+    }
+}
+
+/// The whole device pixels a group can reach, as `(x, y, width, height)` clamped to the
+/// surface. `None` for a group with no pixels to its name.
+fn device_bounds(
+    group: &PlacedGroup,
+    scale: f32,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let x0 = (group.x * scale).floor().clamp(0.0, width as f32) as u32;
+    let y0 = (group.y * scale).floor().clamp(0.0, height as f32) as u32;
+    let x1 = ((group.x + group.width) * scale)
+        .ceil()
+        .clamp(0.0, width as f32) as u32;
+    let y1 = ((group.y + group.height) * scale)
+        .ceil()
+        .clamp(0.0, height as f32) as u32;
+    match (x1 > x0, y1 > y0) {
+        (true, true) => Some((x0, y0, x1 - x0, y1 - y0)),
+        _ => None,
+    }
+}
+
+/// Take the top-left `width` x `height` of `layer` back to nothing.
+///
+/// Only the corner an island is about to be drawn into, since the layer is sized to the
+/// widest island the bar has and most are narrower than that.
+fn clear(layer: &mut Pixmap, width: u32, height: u32) {
+    let stride = layer.width() as usize;
+    let pixels = layer.pixels_mut();
+    for row in 0..height as usize {
+        let start = row * stride;
+        pixels[start..start + width as usize].fill(PremultipliedColorU8::TRANSPARENT);
+    }
+}
+
+/// Put the island in `layer`'s corner onto the surface at `bounds`, faded to `opacity`.
+///
+/// Device pixel to device pixel: no transform, no sampling, and only the island's own
+/// rectangle is touched. Both sides are premultiplied, so fading is a multiply across all
+/// four channels and the blend is the ordinary source-over.
+fn composite(
+    pixmap: &mut PixmapMut<'_>,
+    layer: PixmapRef<'_>,
+    bounds: (u32, u32, u32, u32),
+    opacity: f32,
+) {
+    let (bx, by, bw, bh) = bounds;
+    let alpha = (opacity.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let scale = |v: u8, by: u32| ((v as u32 * by + 127) / 255) as u8;
+
+    let src_stride = layer.width() as usize;
+    let dst_stride = pixmap.width() as usize;
+    let src = layer.pixels();
+    let dst = pixmap.pixels_mut();
+
+    for row in 0..bh as usize {
+        let s = row * src_stride;
+        let d = (by as usize + row) * dst_stride + bx as usize;
+        // Taken a row at a time so the bounds are checked once rather than per pixel.
+        let over_row = &src[s..s + bw as usize];
+        let under_row = &mut dst[d..d + bw as usize];
+
+        for (over, under) in over_row.iter().zip(under_row.iter_mut()) {
+            if over.alpha() == 0 {
+                continue;
+            }
+            // Scaling a premultiplied colour keeps every channel under its own alpha, so
+            // the result is still a valid premultiplied colour.
+            let (r, g, b, a) = (
+                scale(over.red(), alpha),
+                scale(over.green(), alpha),
+                scale(over.blue(), alpha),
+                scale(over.alpha(), alpha),
+            );
+            // Nothing behind it, which is the whole of an island that sits on a bar with
+            // no background of its own.
+            if under.alpha() == 0 {
+                *under = PremultipliedColorU8::from_rgba(r, g, b, a).unwrap_or(*under);
+                continue;
+            }
+            let rest = 255 - a as u32;
+            *under = PremultipliedColorU8::from_rgba(
+                r + scale(under.red(), rest),
+                g + scale(under.green(), rest),
+                b + scale(under.blue(), rest),
+                a + scale(under.alpha(), rest),
+            )
+            .unwrap_or(*under);
+        }
+    }
+}
+
+/// What the renderer keeps between frames.
+///
+/// Shaped fonts and the spare surface both cost too much to build per redraw, and neither
+/// depends on the frame being drawn, so they live here and the draw call borrows them.
+pub struct Painter {
+    /// Shapes and draws text, and answers layout's questions about how wide it is.
+    pub text: TextRenderer,
+    /// A layer for the groups that are composited rather than drawn straight on. One
+    /// buffer serves every such group in a frame, since each is cleared, drawn and put
+    /// down before the next is started.
+    scratch: Option<Pixmap>,
+}
+
+impl Painter {
+    pub fn new(text: TextRenderer) -> Painter {
+        Painter {
+            text,
+            scratch: None,
+        }
+    }
+}
+
+/// The layer, at least `width` x `height`.
+///
+/// Sized to the largest island that has asked for one rather than to the bar, and only
+/// ever grown, so a bar with no translucent island never allocates it, the first frame
+/// settles the size, and no redraw after that allocates at all.
+fn layer(scratch: &mut Option<Pixmap>, width: u32, height: u32) -> Option<&mut Pixmap> {
+    let (have_w, have_h) = match &scratch {
+        Some(p) => (p.width(), p.height()),
+        None => (0, 0),
+    };
+    if have_w < width || have_h < height {
+        *scratch = Pixmap::new(have_w.max(width), have_h.max(height));
+    }
+    scratch.as_mut()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Direction, SeparatorShape};
+    use crate::layout::PlacedSeparator;
+    use tiny_skia::Pixmap;
+
+    const A: Color = Color::rgba(0x3c, 0x38, 0x36, 0xff);
+    const B: Color = Color::rgba(0x50, 0x49, 0x45, 0xff);
+
+    /// Paint two tiles with a curve between them, the way a group does, and report the
+    /// alpha of every column across the join.
+    ///
+    /// With an `opacity` the island is drawn on a layer and composited, which is what the
+    /// renderer does for a group that asks to be faded.
+    fn alphas_across_a_join(scale: f32, module_edge: f32, opacity: f32) -> Vec<u8> {
+        let (w, h) = (60.0f32, 10.0f32);
+        let (dw, dh) = ((w * scale) as u32, (h * scale) as u32);
+        let mut pixmap = Pixmap::new(dw, dh).unwrap();
+        let mut layer = Pixmap::new(dw, dh).unwrap();
+        let faded = opacity < 1.0;
+        let mut canvas = if faded {
+            layer.as_mut()
+        } else {
+            pixmap.as_mut()
+        };
+        let transform = Transform::from_scale(scale, scale);
+
+        let sep = PlacedSeparator {
+            x: module_edge,
+            y: 0.0,
+            width: 20.0,
+            height: h,
+            shape: SeparatorShape::Curve,
+            direction: Direction::Right,
+            overlap: 0.0,
+            fill: A,
+            under: B,
+        };
+        draw_separator(&mut canvas, &sep, scale, transform, None);
+
+        for (x0, x1, color) in [(0.0, module_edge, A), (module_edge + sep.width, w, B)] {
+            let (sx0, sx1) = (snap(x0, scale), snap(x1, scale));
+            fill(
+                &mut canvas,
+                (sx0, 0.0, sx1 - sx0, h),
+                0.0,
+                color,
+                transform,
+                None,
+            );
         }
 
-        for module in &group.modules {
-            fill(
-                pixmap,
-                (module.x, module.y, module.width, module.height),
-                module.radius,
-                module.background,
-                transform,
-                clip,
+        if faded {
+            composite(
+                &mut pixmap.as_mut(),
+                layer.as_ref(),
+                (0, 0, dw, dh),
+                opacity,
             );
-            if let Some(icon) = &module.icon {
-                draw_icon(pixmap, icon, module.foreground, transform, clip);
+        }
+
+        // One row through the middle, where the curve's own boundary is not in play.
+        let row = (h * scale) as usize / 2;
+        let stride = (w * scale) as usize;
+        pixmap.pixels()[row * stride..(row + 1) * stride]
+            .iter()
+            .map(|p| p.alpha())
+            .collect()
+    }
+
+    /// A filled separator and the modules on either side of it have to cover the gap
+    /// between them completely, at any scale and wherever layout happened to put the
+    /// boundary. A column that is not fully opaque is a line of wallpaper showing through
+    /// the middle of an island.
+    #[test]
+    fn a_filled_separator_leaves_no_seam_between_its_two_tiles() {
+        for scale in [1.0, 2.0] {
+            for edge in [17.0, 17.5, 17.3, 17.87] {
+                let alphas = alphas_across_a_join(scale, edge, 1.0);
+                let dip = alphas.iter().copied().min().unwrap();
+                assert_eq!(
+                    dip, 0xff,
+                    "scale {scale}, edge {edge}: a column fell to {dip:#x}, so two fills \
+                     that share an edge each took part of it and neither covered the pixel"
+                );
             }
-            // Layout already placed the text; only the vertical centring is ours.
-            let ty = module.y + (module.height - line_height) / 2.0;
-            text.draw(pixmap, &module.text, module.text_x, ty, module.foreground);
+        }
+    }
+
+    /// The point of drawing an island on a layer: its alpha lands once, on the finished
+    /// island, so a filled separator inside it is neither heavier than its neighbours
+    /// where the two overlap nor lighter where they meet.
+    #[test]
+    fn a_faded_island_is_the_same_alpha_the_whole_way_across() {
+        for scale in [1.0, 2.0] {
+            for edge in [17.0, 17.5, 17.3, 17.87] {
+                let alphas = alphas_across_a_join(scale, edge, 0.8);
+                let (lo, hi) = (
+                    alphas.iter().copied().min().unwrap(),
+                    alphas.iter().copied().max().unwrap(),
+                );
+                assert_eq!(
+                    (lo, hi),
+                    (0xcc, 0xcc),
+                    "scale {scale}, edge {edge}: alpha ran {lo:#x}..={hi:#x} across the \
+                     island, so something inside it was composited more than once"
+                );
+            }
         }
     }
 }

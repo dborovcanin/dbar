@@ -236,6 +236,7 @@ struct RawGroup {
     #[serde(default)]
     modules: Vec<String>,
     background: Option<String>,
+    opacity: Option<f32>,
     #[serde(default)]
     radius: f32,
     #[serde(default)]
@@ -481,6 +482,14 @@ pub struct I3Bar {
 #[derive(Debug, Clone)]
 pub struct Group {
     pub background: Color,
+    /// How much of the finished island reaches the screen, 0.0 to 1.0.
+    ///
+    /// A group is drawn opaque and then composited once at this alpha, so the modules and
+    /// separators inside it meet each other at full opacity however they overlap. Alpha
+    /// written into a colour cannot do this: a filled separator paints its ground across
+    /// the whole gap and its shape over the top, and two translucent fills composite where
+    /// they overlap, which leaves the shape heavier than the modules it runs between.
+    pub opacity: f32,
     pub padding: f32,
     pub spacing: f32,
     pub separator: Separator,
@@ -1389,6 +1398,11 @@ fn resolve_group(
         },
     };
 
+    let opacity = raw_group.opacity.unwrap_or(1.0);
+    if !(0.0..=1.0).contains(&opacity) {
+        bail!("in [group.{name}]: opacity is {opacity}, but it has to be between 0.0 and 1.0");
+    }
+
     Ok(Group {
         background: match &raw_group.background {
             Some(c) => palette
@@ -1396,6 +1410,7 @@ fn resolve_group(
                 .with_context(|| format!("in [group.{name}]"))?,
             None => Color::TRANSPARENT,
         },
+        opacity,
         padding: raw_group.padding,
         spacing: raw_group.spacing,
         separator,
