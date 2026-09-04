@@ -17,6 +17,7 @@ pub mod disk;
 pub mod load;
 pub mod memory;
 pub mod network;
+pub mod nl80211;
 pub mod temperature;
 pub mod time;
 pub mod watch;

@@ -38,8 +38,8 @@ This is the **V0** milestone from [spec.md](spec.md).
   formatting, `{groups}` that disappear when a field has nothing to report, and
   `$a|$b|'fallback'` chains
 
-Not yet implemented: a media player, Bluetooth, a wireless network's name and
-strength, command modules, multi-monitor. See [dbar-native.md](dbar-native.md)
+Not yet implemented: a media player, Bluetooth, wireless signal strength,
+command modules, multi-monitor. See [dbar-native.md](dbar-native.md)
 for where this is going.
 
 ## Build
@@ -410,7 +410,7 @@ These are read by dbar itself, from `/proc`, `/sys` and PipeWire:
 | `load` | `$one` `$five` `$fifteen` `$percent` |
 | `temperature` | `$temp` `$average` `$label` `$chip` |
 | `disk` | `$percent` `$used` `$total` `$available` `$free` `$path` |
-| `network` | `$down` `$up` `$device` `$state` `$received` `$sent` |
+| `network` | `$down` `$up` `$device` `$state` `$ssid` `$received` `$sent` |
 | `time` | `$now` |
 
 Three of them are pointed at something, and take that from a key of their own:

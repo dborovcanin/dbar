@@ -282,8 +282,10 @@ style = "warning"
 [module.network]
 source = "network"
 interval = "2s"
-format = " $down{  $up} "
-format_alt = " $device $state "
+# The network's name when there is one, falling back to the interface: a cable
+# has no name to give, and neither has a card that has joined nothing.
+format = " $ssid|$device "
+format_alt = " $down{  $up} "
 style = "panel"
 icon = "wifi"
 

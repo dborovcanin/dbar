@@ -43,6 +43,12 @@ pub const FIELDS: &[FieldSpec] = &[
         name: "sent",
         kind: Kind::Num(Unit::Bytes),
     },
+    // The wireless network this interface is on. Absent on a cable, and on a card that is
+    // up but has joined nothing.
+    FieldSpec {
+        name: "ssid",
+        kind: Kind::Text,
+    },
 ];
 
 const CLASS: &str = "/sys/class/net";
@@ -53,6 +59,12 @@ pub struct Network {
     wanted: Option<String>,
     /// The last sample, to work a rate out against.
     previous: Option<Sample>,
+    /// The wireless stack, opened the first time a wireless interface is read and kept
+    /// afterwards. A machine with no wireless never opens it at all.
+    wireless: Option<crate::collect::nl80211::Wireless>,
+    /// Whether the wireless stack has already refused, so a machine without one is not
+    /// asked on every tick.
+    wireless_failed: bool,
 }
 
 impl Network {
@@ -61,6 +73,47 @@ impl Network {
             class: PathBuf::from(CLASS),
             wanted,
             previous: None,
+            wireless: None,
+            wireless_failed: false,
+        }
+    }
+}
+
+impl Network {
+    /// The network this interface has joined, when it is a wireless one that has joined a
+    /// network at all.
+    ///
+    /// A cable is never asked: `wireless` is the directory the kernel gives an interface
+    /// that has a radio behind it, so its absence is the answer.
+    fn network_on(&mut self, device: &Path) -> Option<String> {
+        if !device.join("wireless").is_dir() || self.wireless_failed {
+            return None;
+        }
+        if self.wireless.is_none() {
+            match crate::collect::nl80211::Wireless::open() {
+                Ok(wireless) => self.wireless = Some(wireless),
+                Err(e) => {
+                    log::debug!("no network name to report: {e:#}");
+                    self.wireless_failed = true;
+                    return None;
+                }
+            }
+        }
+
+        let ifindex = super::read_to_string(device.join("ifindex"))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()?;
+        match self.wireless.as_mut()?.network_of(ifindex) {
+            Ok(ssid) => ssid,
+            Err(e) => {
+                // The socket is dropped rather than kept in a state nothing understands;
+                // the next tick opens a new one.
+                log::debug!("the network name could not be read: {e:#}");
+                self.wireless = None;
+                None
+            }
         }
     }
 }
@@ -83,7 +136,7 @@ impl Collector for Network {
                     // A machine with no hardware interface at all is unusual but not
                     // broken; the module simply has nothing to say.
                     let mut fields = Fields::default();
-                    for name in ["down", "up", "device", "state", "received", "sent"] {
+                    for name in ["down", "up", "device", "state", "received", "sent", "ssid"] {
                         fields.set(name, Value::Absent);
                     }
                     fields.set_primary("down");
@@ -121,6 +174,13 @@ impl Collector for Network {
         );
         fields.set("device", Value::Text(now.device.clone()));
         fields.set("state", Value::Text(now.state.clone()));
+        fields.set(
+            "ssid",
+            match self.network_on(&device) {
+                Some(ssid) => Value::Text(ssid),
+                None => Value::Absent,
+            },
+        );
         fields.set(
             "received",
             Value::Num {
@@ -284,6 +344,8 @@ mod tests {
             class: root.clone(),
             wanted: Some("wlp3s0".to_string()),
             previous: None,
+            wireless: None,
+            wireless_failed: true,
         };
 
         // Nothing to divide by yet, so the first tick reports no rate rather than a wrong
@@ -328,6 +390,8 @@ mod tests {
             class: root,
             wanted: Some("nonesuch".to_string()),
             previous: None,
+            wireless: None,
+            wireless_failed: true,
         };
         let e = net
             .read()
@@ -342,6 +406,8 @@ mod tests {
             class: root,
             wanted: None,
             previous: None,
+            wireless: None,
+            wireless_failed: true,
         };
         let fields = net.read().expect("this is not an error").fields;
         assert!(matches!(fields.get("device"), Some(Value::Absent)));
