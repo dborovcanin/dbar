@@ -15,6 +15,29 @@ use crate::icon::{self, IconArt, Ink};
 use crate::layout::{Frame, PlacedGroup, PlacedIcon, PlacedSeparator};
 use crate::text::TextRenderer;
 
+/// What the renderer needs from a text backend.
+///
+/// Drawing sits behind this the way measuring sits behind `layout::Measure`, so `render.rs`
+/// can be tested without fonts and so a future backend can bring its own rasteriser. The
+/// coordinates are logical pixels; an implementation applies the output scale itself.
+pub trait DrawText {
+    /// Height of one line, in logical pixels.
+    fn line_height(&self) -> f32;
+
+    /// Draw `text` with its left edge at `x` and its top at `y`.
+    fn draw(&mut self, pixmap: &mut PixmapMut<'_>, text: &str, x: f32, y: f32, color: Color);
+}
+
+impl DrawText for TextRenderer {
+    fn line_height(&self) -> f32 {
+        TextRenderer::line_height(self)
+    }
+
+    fn draw(&mut self, pixmap: &mut PixmapMut<'_>, text: &str, x: f32, y: f32, color: Color) {
+        TextRenderer::draw(self, pixmap, text, x, y, color)
+    }
+}
+
 /// Control-point ratio that turns a cubic into a quarter circle.
 const KAPPA: f32 = 0.552_285;
 
@@ -306,7 +329,7 @@ pub fn render_to_buffer(
     cfg: &Config,
     frame: &Frame,
     scale: f32,
-    painter: &mut Painter,
+    painter: &mut Painter<impl DrawText>,
 ) -> Result<()> {
     {
         let mut pixmap =
@@ -326,7 +349,7 @@ fn render(
     cfg: &Config,
     frame: &Frame,
     scale: f32,
-    painter: &mut Painter,
+    painter: &mut Painter<impl DrawText>,
 ) {
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
     let transform = Transform::from_scale(scale, scale);
@@ -392,7 +415,7 @@ fn draw_group(
     group: &PlacedGroup,
     scale: f32,
     transform: Transform,
-    text: &mut TextRenderer,
+    text: &mut dyn DrawText,
     line_height: f32,
 ) {
     let offset = match scale > 0.0 {
@@ -546,17 +569,17 @@ fn composite(
 ///
 /// Shaped fonts and the spare surface both cost too much to build per redraw, and neither
 /// depends on the frame being drawn, so they live here and the draw call borrows them.
-pub struct Painter {
+pub struct Painter<T = TextRenderer> {
     /// Shapes and draws text, and answers layout's questions about how wide it is.
-    pub text: TextRenderer,
+    pub text: T,
     /// A layer for the groups that are composited rather than drawn straight on. One
     /// buffer serves every such group in a frame, since each is cleared, drawn and put
     /// down before the next is started.
     scratch: Option<Pixmap>,
 }
 
-impl Painter {
-    pub fn new(text: TextRenderer) -> Painter {
+impl<T: DrawText> Painter<T> {
+    pub fn new(text: T) -> Painter<T> {
         Painter {
             text,
             scratch: None,
@@ -583,12 +606,45 @@ fn layer(scratch: &mut Option<Pixmap>, width: u32, height: u32) -> Option<&mut P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Direction, SeparatorShape};
-    use crate::layout::PlacedSeparator;
+    use crate::config::{Config, Direction, EdgeShape, Edges, SeparatorShape};
+    use crate::icon::Icon;
+    use crate::layout::{Frame, PlacedGroup, PlacedModule, PlacedSeparator};
     use tiny_skia::Pixmap;
+
+    /// A text backend with no fonts, which paints a solid block per character.
+    ///
+    /// Layout's stub answers how wide text is; this one has to put ink on the page, so a
+    /// test can see whether text landed where it belongs. Every character is one unit wide
+    /// and the block is the full line height, which makes a drawn string a rectangle at a
+    /// position the test can predict.
+    struct Blocks {
+        /// The output scale, held by the backend rather than taken from the renderer -
+        /// which is exactly why text has to be moved by hand when the target moves.
+        scale: f32,
+    }
+
+    const BLOCK: f32 = 8.0;
+
+    impl DrawText for Blocks {
+        fn line_height(&self) -> f32 {
+            BLOCK
+        }
+
+        fn draw(&mut self, pixmap: &mut PixmapMut<'_>, text: &str, x: f32, y: f32, color: Color) {
+            let w = text.chars().count() as f32 * BLOCK;
+            // Logical coordinates in, device pixels out, with no reference to the
+            // renderer's transform. The real backend rasterises glyphs the same way.
+            let s = self.scale;
+            let bounds = (x * s, y * s, w * s, BLOCK * s);
+            fill(pixmap, bounds, 0.0, color, Transform::identity(), None);
+        }
+    }
 
     const A: Color = Color::rgba(0x3c, 0x38, 0x36, 0xff);
     const B: Color = Color::rgba(0x50, 0x49, 0x45, 0xff);
+    const INK: Color = Color::rgba(0xff, 0xff, 0xff, 0xff);
+    const TILE: Color = A;
+    const TILE_ALT: Color = B;
 
     /// Paint two tiles with a curve between them, the way a group does, and report the
     /// alpha of every column across the join.
@@ -689,6 +745,235 @@ mod tests {
                      island, so something inside it was composited more than once"
                 );
             }
+        }
+    }
+
+    /// The middle row of a separator drawn on its own, as `(r, g, b, a)` per column.
+    fn separator_row(direction: Direction, fill: Color, under: Color) -> Vec<(u8, u8, u8, u8)> {
+        let (w, h) = (40.0f32, 8.0f32);
+        let mut pixmap = Pixmap::new(w as u32, h as u32).unwrap();
+        let sep = PlacedSeparator {
+            x: 4.0,
+            y: 0.0,
+            width: 32.0,
+            height: h,
+            shape: SeparatorShape::Slant,
+            direction,
+            overlap: 0.0,
+            fill,
+            under,
+        };
+        draw_separator(&mut pixmap.as_mut(), &sep, 1.0, Transform::identity(), None);
+
+        let row = h as usize / 2;
+        pixmap.pixels()[row * w as usize..(row + 1) * w as usize]
+            .iter()
+            .map(|p| (p.red(), p.green(), p.blue(), p.alpha()))
+            .collect()
+    }
+
+    /// `direction` mirrors the boundary and nothing else: the two colours stay on their
+    /// own sides. So pointing a separator the other way is the same picture reflected,
+    /// with the colours named the other way round - which is what lets one set of shapes
+    /// serve a bar that reads right-to-left, and why only the path is reflected rather
+    /// than a concave complement being built for every shape.
+    #[test]
+    fn a_separator_pointing_left_is_one_pointing_right_reflected() {
+        let left = separator_row(Direction::Left, TILE, TILE_ALT);
+        let mut right = separator_row(Direction::Right, TILE_ALT, TILE);
+        right.reverse();
+        assert_eq!(
+            left, right,
+            "mirroring moved the colours, not just the boundary"
+        );
+    }
+
+    /// A hairline is symmetric, so it is the one shape `direction` must not touch.
+    #[test]
+    fn a_hairline_reads_the_same_way_round() {
+        let row = |direction| {
+            let (w, h) = (40.0f32, 8.0f32);
+            let mut pixmap = Pixmap::new(w as u32, h as u32).unwrap();
+            let sep = PlacedSeparator {
+                x: 4.0,
+                y: 0.0,
+                width: 32.0,
+                height: h,
+                shape: SeparatorShape::Line,
+                direction,
+                overlap: 0.0,
+                fill: TILE,
+                under: TILE_ALT,
+            };
+            draw_separator(&mut pixmap.as_mut(), &sep, 1.0, Transform::identity(), None);
+            pixmap
+                .pixels()
+                .iter()
+                .map(|p| p.alpha())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(row(Direction::Left), row(Direction::Right));
+    }
+
+    // -----------------------------------------------------------------------
+    // Whole frames
+    // -----------------------------------------------------------------------
+
+    fn module(x: f32, width: f32, background: Color, text: &str, icon: bool) -> PlacedModule {
+        PlacedModule {
+            x,
+            y: 0.0,
+            width,
+            height: 20.0,
+            icon: icon.then_some(PlacedIcon {
+                icon: Icon::Cpu,
+                level: 0,
+                x: x + 2.0,
+                y: 4.0,
+                size: 12.0,
+            }),
+            text: text.to_string(),
+            text_x: x + 16.0,
+            foreground: INK,
+            background,
+            radius: 0.0,
+            action: None,
+            alt: None,
+            collapsible: None,
+        }
+    }
+
+    /// One island a long way along the bar, with two tiles, a curve between them, an icon
+    /// and text - everything the renderer places through a transform, plus the one thing
+    /// it does not.
+    fn island(opacity: f32) -> Frame {
+        let x = 300.0;
+        let (first, gap, second) = (60.0, 12.0, 60.0);
+        Frame {
+            groups: vec![PlacedGroup {
+                x,
+                y: 0.0,
+                width: first + gap + second,
+                height: 20.0,
+                background: Color::TRANSPARENT,
+                opacity,
+                edges: Edges {
+                    left: EdgeShape::Round,
+                    right: EdgeShape::Round,
+                    radius: 6.0,
+                },
+                modules: vec![
+                    module(x, first, TILE, "ab", true),
+                    module(x + first + gap, second, TILE_ALT, "cd", true),
+                ],
+                separators: vec![PlacedSeparator {
+                    x: x + first,
+                    y: 0.0,
+                    width: gap,
+                    height: 20.0,
+                    shape: SeparatorShape::Curve,
+                    direction: Direction::Right,
+                    overlap: 0.0,
+                    fill: TILE,
+                    under: TILE_ALT,
+                }],
+            }],
+        }
+    }
+
+    fn bar() -> Config {
+        Config::parse("[bar]\nheight = 20\n").expect("a bar with no modules is a config")
+    }
+
+    fn shot(frame: &Frame, scale: f32) -> Pixmap {
+        let mut pixmap = Pixmap::new((480.0 * scale) as u32, (20.0 * scale) as u32).unwrap();
+        let mut painter = Painter::new(Blocks { scale });
+        render(&mut pixmap.as_mut(), &bar(), frame, scale, &mut painter);
+        pixmap
+    }
+
+    /// Text is the one thing the renderer's transform cannot move: the backend places
+    /// glyphs at its own scale and never sees it, so drawing an island onto a layer has to
+    /// move the text by hand. Miss that and the island keeps its shapes and loses its
+    /// words, which is invisible to any test that only counts covered pixels - the tile
+    /// behind the text is covered either way.
+    #[test]
+    fn text_on_a_faded_island_lands_where_it_would_on_the_bar() {
+        let alpha = 0.8;
+        for scale in [1.0, 2.0] {
+            let faded = shot(&island(alpha), scale);
+
+            // The middle of the first module's text, which the fixture puts well along the
+            // bar - far enough that a layer-local coordinate misses the surface entirely.
+            let module = &island(alpha).groups[0].modules[0];
+            let ty = module.y + (module.height - BLOCK) / 2.0;
+            let at = |x: f32, y: f32| {
+                let i = (y * scale) as usize * faded.width() as usize + (x * scale) as usize;
+                faded.pixels()[i]
+            };
+            let ink = at(module.text_x + BLOCK / 2.0, ty + BLOCK / 2.0);
+
+            let want = ((0xff * 204 + 127) / 255) as u8;
+            assert_eq!(
+                (ink.red(), ink.alpha()),
+                (want, want),
+                "scale {scale}: the middle of the text is {:#x} on {:#x}, not the ink \
+                 colour faded to {want:#x} - the words did not reach the bar",
+                ink.red(),
+                ink.alpha()
+            );
+        }
+    }
+
+    /// And in the same colours: fading is one multiply over the finished island, so every
+    /// pixel of it is the opaque pixel scaled, and nothing inside was composited twice.
+    #[test]
+    fn fading_an_island_only_scales_what_was_already_there() {
+        let alpha = 0.8;
+        let scaled = |v: u8| ((v as u32 * (alpha * 255.0) as u32 + 127) / 255) as u8;
+
+        for scale in [1.0, 2.0] {
+            let plain = shot(&island(1.0), scale);
+            let faded = shot(&island(alpha), scale);
+
+            for (i, (want, got)) in plain.pixels().iter().zip(faded.pixels()).enumerate() {
+                let expected = (
+                    scaled(want.red()),
+                    scaled(want.green()),
+                    scaled(want.blue()),
+                    scaled(want.alpha()),
+                );
+                let actual = (got.red(), got.green(), got.blue(), got.alpha());
+                assert_eq!(
+                    actual,
+                    expected,
+                    "scale {scale}, pixel {} of {}: {actual:?} where the opaque island \
+                     scaled to {expected:?}",
+                    i,
+                    plain.pixels().len()
+                );
+            }
+        }
+    }
+
+    /// An island that runs off the end of the bar keeps the part that fits. The layer is
+    /// clamped to the surface, so this is where an off-by-one turns into a panic.
+    #[test]
+    fn an_island_hanging_off_the_edge_still_draws() {
+        for x in [-40.0, 440.0, 479.0] {
+            let mut frame = island(0.8);
+            let shift = x - frame.groups[0].x;
+            let group = &mut frame.groups[0];
+            group.x += shift;
+            for m in &mut group.modules {
+                m.x += shift;
+                m.text_x += shift;
+                if let Some(icon) = &mut m.icon {
+                    icon.x += shift;
+                }
+            }
+            group.separators[0].x += shift;
+            shot(&frame, 1.0);
         }
     }
 }

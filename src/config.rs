@@ -1991,6 +1991,39 @@ signal = 8
     }
 
     #[test]
+    fn an_island_is_all_there_unless_it_asks_not_to_be() {
+        let group = |line: &str| {
+            format!(
+                "[right]\ngroups = [\"system\"]\n\
+                 [group.system]\nmodules = [\"cpu\"]\n{line}\n\
+                 [module.cpu]\nsource = \"cpu\"\n"
+            )
+        };
+        let opacity = |toml: &str| {
+            Config::parse(toml).map(|c| {
+                c.positions
+                    .iter()
+                    .flatten()
+                    .next()
+                    .expect("the group was placed")
+                    .opacity
+            })
+        };
+
+        assert_eq!(opacity(&group("")).expect("a group needs no opacity"), 1.0);
+        assert_eq!(opacity(&group("opacity = 0.5")).expect("half is fine"), 0.5);
+
+        // Named, and pointing at the group, so the mistake is findable at startup rather
+        // than at three in the morning.
+        for bad in ["opacity = 1.8", "opacity = -0.2"] {
+            let e = opacity(&group(bad)).expect_err("outside 0.0 to 1.0");
+            let message = format!("{e:#}");
+            assert!(message.contains("opacity"), "{message}");
+            assert!(message.contains("group.system"), "{message}");
+        }
+    }
+
+    #[test]
     fn every_shipped_example_parses() {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
         for entry in std::fs::read_dir(dir).expect("examples/ is readable") {
