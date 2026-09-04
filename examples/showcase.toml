@@ -35,6 +35,7 @@ gap = 6
 # unless [bar] icon_size says otherwise.
 font = "sans-serif 15"
 icon_size = 20
+exclusive = true        # default: true; reserve the space so windows do not sit under the bar
 
 [status]
 command = "i3status-rs"
@@ -152,47 +153,87 @@ groups = ["system", "media", "power"]
 [style.default]
 foreground = "$text"
 padding = 9
+background = "#00000000" # default: transparent
+radius = 0              # default: 0
+min_width = 0           # default: 0
+icon = "none"           # default: none
+icon_size = 20          # default: 1.4x the font size
 
 # Filled transitions need neighbouring modules to contrast, so these alternate.
 [style.cool]
 background = "$accent"
 foreground = "$background"
 padding = 9
+radius = 0              # default: 0
+min_width = 0           # default: 0
+icon = "none"           # default: none
+icon_size = 20          # default: 1.4x the font size
 
 [style.warm]
 background = "$warning"
 foreground = "$background"
 padding = 9
+radius = 0              # default: 0
+min_width = 0           # default: 0
+icon = "none"           # default: none
+icon_size = 20          # default: 1.4x the font size
 
 [style.mint]
 background = "$teal"
 foreground = "$background"
 padding = 9
+radius = 0              # default: 0
+min_width = 0           # default: 0
+icon = "none"           # default: none
+icon_size = 20          # default: 1.4x the font size
 
 [style.stone]
 background = "$slate"
 foreground = "$text"
 padding = 9
+radius = 0              # default: 0
+min_width = 0           # default: 0
+icon = "none"           # default: none
+icon_size = 20          # default: 1.4x the font size
 
 # No background of its own, so the group background shows through continuously.
 # Hover is paint-only: background, foreground and radius. Anything affecting
 # metrics is ignored, so a module cannot resize under the pointer.
 [style.hovered]
 background = "$overlay"
+foreground = "$text"    # default: #cdd6f4
+padding = 8             # default: 8
+radius = 0              # default: 0
+min_width = 0           # default: 0
+icon = "none"           # default: none
+icon_size = 20          # default: 1.4x the font size
 
 [style.plain]
 foreground = "$text"
 padding = 12
+background = "#00000000" # default: transparent
+radius = 0              # default: 0
+min_width = 0           # default: 0
+icon = "none"           # default: none
+icon_size = 20          # default: 1.4x the font size
 
 [style.warning]
 background = "$warning"
 foreground = "$background"
 padding = 9
+radius = 0              # default: 0
+min_width = 0           # default: 0
+icon = "none"           # default: none
+icon_size = 20          # default: 1.4x the font size
 
 [style.critical]
 background = "$critical"
 foreground = "$background"
 padding = 9
+radius = 0              # default: 0
+min_width = 0           # default: 0
+icon = "none"           # default: none
+icon_size = 20          # default: 1.4x the font size
 
 # ---------------------------------------------------------------------------
 # Groups
@@ -234,12 +275,29 @@ direction = "right"
 color = "$subtext"
 overlap = 0
 
+[group.desktop.edges]
+left = "round"
+right = "round"
+radius = 12
+
 [group.window]
 modules = ["title"]
 background = "$surface"
 radius = 12
 padding = 0
 spacing = 0
+
+[group.window.separator]
+shape = "none"
+width = 10
+direction = "right"
+color = "previous"
+overlap = 0
+
+[group.window.edges]
+left = "round"
+right = "round"
+radius = 12
 
 [group.time]
 modules = ["clock"]
@@ -249,6 +307,19 @@ padding = 0
 spacing = 0
 
 # CPU, memory and disk, joined by slanted transitions.
+
+[group.time.separator]
+shape = "none"
+width = 10
+direction = "right"
+color = "previous"
+overlap = 0
+
+[group.time.edges]
+left = "round"
+right = "round"
+radius = 12
+
 [group.system]
 modules = ["cpu", "memory", "disk"]
 background = "$surface"
@@ -286,6 +357,12 @@ color = "$subtext"
 overlap = 0
 
 # Right-hand groups conventionally point the other way.
+
+[group.media.edges]
+left = "round"
+right = "round"
+radius = 12
+
 [group.power]
 modules = ["battery"]
 background = "$surface"
@@ -303,12 +380,41 @@ overlap = 1
 # ---------------------------------------------------------------------------
 # Modules
 #
+# Every key a [style.*] takes is also valid directly on a module, plus:
+#
+#   style      name of a [style.*] to start from        default: built-in defaults
+#   source     "provider" | "sway:window" |
+#              "sway:workspaces"                        default: "provider"
+#
+# and on a [module.*.states.*]:
+#
+#   style      a [style.*] whose keys are applied over the module's
+#   below      matches under this percentage
+#   above      matches over this percentage
+#   contains   matches this substring of the module's text
+#   strip      remove that substring once matched        default: false
+#   urgent     matches the provider's urgent flag        default: false
+#   hover      matches while the pointer is over it      default: false
+#   focused    matches the focused workspace             default: false
+#   visible    matches a workspace shown on an output    default: false
+#
+# Unlike the sections above, these are deliberately left out where they are not
+# doing work. Writing a default onto a module is not a no-op: the cascade runs
+# built-in defaults, then the named style, then the module's own keys, so
+# spelling out `padding = 8` here would override the padding its style sets.
+#
 # "style" names a [style.*] table; any other key overrides it for this module.
 # Module styles are keyed by block name, so a block placed in two groups would
 # share one style; here each block appears once.
 # ---------------------------------------------------------------------------
 
 # From the compositor. Clicking a workspace switches to it.
+
+[group.power.edges]
+left = "round"
+right = "round"
+radius = 12
+
 [module.workspaces]
 source = "sway:workspaces"
 style = "plain"
