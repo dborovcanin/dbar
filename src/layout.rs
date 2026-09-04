@@ -9,7 +9,7 @@ use crate::config::{
     SeparatorColor, SeparatorShape, Source, StateFlags, Style,
 };
 use crate::icon::{self, Icon};
-use crate::status::{ActionTarget, StatusItem};
+use crate::status::{ActionTarget, Fields, StatusItem, Value};
 use crate::sway::SwayState;
 
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
@@ -204,7 +204,7 @@ fn collect<'g>(group: &'g GroupCfg, items: &[StatusItem], sway: &SwayState) -> V
 
     let from_item = |module: &'g ModuleCfg, item: &StatusItem| Candidate {
         module,
-        text: item.text.clone(),
+        text: module.format.render(&item.fields),
         flags: StateFlags {
             urgent: item.urgent,
             ..StateFlags::default()
@@ -233,9 +233,11 @@ fn collect<'g>(group: &'g GroupCfg, items: &[StatusItem], sway: &SwayState) -> V
             }
             Source::SwayWindow => {
                 if let Some(title) = &sway.window {
+                    let mut fields = Fields::default();
+                    fields.set("title", Value::Text(title.clone()));
                     out.push(Candidate {
                         module,
-                        text: title.clone(),
+                        text: module.format.render(&fields),
                         flags: StateFlags::default(),
                         value: None,
                         foreground: None,
@@ -246,9 +248,11 @@ fn collect<'g>(group: &'g GroupCfg, items: &[StatusItem], sway: &SwayState) -> V
             }
             Source::SwayWorkspaces => {
                 for workspace in &sway.workspaces {
+                    let mut fields = Fields::default();
+                    fields.set("name", Value::Text(workspace.name.clone()));
                     out.push(Candidate {
                         module,
-                        text: workspace.name.clone(),
+                        text: module.format.render(&fields),
                         flags: StateFlags {
                             urgent: workspace.urgent,
                             focused: workspace.focused,
@@ -621,10 +625,11 @@ mod tests {
     }
 
     fn item(id: &str, text: &str) -> StatusItem {
+        let mut fields = Fields::default();
+        fields.set("text", Value::Text(text.to_string()));
         StatusItem {
             id: Some(id.to_string()),
-            text: text.to_string(),
-            fields: Fields::default(),
+            fields,
             state: State::Idle,
             urgent: false,
             foreground: None,
@@ -736,6 +741,42 @@ foreground = "#00ff00"
             frame.groups[0].modules[0].foreground,
             Color::rgba(0xff, 0, 0, 0xff)
         );
+    }
+
+    #[test]
+    fn a_module_says_what_its_format_says() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+padding = 0
+format = "cpu $percent.n(w:3)"
+"##;
+        let frame = frame_of(config, &[with_percent(item("cpu", "ignored"), 7.0)]);
+        // The width counts the whole number, suffix included, so a column of them lines up.
+        assert_eq!(frame.groups[0].modules[0].text, "cpu  7%");
+    }
+
+    #[test]
+    fn a_format_can_drop_what_the_source_could_not_measure() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+padding = 0
+format = "cpu{ $percent}"
+"##;
+        // No percentage in the text, so the source published none and the group goes.
+        let frame = frame_of(config, &[item("cpu", "busy")]);
+        assert_eq!(frame.groups[0].modules[0].text, "cpu");
     }
 
     #[test]

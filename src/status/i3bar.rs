@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::color::Color;
 use crate::config;
-use crate::status::{ActionTarget, Fields, State, StatusItem, Unit, Value};
+use crate::status::{ActionTarget, FieldSpec, Fields, Kind, State, StatusItem, Unit, Value};
 
 /// One status block as described by the i3bar protocol.
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -58,6 +58,21 @@ impl I3BarBlock {
     }
 }
 
+/// What a block can offer a format.
+///
+/// The protocol sends rendered text, so this is as much structure as there is: the text
+/// itself, and whatever percentage can be read out of it.
+pub const FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        name: "text",
+        kind: Kind::Text,
+    },
+    FieldSpec {
+        name: "percent",
+        kind: Kind::Num(Unit::Percent),
+    },
+];
+
 /// Turn one provider update into status items.
 ///
 /// `names` are the names the config gave the provider's blocks, by position, because the
@@ -95,7 +110,6 @@ pub fn to_items(blocks: &[I3BarBlock], names: &[String]) -> Vec<StatusItem> {
 
             StatusItem {
                 id,
-                text,
                 fields,
                 // The protocol has no state scale; the urgent flag is the whole of it.
                 state: if block.urgent {
@@ -490,7 +504,10 @@ mod tests {
         let mut b = block("x", "<span foreground='#f00'>7&#37;</span>");
         b.markup = Some("pango".to_string());
         let items = to_items(&[b], &[]);
-        assert_eq!(items[0].text, "7%");
+        assert!(matches!(
+            items[0].fields.get("text"),
+            Some(Value::Text(t)) if t == "7%"
+        ));
         assert_eq!(items[0].fields.primary().and_then(|v| v.num()), Some(7.0));
     }
 }

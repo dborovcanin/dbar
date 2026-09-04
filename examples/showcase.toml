@@ -448,10 +448,41 @@ icon = "cpu"
 style = "warm"
 icon = "memory"
 
+# `format` is what a module says, written against the fields its source
+# publishes. Every source has a default, so most modules never need one:
+#
+#   provider          $text, $percent
+#   sway:window       $title
+#   sway:workspaces   $name
+#
+# A field can be formatted: $percent.n(w:3) pads to a fixed width so the module
+# stops resizing as the number changes, and $title.str(max:40) caps its length
+# in characters. Text in {braces} disappears whole when a field inside it has
+# nothing to report, and $a|$b|'fallback' says the best thing it can. Write a
+# literal $ or { as $$ or {{.
+#
+# The provider sends rendered text, so $text is nearly always what to use here.
+# Native sources publish real values, and formats come into their own there.
 [module.disk]
 style = "mint"
 icon = "disk"
+format = "$text"
 
+# `format` is what a module says, written against the fields its source
+# publishes. Every source has a default, so most modules never need one:
+#
+#   provider          $text, $percent
+#   sway:window       $title
+#   sway:workspaces   $name
+#
+# A field can be formatted: $percent.n(w:3) pads to a fixed width so the module
+# stops resizing as the number changes, and $title.str(max:40) caps its length
+# in characters. Text in {braces} disappears whole when a field inside it has
+# nothing to report, and $a|$b|'fallback' says the best thing it can. Write a
+# literal $ or { as $$ or {{.
+#
+# The provider sends rendered text, so $text is nearly always what to use here.
+# Native sources publish real values, and formats come into their own there.
 # Graded icons pick one of five steps from a percentage in their own text.
 [module.wifi]
 style = "plain"

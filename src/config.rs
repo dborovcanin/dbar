@@ -11,7 +11,9 @@ use anyhow::{Context as _, Result, anyhow};
 use serde::Deserialize;
 
 use crate::color::Color;
+use crate::format::Format;
 use crate::icon::Icon;
+use crate::status::FieldSpec;
 
 pub const DEFAULT_CONFIG: &str = include_str!("../examples/config.toml");
 
@@ -70,6 +72,29 @@ pub enum Source {
     SwayWindow,
     /// One entry per workspace, expanded at layout time.
     SwayWorkspaces,
+}
+
+impl Source {
+    /// What a format written against this source may name.
+    pub fn fields(self) -> &'static [FieldSpec] {
+        match self {
+            Source::Provider => crate::status::i3bar::FIELDS,
+            Source::SwayWindow => crate::sway::WINDOW_FIELDS,
+            Source::SwayWorkspaces => crate::sway::WORKSPACE_FIELDS,
+        }
+    }
+
+    /// What the module says when the config does not give it a format.
+    ///
+    /// Each source has one field that is the obvious thing to show, so the common case
+    /// needs no `format` line at all.
+    fn default_format(self) -> &'static str {
+        match self {
+            Source::Provider => "$text",
+            Source::SwayWindow => "$title",
+            Source::SwayWorkspaces => "$name",
+        }
+    }
 }
 
 /// Where a separator takes its colour from.
@@ -232,6 +257,8 @@ struct RawModule {
     style: Option<String>,
     /// Where the content comes from: the provider, or the compositor.
     source: Option<String>,
+    /// What the module says, written against the source's fields.
+    format: Option<String>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
     #[serde(default)]
     states: HashMap<String, RawState>,
@@ -443,6 +470,8 @@ pub struct Edges {
 pub struct Module {
     pub name: String,
     pub source: Source,
+    /// What the module says, already parsed and checked against the source's fields.
+    pub format: Format,
     pub style: Style,
     /// Checked in order; the first match replaces the module's style.
     pub states: Vec<StateRule>,
@@ -729,6 +758,16 @@ impl Config {
     }
 }
 
+/// Parse a module's format and check it against what its source can publish.
+///
+/// Checking here means a typo in a field name is a message when dbar starts, rather than a
+/// module that silently says nothing.
+fn resolve_format(source: Source, written: Option<&str>) -> Result<Format> {
+    let format = Format::parse(written.unwrap_or_else(|| source.default_format()))?;
+    format.check(source.fields())?;
+    Ok(format)
+}
+
 fn resolve_group(
     name: &str,
     raw_group: &RawGroup,
@@ -810,9 +849,18 @@ fn resolve_group(
             ),
         };
 
+        let format = resolve_format(
+            source,
+            raw.modules
+                .get(module_name)
+                .and_then(|m| m.format.as_deref()),
+        )
+        .with_context(|| format!("in [module.{module_name}] format"))?;
+
         modules.push(Module {
             name: module_name.clone(),
             source,
+            format,
             style,
             states,
         });
@@ -863,6 +911,7 @@ fn resolve_group(
             vec![Module {
                 name: "*".to_string(),
                 source: Source::Provider,
+                format: resolve_format(Source::Provider, None)?,
                 style: fallback,
                 states: Vec::new(),
             }]
@@ -957,6 +1006,42 @@ mod tests {
     #[test]
     fn the_built_in_default_config_parses() {
         Config::parse(DEFAULT_CONFIG).expect("the compiled-in default must parse");
+    }
+
+    #[test]
+    fn a_format_naming_an_unknown_field_is_rejected() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+format = "$nope"
+"##;
+        let e = Config::parse(config).expect_err("an unknown field must be reported");
+        let message = format!("{e:#}");
+        assert!(message.contains("[module.cpu]"), "{message}");
+        assert!(message.contains("$nope"), "{message}");
+    }
+
+    #[test]
+    fn a_format_is_checked_against_the_source_it_reads() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["win"]
+
+[module.win]
+source = "sway:window"
+format = "$text"
+"##;
+        // `$text` is the provider's field; the window module publishes `$title`.
+        let e = Config::parse(config).expect_err("the wrong source's field must be reported");
+        assert!(format!("{e:#}").contains("title"), "{e:#}");
     }
 
     #[test]

@@ -21,6 +21,9 @@ This is the **V0** milestone from [spec.md](spec.md).
   `round` and `curve`, each mirrorable, with Powerline colour modes and an
   overlap that hides antialiasing seams
 - per-side group edges, with group contents clipped to the group outline
+- a format grammar for what each module says: typed fields, number and text
+  formatting, `{groups}` that disappear when a field has nothing to report, and
+  `$a|$b|'fallback'` chains
 
 Not yet implemented: vector icons, hover states, module state styling,
 animations, command modules, multi-monitor. Those are V1 and V1.x in the spec.

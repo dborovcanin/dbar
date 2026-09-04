@@ -68,6 +68,41 @@ impl Value {
     }
 }
 
+/// What kind of value a field holds, independent of any particular reading.
+///
+/// A source declares these up front so a format can be checked when the config is read
+/// rather than quietly rendering nothing at three in the morning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+// The kinds with no source yet arrive with their collector.
+#[allow(dead_code)]
+pub enum Kind {
+    Num(Unit),
+    Text,
+    Time,
+    Dur,
+    Flag,
+}
+
+impl Kind {
+    /// How to name this kind in a message to whoever wrote the config.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Kind::Num(_) => "a number",
+            Kind::Text => "text",
+            Kind::Time => "a time",
+            Kind::Dur => "a duration",
+            Kind::Flag => "a flag",
+        }
+    }
+}
+
+/// One field a source promises to publish.
+#[derive(Clone, Copy, Debug)]
+pub struct FieldSpec {
+    pub name: &'static str,
+    pub kind: Kind,
+}
+
 /// The values one status item currently carries, in the order the source published them.
 ///
 /// Sources publish a handful of fields each, so a vector beats a hash map on both lookup
@@ -151,9 +186,8 @@ pub struct StatusItem {
     /// Optional because the i3bar protocol lets a provider leave its blocks unnamed, in
     /// which case nothing can select them by name. Native sources always have one.
     pub id: Option<String>,
-    /// The text to draw.
-    pub text: String,
-    /// The values behind that text.
+    /// What the source measured. The text to draw is the module's format applied to these,
+    /// so a value is never recovered from a string that was written to be looked at.
     pub fields: Fields,
     /// The source's own rating of what it is reporting. Read once state rules can key on
     /// it, which is a configuration change rather than a model one.

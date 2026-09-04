@@ -11,12 +11,26 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
+use crate::status::{FieldSpec, Kind};
+
 const MAGIC: &[u8; 6] = b"i3-ipc";
 
 const RUN_COMMAND: u32 = 0;
 const GET_WORKSPACES: u32 = 1;
 const SUBSCRIBE: u32 = 2;
 const GET_TREE: u32 = 4;
+
+/// What the focused-window module can offer a format.
+pub const WINDOW_FIELDS: &[FieldSpec] = &[FieldSpec {
+    name: "title",
+    kind: Kind::Text,
+}];
+
+/// What one workspace can offer a format.
+pub const WORKSPACE_FIELDS: &[FieldSpec] = &[FieldSpec {
+    name: "name",
+    kind: Kind::Text,
+}];
 
 /// One entry of the workspace list.
 #[derive(Clone, Debug, Deserialize)]
