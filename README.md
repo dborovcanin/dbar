@@ -199,9 +199,19 @@ optional: without a compositor to talk to, these modules simply show nothing and
 the rest of the bar is unaffected.
 
 A centred group is centred between its neighbours rather than on the bar, so a
-wide right-hand run pushes it aside instead of being drawn over it. Nothing
-truncates, though: window titles have no length limit and `max_width` is not
-implemented, so enough content still collides.
+wide right-hand run pushes it aside instead of being drawn over it. Cap a module
+that has no length limit of its own:
+
+```toml
+[module.title]
+source = "sway:window"
+max_width = 320         # logical pixels; 0, the default, is unbounded
+```
+
+What does not fit is cut at a character boundary and marked with an ellipsis.
+`max_width` bounds the whole module, so padding and any icon come out of the
+same budget; if nothing is left for text, a module with an icon draws that
+alone.
 
 ### Module states
 

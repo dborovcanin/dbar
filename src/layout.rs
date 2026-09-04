@@ -128,6 +128,42 @@ struct SizedGroup {
     modules: Vec<SizedModule>,
 }
 
+/// Stands in for the text a module could not fit.
+const ELLIPSIS: &str = "\u{2026}";
+
+/// The longest prefix of `text` that fits in `budget`, with an ellipsis marking the cut.
+///
+/// Widths come from the text backend, so the search is over character boundaries by
+/// bisection rather than by counting bytes, which would cut multi-byte characters in half.
+fn truncate(text: &str, budget: f32, measure: &mut dyn Measure) -> String {
+    if measure.measure(text) <= budget {
+        return text.to_string();
+    }
+    let ellipsis = measure.measure(ELLIPSIS);
+    if ellipsis > budget {
+        return String::new();
+    }
+
+    let cuts: Vec<usize> = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(text.len()))
+        .collect();
+    let (mut lo, mut hi, mut best) = (0usize, cuts.len() - 1, 0usize);
+    while lo <= hi {
+        let mid = (lo + hi) / 2;
+        if measure.measure(&text[..cuts[mid]]) + ellipsis <= budget {
+            best = mid;
+            lo = mid + 1;
+        } else if mid == 0 {
+            break;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    format!("{}{ELLIPSIS}", text[..cuts[best]].trim_end())
+}
+
 /// Space between an icon and the text beside it, as a fraction of the icon size.
 const ICON_GAP: f32 = 0.4;
 
@@ -328,8 +364,20 @@ fn size_group(
             Some(_) if style.icon_size > 0.0 => style.icon_size * (1.0 + ICON_GAP),
             _ => 0.0,
         };
+        // A module that would outgrow max_width loses text rather than pushing its
+        // neighbours aside: a window title has no length limit of its own.
+        let fixed = icon_advance + style.padding * 2.0;
+        let content = if style.max_width > 0.0 {
+            truncate(&content, style.max_width - fixed, text)
+        } else {
+            content
+        };
+        if content.is_empty() && style.icon.is_none() {
+            continue;
+        }
+
         let text_width = text.measure(&content);
-        let width = (text_width + icon_advance + style.padding * 2.0).max(style.min_width);
+        let width = (text_width + fixed).max(style.min_width);
         modules.push(SizedModule {
             width,
             text_width,

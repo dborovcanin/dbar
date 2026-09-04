@@ -863,7 +863,8 @@ backgrounds; click and scroll forwarding; integer HiDPI buffer scaling.
 colour modes and an overlap that hides antialiasing seams; per-side group edges
 with contents clipped to the group outline; reusable styles and named colours;
 a built-in vector icon set, including icons graded over five steps by a
-percentage read from the module's own text; module state styling keyed on a
+percentage read from the module's own text; `min_width` and `max_width`, the
+latter truncating with an ellipsis; module state styling keyed on a
 value, on text the provider writes, on its urgent flag, or on the pointer, with
 the matched text removable so a state marker need not be read; workspaces and the
 focused window over the compositor's own IPC, with workspaces expanding into one
@@ -929,7 +930,7 @@ moving.
   warning.
 - Text is not clipped to the group outline. Backgrounds and separators are;
   text sits inside the padding, where it has not mattered.
-- No truncation. A centred run is now kept clear of its neighbours rather than
-  centred blindly, but nothing shortens a module that does not fit: `max_width`,
-  which §8 lists, is unimplemented, and a window title is unbounded, so enough
-  content still collides.
+- Overflow is bounded per module rather than for the bar as a whole. A centred
+  run is kept clear of its neighbours and `max_width` truncates a module that
+  would outgrow it, but a bar whose modules all fit individually and not
+  collectively still collides; nothing drops or shrinks a whole group.

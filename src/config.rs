@@ -178,6 +178,7 @@ struct RawStyle {
     padding: Option<f32>,
     radius: Option<f32>,
     min_width: Option<f32>,
+    max_width: Option<f32>,
     icon: Option<String>,
     icon_size: Option<f32>,
 }
@@ -532,6 +533,8 @@ pub struct Style {
     pub padding: f32,
     pub radius: f32,
     pub min_width: f32,
+    /// Widest the module may draw, in logical pixels. Zero leaves it unbounded.
+    pub max_width: f32,
     pub icon: Option<Icon>,
     /// Icon edge length in logical pixels, independent of the font size.
     pub icon_size: f32,
@@ -558,6 +561,7 @@ impl Default for Style {
             padding: 8.0,
             radius: 0.0,
             min_width: 0.0,
+            max_width: 0.0,
             icon: None,
             icon_size: 14.0,
         }
@@ -581,6 +585,9 @@ impl Style {
         }
         if let Some(v) = over.min_width {
             self.min_width = v;
+        }
+        if let Some(v) = over.max_width {
+            self.max_width = v.max(0.0);
         }
         if let Some(name) = &over.icon {
             self.icon = match name.as_str() {

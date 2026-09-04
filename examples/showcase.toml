@@ -428,9 +428,13 @@ style = "cool"
 urgent = true
 style = "warning"
 
+# A window title has no length limit of its own, so it is capped here rather
+# than allowed to push the clock aside. What does not fit is cut with an
+# ellipsis.
 [module.title]
 source = "sway:window"
 style = "plain"
+max_width = 320
 
 [module.clock]
 style = "cool"
