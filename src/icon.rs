@@ -45,6 +45,8 @@ pub enum Icon {
     Wifi,
     Volume,
     Brightness,
+    /// Graded by the temperature itself, read as a share of a hundred degrees.
+    Temperature,
     VolumeMuted,
     WifiOff,
     Headphones,
@@ -63,6 +65,7 @@ impl Icon {
             "wifi" | "network" => Icon::Wifi,
             "volume" => Icon::Volume,
             "brightness" => Icon::Brightness,
+            "temperature" | "temp" => Icon::Temperature,
             "volume-muted" => Icon::VolumeMuted,
             "wifi-off" => Icon::WifiOff,
             "headphones" => Icon::Headphones,
@@ -74,7 +77,12 @@ impl Icon {
     pub fn is_graded(self) -> bool {
         matches!(
             self,
-            Icon::Battery | Icon::BatteryCharging | Icon::Wifi | Icon::Volume | Icon::Brightness
+            Icon::Battery
+                | Icon::BatteryCharging
+                | Icon::Wifi
+                | Icon::Volume
+                | Icon::Brightness
+                | Icon::Temperature
         )
     }
 }
@@ -182,6 +190,7 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
             finish(pb, Ink::Stroke(0.08), &mut out);
         }
         Icon::Brightness => brightness(&mut out, level),
+        Icon::Temperature => temperature(&mut out, level),
         Icon::Headphones => headphones(&mut out),
     }
     IconArt::Paths(out)
@@ -379,6 +388,43 @@ fn volume(out: &mut Vec<IconPath>, level: usize) {
         arc(&mut arcs, 0.46, 0.50, 0.15 + i as f32 * 0.11, from, to);
     }
     finish(arcs, Ink::Stroke(0.08), out);
+}
+
+/// A thermometer whose column rises with the level.
+///
+/// The bulb is always full, because a thermometer with an empty bulb reads as broken
+/// rather than as cold, and the column above it is what carries the level.
+fn temperature(out: &mut Vec<IconPath>, level: usize) {
+    const TOP: f32 = 0.16;
+    const NECK: f32 = 0.66;
+    const BULB: f32 = 0.76;
+
+    // The tube: an outline the column then rises inside.
+    let mut tube = PathBuilder::new();
+    rounded(&mut tube, 0.41, TOP, 0.59, NECK, 0.09);
+    finish(tube, Ink::Stroke(0.07), out);
+
+    let mut bulb = PathBuilder::new();
+    bulb.push_circle(0.50, BULB, 0.145);
+    finish(bulb, Ink::Stroke(0.07), out);
+
+    // The mercury: the bulb, and a column standing on it.
+    let mut mercury = PathBuilder::new();
+    mercury.push_circle(0.50, BULB, 0.085);
+    let t = level as f32 / (LEVELS - 1) as f32;
+    // Level zero still shows a little in the neck, or a cold module looks like a module
+    // whose sensor has stopped.
+    let top = NECK - 0.06 - t * (NECK - TOP - 0.16);
+    rounded(&mut mercury, 0.455, top, 0.545, BULB, 0.045);
+    finish(mercury, Ink::Fill, out);
+
+    // Two graduations, which say thermometer rather than test tube.
+    let mut marks = PathBuilder::new();
+    for i in 0..2 {
+        let y = TOP + 0.12 + i as f32 * 0.14;
+        line(&mut marks, 0.63, y, 0.73, y);
+    }
+    finish(marks, Ink::Stroke(0.06), out);
 }
 
 fn brightness(out: &mut Vec<IconPath>, level: usize) {
