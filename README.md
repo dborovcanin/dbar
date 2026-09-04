@@ -41,11 +41,11 @@ dbar -c path/to.toml    # explicit config
 dbar --print-config     # writes the built-in default config to stdout
 ```
 
-`dbar` needs a status provider. To get started:
+`dbar` needs a status provider on `PATH` - `i3status-rs` by default. It writes
+that provider's own configuration itself, so there is nothing else to install:
 
 ```sh
-mkdir -p ~/.config/i3status-rust ~/.config/dbar
-cp examples/i3status-rs.toml ~/.config/i3status-rust/config.toml
+mkdir -p ~/.config/dbar
 dbar --print-config > ~/.config/dbar/config.toml
 ```
 
@@ -141,12 +141,11 @@ yet; `wifi-off`, `volume-muted` and `headphones` are named outright. Value-drive
 #### Provider glyph icons
 
 Alternatively the status provider can emit icons as text. i3status-rs ships
-several icon sets, and every block in
-[examples/i3status-rs.toml](examples/i3status-rs.toml) formats as
-`$icon $value`, so one line decides what you get:
+several icon sets, and a block whose format includes `$icon` picks one up, so
+one line under `[status.icons]` decides what you get:
 
 ```toml
-[icons]
+[status.icons]
 icons = "none"          # the default: not "no icon", but short text labels
 # icons = "material-nf" # glyph icons - needs a font that carries them
 ```
@@ -263,9 +262,6 @@ Since dbar draws its own icons, the provider's text labels are usually turned
 off entirely, leaving only the markers a rule needs:
 
 ```toml
-[status.icons]
-icons = "none"
-
 [status.icons.overrides]
 volume = ""             # no "VOL" prefix; dbar draws the icon
 volume_muted = "MUTED"  # kept, because nothing else signals mute
