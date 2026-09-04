@@ -473,18 +473,26 @@ icon = "brightness"
 #
 # Which player is chosen is not a setting: the one that is playing wins, and a
 # paused one only speaks when nothing else does.
+# `collapsible = true` folds a module down to its icon on a right click, and back
+# on the next one. A collapsible module has to have an icon, or there would be
+# nothing left to see or click, and that is a startup error rather than a bar
+# with a hole in it.
 [module.media]
 source = "media"
 controls = true
+collapsible = true
 format = " {$artist  }$title "
 format_alt = [" $album ", " $player "]
 style = "plain"
 max_width = 280
+# A button says what pressing it does, so a playing track wears the pause icon.
+icon = "pause"
 
 [module.media.states.paused]
 field = "status"
 equals = "paused"
 foreground = "$subtext"
+icon = "play"
 
 # A disk module is pointed at a filesystem; without `path` it is the root. The
 # percentage leaves out the reserve only root may write into, so a disk with no

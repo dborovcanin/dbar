@@ -17,7 +17,7 @@ height = 34
 position = "top"
 margin = 3
 gap = 3
-font = "sans-serif 15"
+font = "sans-serif 20"
 icon_size = 20
 
 # ---------------------------------------------------------------------------
@@ -26,8 +26,8 @@ icon_size = 20
 
 [colors]
 background = "#1e1e2e"
-surface = "#313244cc"   # alpha cc, so SwayFX blur shows through
-raised = "#45475acc"    # a pill sitting on that surface
+surface = "#313244cc"  # alpha cc, so SwayFX blur shows through
+raised = "#45475acc"   # a pill sitting on that surface
 divider = "#585b70"
 text = "#cdd6f4"
 subtext = "#a6adc8"
@@ -219,14 +219,19 @@ radius = 12
 [module.media]
 source = "media"
 controls = true
+collapsible = true
 format = " {$artist  }$title "
 style = "panel"
 max_width = 320
+# The icon is a button, so it shows what a click will do rather than what is
+# already happening: while a track plays, clicking pauses it.
+icon = "pause"
 
 [module.media.states.paused]
 field = "status"
 equals = "paused"
 foreground = "$subtext"
+icon = "play"
 
 [module.title]
 source = "sway:window"
@@ -320,10 +325,7 @@ interval = "2s"
 # toggling between two: what it is on, what it is doing, and how well it can
 # hear it. The icon grades on the signal, so it says that much without a click.
 format = " $ssid|$device "
-format_alt = [
-  " $down{  $up} ",
-  " $signal.n(w:4){  $dbm.n(d:0) dBm} ",
-]
+format_alt = [" $down{  $up} ", " $signal.n(w:4){  $dbm.n(d:0) dBm} "]
 style = "panel"
 icon = "wifi"
 

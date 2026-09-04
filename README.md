@@ -28,6 +28,8 @@ This is the **V0** milestone from [spec.md](spec.md).
   middle click mutes; dbar sets both itself rather than running a helper
 - `controls = true` on a media module: a left click plays and pauses, and the
   wheel moves between tracks, over MPRIS on the session bus
+- `collapsible = true`: a right click folds a module down to its icon, and the
+  next one unfolds it
 - `signal = N`: read a source again on SIGRTMIN+N
 - `left` / `center` / `right` positions holding groups of modules
 - rounded group and module backgrounds
@@ -166,7 +168,7 @@ named style overrides it, and a module overrides that. With `[bar] icon_size`
 left out it defaults to 1.4x the font size, so icons scale with the text.
 
 Fixed: `cpu`, `memory`, `disk`, `clock`, `ethernet`, `headphones`, `wifi-off`,
-`volume-muted`.
+`volume-muted`, `play`, `pause`.
 
 Graded: `battery`, `battery-charging`, `wifi`, `volume`, `brightness`,
 `temperature`. These have five steps and pick one from the value the source

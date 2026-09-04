@@ -292,6 +292,8 @@ struct RawModule {
     /// Whether clicks on this module operate what it is showing. Only for a player, whose
     /// buttons are play, pause and skip rather than a step in either direction.
     controls: Option<bool>,
+    /// Whether a right click folds this module down to its icon, and back.
+    collapsible: Option<bool>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
     #[serde(default)]
     states: HashMap<String, RawState>,
@@ -526,6 +528,8 @@ pub struct Module {
     pub signal: Option<i32>,
     /// What a click or a scroll here operates, and by how much where that means anything.
     pub control: Option<(Control, f64)>,
+    /// Whether a right click folds this module down to its icon.
+    pub collapsible: bool,
     /// What the module says, already parsed and checked against the source's fields.
     pub format: Format,
     /// The further wordings a left click moves through, in order. Empty when the config
@@ -1209,6 +1213,16 @@ fn resolve_group(
             ),
             None => None,
         };
+        // Folding a module with no icon leaves an empty box on the bar, and no way back:
+        // there would be nothing left to click on.
+        let collapsible = raw_module.and_then(|m| m.collapsible).unwrap_or(false);
+        if collapsible && style.icon.is_none() {
+            bail!(
+                "module {module_name:?} is collapsible but has no icon; folded down it \
+                 would leave nothing to see or click"
+            );
+        }
+
         let controls = raw_module.and_then(|m| m.controls).unwrap_or(false);
         let control = match (scroll, controls) {
             (Some(_), true) => bail!(
@@ -1262,6 +1276,7 @@ fn resolve_group(
             interval,
             signal,
             control,
+            collapsible,
             format,
             format_alt,
             style,
@@ -1328,6 +1343,7 @@ fn resolve_group(
                 interval: None,
                 signal: None,
                 control: None,
+                collapsible: false,
                 format: resolve_format(&Source::Provider, None)?,
                 format_alt: Vec::new(),
                 style: fallback,
@@ -1687,6 +1703,42 @@ format_alt = [" $down ", " $nonsense "]
         let message = format!("{:#}", broken);
         assert!(message.contains("wording 2"), "{message}");
         assert!(message.contains("nonsense"), "{message}");
+    }
+
+    #[test]
+    fn folding_needs_something_left_to_click_on() {
+        let broken = Config::parse(
+            r#"
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+source = "cpu"
+collapsible = true
+"#,
+        )
+        .expect_err("a module with no icon has nothing to fold down to");
+        let message = format!("{broken:#}");
+        assert!(message.contains("icon"), "{message}");
+
+        Config::parse(
+            r#"
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+source = "cpu"
+icon = "cpu"
+collapsible = true
+"#,
+        )
+        .expect("with an icon it is fine");
     }
 
     #[test]

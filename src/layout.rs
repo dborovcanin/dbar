@@ -26,6 +26,8 @@ pub struct Inputs<'a> {
     pub sway: &'a SwayState,
     /// Modules currently showing their second wording, by name.
     pub alt: &'a std::collections::HashMap<String, usize>,
+    /// Modules folded down to their icon.
+    pub collapsed: &'a std::collections::HashSet<String>,
 }
 
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
@@ -64,6 +66,8 @@ pub struct PlacedModule {
     pub action: Option<ActionTarget>,
     /// The module's name and how many wordings it has, when a click can move through them.
     pub alt: Option<(String, usize)>,
+    /// The module's name, when a right click folds it down to its icon.
+    pub collapsible: Option<String>,
 }
 
 /// A transition drawn in the gap between two neighbouring modules.
@@ -206,6 +210,8 @@ const ICON_GAP: f32 = 0.4;
 struct SizedModule {
     width: f32,
     text_width: f32,
+    /// The module's name, when a right click folds it down to its icon.
+    collapsible: Option<String>,
     /// Paint overrides applied while the pointer is over this module.
     hover_style: Option<Style>,
     /// Width of the icon plus its gap, or zero.
@@ -361,8 +367,10 @@ fn size_group(
             background,
             action,
         } = candidate;
-        // The i3bar protocol uses an empty `full_text` to mean "hide this block".
-        if content.is_empty() {
+        // The i3bar protocol uses an empty `full_text` to mean "hide this block". A module
+        // folded down is empty on purpose and stays, because its icon is still there.
+        let folded = module.collapsible && inputs.collapsed.contains(&module.name);
+        if content.is_empty() && !folded {
             continue;
         }
         // The state rules and the graded icons both key on what the source published, not
@@ -381,7 +389,7 @@ fn size_group(
 
         // A provider often has to spell a state into the text for a rule to match on. Once
         // it has been matched the wording has done its job, and the icon says it better.
-        let content = match module
+        let mut content = match module
             .states
             .iter()
             .find(|rule| rule.strip && rule.matches(flags, false, &values, &content))
@@ -413,6 +421,13 @@ fn size_group(
             icon: style.icon,
             ..hovered
         });
+
+        // The rules and the icon read what the module would have said, so folding changes
+        // what is drawn without changing what the module is: a paused player keeps its
+        // paused styling while it is a single icon.
+        if folded {
+            content.clear();
+        }
 
         let icon = style.icon.map(|icon| {
             let level = if icon.is_graded() {
@@ -454,6 +469,7 @@ fn size_group(
             // How many views this module has in all, so a click knows where it wraps.
             alt: (!module.format_alt.is_empty())
                 .then(|| (module.name.clone(), module.format_alt.len() + 1)),
+            collapsible: module.collapsible.then(|| module.name.clone()),
         });
     }
     if modules.is_empty() {
@@ -584,6 +600,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             radius: paint.radius,
             action: m.action,
             alt: m.alt,
+            collapsible: m.collapsible,
         });
         x += m.width;
     }
@@ -742,6 +759,7 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
                 height,
                 icon: None,
                 action: None,
+                collapsible: None,
                 text: message.to_string(),
                 text_x: x + padding,
                 foreground: FAULT_COLOR,
@@ -812,12 +830,23 @@ mod tests {
         native: Registry,
         alt: &std::collections::HashMap<String, usize>,
     ) -> Frame {
+        frame_folded(config, items, native, alt, &Default::default())
+    }
+
+    fn frame_folded(
+        config: &str,
+        items: &[StatusItem],
+        native: Registry,
+        alt: &std::collections::HashMap<String, usize>,
+        collapsed: &std::collections::HashSet<String>,
+    ) -> Frame {
         let cfg = Config::parse(config).expect("test config parses");
         let inputs = Inputs {
             items,
             native: &native,
             sway: &SwayState::default(),
             alt,
+            collapsed,
         };
         compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
     }
@@ -1144,6 +1173,67 @@ format_alt = ["second", "third"]
             Some(("cpu".to_string(), 3)),
             "three views, so a click wraps after the third"
         );
+    }
+
+    #[test]
+    fn a_folded_module_keeps_its_icon_and_loses_its_text() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+padding = 0
+icon = "cpu"
+icon_size = 10
+collapsible = true
+"##;
+        let open = frame_of(config, &[item("cpu", "a long wording")]);
+        assert_eq!(open.groups[0].modules[0].text, "a long wording");
+        assert_eq!(
+            open.groups[0].modules[0].collapsible.as_deref(),
+            Some("cpu"),
+            "the frame has to say a right click can fold it"
+        );
+
+        let folded = frame_folded(
+            config,
+            &[item("cpu", "a long wording")],
+            Registry::new(&Default::default()),
+            &Default::default(),
+            &std::collections::HashSet::from(["cpu".to_string()]),
+        );
+        assert_eq!(folded.groups[0].modules[0].text, "");
+        assert!(
+            folded.groups[0].modules[0].icon.is_some(),
+            "the icon is what is left to click on"
+        );
+        assert!(
+            folded.groups[0].modules[0].width < open.groups[0].modules[0].width,
+            "folding is only worth doing if it takes less room"
+        );
+    }
+
+    #[test]
+    fn a_module_with_nothing_to_say_still_disappears_when_it_is_not_folded() {
+        // An empty wording means "hide this", and that has to keep working next to a
+        // module that is empty on purpose.
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+padding = 0
+icon = "cpu"
+collapsible = true
+"##;
+        let frame = frame_of(config, &[item("cpu", "")]);
+        assert!(frame.groups.is_empty() || frame.groups[0].modules.is_empty());
     }
 
     #[test]

@@ -50,6 +50,8 @@ pub enum Icon {
     VolumeMuted,
     WifiOff,
     Headphones,
+    Play,
+    Pause,
 }
 
 impl Icon {
@@ -69,6 +71,8 @@ impl Icon {
             "volume-muted" => Icon::VolumeMuted,
             "wifi-off" => Icon::WifiOff,
             "headphones" => Icon::Headphones,
+            "play" => Icon::Play,
+            "pause" => Icon::Pause,
             _ => return None,
         })
     }
@@ -192,6 +196,8 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
         Icon::Brightness => brightness(&mut out, level),
         Icon::Temperature => temperature(&mut out, level),
         Icon::Headphones => headphones(&mut out),
+        Icon::Play => play(&mut out),
+        Icon::Pause => pause(&mut out),
     }
     IconArt::Paths(out)
 }
@@ -388,6 +394,25 @@ fn volume(out: &mut Vec<IconPath>, level: usize) {
         arc(&mut arcs, 0.46, 0.50, 0.15 + i as f32 * 0.11, from, to);
     }
     finish(arcs, Ink::Stroke(0.08), out);
+}
+
+/// A triangle pointing the way a track runs.
+fn play(out: &mut Vec<IconPath>) {
+    let mut pb = PathBuilder::new();
+    pb.move_to(0.32, 0.22);
+    pb.line_to(0.78, 0.50);
+    pb.line_to(0.32, 0.78);
+    pb.close();
+    finish(pb, Ink::Fill, out);
+}
+
+/// Two bars, the width of the gap between them, which is what makes it read as pause
+/// rather than as a pair of unrelated marks.
+fn pause(out: &mut Vec<IconPath>) {
+    let mut pb = PathBuilder::new();
+    rounded(&mut pb, 0.32, 0.22, 0.45, 0.78, 0.03);
+    rounded(&mut pb, 0.55, 0.22, 0.68, 0.78, 0.03);
+    finish(pb, Ink::Fill, out);
 }
 
 /// A thermometer whose column rises with the level.

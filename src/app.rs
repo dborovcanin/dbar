@@ -63,6 +63,8 @@ pub struct App {
     native: Registry,
     /// Modules showing their second wording, by name.
     alt: std::collections::HashMap<String, usize>,
+    /// Modules a right click has folded down to their icon, by name.
+    collapsed: std::collections::HashSet<String>,
     /// Which sources each realtime signal reads again.
     signals: std::collections::HashMap<i32, Vec<Which>>,
     /// Whether a timer is waiting to read collectors. False once every source left is
@@ -157,6 +159,7 @@ impl App {
             text,
             native: Registry::new(&config_collectors),
             alt: std::collections::HashMap::new(),
+            collapsed: std::collections::HashSet::new(),
             signals: config_signals,
             collect_scheduled: true,
             audio: None,
@@ -430,6 +433,7 @@ impl App {
                     native: &self.native,
                     sway: &self.sway,
                     alt: &self.alt,
+                    collapsed: &self.collapsed,
                 };
                 let frame = layout::compute(
                     &self.config,
@@ -542,6 +546,18 @@ impl App {
         {
             let showing = self.alt.entry(name).or_insert(0);
             *showing = (*showing + 1) % views.max(1);
+            self.invalidate();
+            return;
+        }
+        // The right button folds a module down to its icon, and unfolds it. It is the one
+        // gesture that is about the bar rather than about what the module is showing, so
+        // it comes before anything the module itself would do with a click.
+        if button == 3
+            && let Some(name) = module.collapsible.clone()
+        {
+            if !self.collapsed.remove(&name) {
+                self.collapsed.insert(name);
+            }
             self.invalidate();
             return;
         }
