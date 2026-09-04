@@ -441,9 +441,14 @@ above = 20
 style = "warning"
 
 # `signal` reads the source again on demand, counted from SIGRTMIN because
-# where the realtime range starts is up to the C library. A brightness key
-# bound to `brightnessctl set +10%; pkill -RTMIN+8 dbar` then shows the new
-# value straight away rather than when the interval next comes round.
+# where the realtime range starts is up to the C library. A key bound to
+# `something; pkill -RTMIN+8 dbar` then shows the new value straight away
+# rather than when the interval next comes round.
+#
+# The backlight rarely needs it: the kernel reports a brightness change, so the
+# module is read when it moves and never in between, whatever `interval` says.
+# The signal is here for a controller too old to have `actual_brightness`, and
+# costs nothing when it is never sent.
 [module.brightness]
 source = "backlight"
 signal = 8

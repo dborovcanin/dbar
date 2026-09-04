@@ -29,7 +29,7 @@ use wayland_client::{
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
 
-use crate::collect::{Registry, Which};
+use crate::collect::{Registry, Which, watch};
 use crate::config::{Config, Edge};
 use crate::layout::{self, Frame, Inputs};
 use crate::render;
@@ -63,6 +63,9 @@ pub struct App {
     alt: std::collections::HashSet<String>,
     /// Which sources each realtime signal reads again.
     signals: std::collections::HashMap<i32, Vec<Which>>,
+    /// Whether a timer is waiting to read collectors. False once every source left is
+    /// watched, since then there is nothing to wait for.
+    collect_scheduled: bool,
     /// Workspaces and the focused window, when a compositor is talking to us.
     sway: SwayState,
     frame: Frame,
@@ -147,6 +150,7 @@ impl App {
             native: Registry::new(&config_collectors),
             alt: std::collections::HashSet::new(),
             signals: config_signals,
+            collect_scheduled: true,
             provider,
             items: Vec::new(),
             sway: SwayState::default(),
@@ -255,7 +259,7 @@ impl App {
         for which in sources.clone() {
             self.native.refresh(&which);
         }
-        self.on_collect();
+        self.collect();
     }
 
     /// Read every collector that has come due, and say when the next one is.
@@ -263,10 +267,45 @@ impl App {
     /// One pass over the whole set, then one redraw: ten modules sharing an interval cost
     /// one wake-up between them.
     pub fn on_collect(&mut self) -> Option<std::time::Instant> {
+        let next = self.collect();
+        // Only the timer's own callback can say whether the timer still exists, because
+        // returning nothing from here is what stops it.
+        self.collect_scheduled = next.is_some();
+        next
+    }
+
+    /// Read what is due and redraw, without touching the timer.
+    fn collect(&mut self) -> Option<std::time::Instant> {
         if self.native.tick() {
             self.invalidate();
         }
         self.native.next_due()
+    }
+
+    /// Take the sources a watcher covers off the timer.
+    pub fn on_watching(&mut self, covered: &[Which]) {
+        for which in covered {
+            self.native.set_watched(which, true);
+        }
+    }
+
+    /// Act on what a watcher says, and report whether the timer has to be started again.
+    ///
+    /// A change is a reading brought forward; a lost watch puts its source back on its
+    /// interval, which needs a timer if every remaining source was watched and the timer
+    /// had therefore stopped.
+    pub fn on_watch(&mut self, event: watch::Event) -> bool {
+        match event {
+            watch::Event::Changed(which) => {
+                log::debug!("{} changed", which.name());
+                self.native.refresh(&which);
+            }
+            watch::Event::Lost(which) => self.native.set_watched(&which, false),
+        }
+        self.collect();
+        let needed = !self.collect_scheduled && self.native.is_scheduled();
+        self.collect_scheduled |= needed;
+        needed
     }
 
     /// Mark the bar as needing a redraw and draw immediately if the compositor is ready.

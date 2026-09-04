@@ -97,6 +97,18 @@ fn name_of(device: &Path) -> Value {
     }
 }
 
+/// The file the kernel notifies on when the brightness changes.
+///
+/// `brightness` is what was last asked for; `actual_brightness` is what the panel is
+/// doing, and it is the one the backlight class calls `sysfs_notify` on. They move
+/// together, so watching one and reading the other is not a race - it is reading the
+/// request once the hardware has acknowledged it. A controller too old to have the file
+/// is read on an interval instead.
+pub fn watch_path() -> Option<PathBuf> {
+    let actual = pick(Path::new(CLASS))?.join("actual_brightness");
+    actual.exists().then_some(actual)
+}
+
 /// Choose a controller from a `/sys/class/backlight`-shaped directory.
 ///
 /// A machine with no backlight has no such directory, which is an answer rather than a

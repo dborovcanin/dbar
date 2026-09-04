@@ -18,6 +18,7 @@ pub mod memory;
 pub mod network;
 pub mod temperature;
 pub mod time;
+pub mod watch;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -82,6 +83,20 @@ impl Which {
             Which::Disk(_) => disk::FIELDS,
             Which::Network(_) => network::FIELDS,
             Which::Time => time::FIELDS,
+        }
+    }
+
+    /// The sources the kernel can report a change on, so the watcher knows what to try.
+    ///
+    /// A source that is not here is read on an interval; one that is here is read on an
+    /// interval only while its file is missing.
+    pub const WATCHABLE: &'static [Which] = &[Which::Backlight];
+
+    /// The file whose change the kernel will report for this source, if there is one.
+    fn watch_path(&self) -> Option<std::path::PathBuf> {
+        match self {
+            Which::Backlight => backlight::watch_path(),
+            _ => None,
         }
     }
 
@@ -165,7 +180,10 @@ struct Entry {
     /// The last thing this said. Kept across a failure, so a momentary error does not
     /// blank a module that was working a second ago.
     reading: Reading,
-    due: Instant,
+    /// When to read next, or nothing at all while the kernel is reporting changes.
+    due: Option<Instant>,
+    /// Whether a watcher is reporting this source's changes, so it costs no wake-ups.
+    watched: bool,
     /// Consecutive failures, which lengthen the wait before trying again.
     failures: u32,
     /// Whether the current failure has been reported, so a broken sensor logs once.
@@ -187,7 +205,8 @@ impl Registry {
                 which: which.clone(),
                 interval,
                 reading: Reading::default(),
-                due: now,
+                due: Some(now),
+                watched: false,
                 failures: 0,
                 reported: false,
             })
@@ -206,7 +225,7 @@ impl Registry {
         let now = Instant::now();
         let mut changed = false;
         for entry in &mut self.entries {
-            if entry.due > now {
+            if entry.due.is_none_or(|due| due > now) {
                 continue;
             }
             match entry.collector.read() {
@@ -241,13 +260,31 @@ impl Registry {
     /// not then read again a moment later out of habit.
     pub fn refresh(&mut self, which: &Which) {
         if let Some(entry) = self.entries.iter_mut().find(|e| &e.which == which) {
-            entry.due = Instant::now();
+            entry.due = Some(Instant::now());
         }
+    }
+
+    /// Say that the kernel is reporting this source's changes, or has stopped.
+    ///
+    /// A watched source is taken off the timer entirely: it is read when its watcher says
+    /// something moved, so an interval would only be asking a question already answered.
+    pub fn set_watched(&mut self, which: &Which, watched: bool) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| &e.which == which) {
+            entry.watched = watched;
+            if !watched && entry.due.is_none() {
+                entry.due = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Whether anything is still due to be read on a timer.
+    pub fn is_scheduled(&self) -> bool {
+        self.entries.iter().any(|e| e.due.is_some())
     }
 
     /// When the loop should wake up next, if anything is scheduled at all.
     pub fn next_due(&self) -> Option<Instant> {
-        self.entries.iter().map(|e| e.due).min()
+        self.entries.iter().filter_map(|e| e.due).min()
     }
 
     /// A registry holding one reading that never changes, for exercising the code that
@@ -268,7 +305,8 @@ impl Registry {
                 interval: Duration::from_secs(1),
                 collector: Box::new(Never),
                 reading,
-                due: Instant::now() + Duration::from_secs(3600),
+                due: Some(Instant::now() + Duration::from_secs(3600)),
+                watched: false,
                 failures: 0,
                 reported: false,
             }],
@@ -284,13 +322,18 @@ impl Registry {
 }
 
 impl Entry {
-    fn next_due(&self, now: Instant) -> Instant {
+    fn next_due(&self, now: Instant) -> Option<Instant> {
+        // A watched source is read when it changes. It goes back on the timer only while
+        // it is failing, so a sensor that has broken is still retried.
+        if self.watched && self.failures == 0 {
+            return None;
+        }
         // Back off while a collector is failing, so a missing sensor does not spin.
         let wait = self.interval * 2u32.pow(self.failures.min(MAX_BACKOFF));
         if !self.which.aligned() || self.failures > 0 {
-            return now + wait;
+            return Some(now + wait);
         }
-        now + align(wait)
+        Some(now + align(wait))
     }
 }
 
@@ -394,7 +437,8 @@ mod tests {
                 interval: Duration::from_secs(1),
                 collector: Box::new(Scripted { answers }),
                 reading: Reading::default(),
-                due: Instant::now(),
+                due: Some(Instant::now()),
+                watched: false,
                 failures: 0,
                 reported: false,
             }],
@@ -415,7 +459,7 @@ mod tests {
         assert_eq!(text_of(&registry).as_deref(), Some("first"));
 
         // Due again straight away, so the failing read happens now.
-        registry.entries[0].due = Instant::now();
+        registry.entries[0].due = Some(Instant::now());
         assert!(registry.tick());
         assert_eq!(
             text_of(&registry).as_deref(),
@@ -434,9 +478,12 @@ mod tests {
         let mut waits = Vec::new();
         for _ in 0..3 {
             let before = Instant::now();
-            registry.entries[0].due = before;
+            registry.entries[0].due = Some(before);
             registry.tick();
-            waits.push(registry.entries[0].due.saturating_duration_since(before));
+            let due = registry.entries[0]
+                .due
+                .expect("a failing collector is tried again");
+            waits.push(due.saturating_duration_since(before));
         }
         assert!(
             waits[0] < waits[1] && waits[1] < waits[2],
@@ -453,6 +500,42 @@ mod tests {
             !registry.tick(),
             "a collector should not be read before it is due"
         );
+    }
+
+    #[test]
+    fn a_watched_source_costs_no_wake_ups() {
+        let mut registry = scripted(vec![Some("read once")]);
+        registry.set_watched(&Which::Cpu, true);
+        assert!(registry.tick(), "it is still read once to have a value");
+        assert_eq!(
+            registry.next_due(),
+            None,
+            "a watched source should be waited on rather than asked"
+        );
+        assert!(!registry.is_scheduled());
+    }
+
+    #[test]
+    fn a_watched_source_that_fails_is_still_tried_again() {
+        // Whatever the watcher is reporting, a collector that cannot read has to be
+        // retried, or a sensor that came back would never be noticed.
+        let mut registry = scripted(vec![None]);
+        registry.set_watched(&Which::Cpu, true);
+        registry.tick();
+        assert!(registry.next_due().is_some());
+    }
+
+    #[test]
+    fn losing_a_watch_puts_the_source_back_on_its_interval() {
+        let mut registry = scripted(vec![Some("first"), Some("second")]);
+        registry.set_watched(&Which::Cpu, true);
+        registry.tick();
+        assert!(!registry.is_scheduled());
+
+        registry.set_watched(&Which::Cpu, false);
+        assert!(registry.is_scheduled(), "it is due straight away");
+        assert!(registry.tick());
+        assert!(registry.next_due().is_some(), "and on its interval after");
     }
 
     #[test]

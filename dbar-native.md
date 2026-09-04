@@ -349,7 +349,9 @@ small, and it keeps every source uniform from the event loop's point of view.
   backs off (double up to a cap, reset on success). It is logged once per
   transition, not per tick.
 - Where the kernel offers notification, use it instead of polling: `poll()` on
-  `sysfs` backlight `brightness`, inotify/udev for battery. Polling stays for
+  the backlight's `actual_brightness`, which is the attribute the backlight class
+  notifies on, and udev for battery. A watched source is taken off the timer
+  entirely, and goes back on it only if its file disappears. Polling stays for
   genuinely sampled metrics (cpu, throughput), which is an accepted cost against
   spec.md's zero-idle-wakeup goal and should be documented as such.
 

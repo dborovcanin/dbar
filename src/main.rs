@@ -71,6 +71,23 @@ fn parse_args() -> Result<Option<Args>> {
     Ok(Some(Args { config }))
 }
 
+/// Set the shared collector timer going.
+///
+/// It reads everything that has come due and asks for the next deadline, and stops
+/// altogether when nothing is left to read on a schedule.
+fn schedule(handle: &calloop::LoopHandle<'static, App>) -> Result<()> {
+    handle
+        .insert_source(
+            calloop::timer::Timer::immediate(),
+            |_, _, app: &mut App| match app.on_collect() {
+                Some(next) => calloop::timer::TimeoutAction::ToInstant(next),
+                None => calloop::timer::TimeoutAction::Drop,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("inserting the collector timer: {e}"))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
@@ -128,18 +145,35 @@ fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("inserting the signal source: {e}"))?;
     }
 
+    // Sources the kernel reports changes on are read when they change and never in
+    // between, so they are taken off the timer before it is first set.
+    if collectors {
+        let (watch_tx, watch_rx) = calloop::channel::channel();
+        let covered = crate::collect::watch::spawn(watch_tx);
+        if !covered.is_empty() {
+            app.on_watching(&covered);
+            let handle_for_timer = handle.clone();
+            handle
+                .insert_source(watch_rx, move |event, _, app: &mut App| {
+                    let calloop::channel::Event::Msg(event) = event else {
+                        return;
+                    };
+                    // A source whose watch has gone needs its interval back, and with it a
+                    // timer, which has stopped if everything left was being watched.
+                    if app.on_watch(event)
+                        && let Err(e) = schedule(&handle_for_timer)
+                    {
+                        log::error!("{e}");
+                    }
+                })
+                .map_err(|e| anyhow::anyhow!("inserting the watch source: {e}"))?;
+        }
+    }
+
     // Collectors share one timer: it fires when the earliest is due, reads everything that
     // has come due, and is set again for whatever is next.
     if collectors {
-        handle
-            .insert_source(
-                calloop::timer::Timer::immediate(),
-                |_, _, app: &mut App| match app.on_collect() {
-                    Some(next) => calloop::timer::TimeoutAction::ToInstant(next),
-                    None => calloop::timer::TimeoutAction::Drop,
-                },
-            )
-            .map_err(|e| anyhow::anyhow!("inserting the collector timer: {e}"))?;
+        schedule(&handle)?;
     }
 
     // The compositor is optional: without it the workspace and window modules simply have
