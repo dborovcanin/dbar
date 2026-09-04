@@ -230,6 +230,20 @@ struct RawGroup {
     spacing: f32,
     separator: Option<RawSeparator>,
     edges: Option<RawEdges>,
+    ends: Option<RawEnds>,
+}
+
+/// `[group.*.ends]`: the transition drawn where the group meets the bar.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEnds {
+    #[serde(default)]
+    left: SeparatorShape,
+    #[serde(default)]
+    right: SeparatorShape,
+    /// Falls back to the width of the group's own separators.
+    width: Option<f32>,
+    overlap: Option<f32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -413,6 +427,7 @@ pub struct Group {
     pub spacing: f32,
     pub separator: Separator,
     pub edges: Edges,
+    pub ends: Ends,
     /// `modules = ["*"]` takes every block the provider emits, in provider order.
     pub wildcard: bool,
     pub modules: Vec<Module>,
@@ -437,6 +452,34 @@ impl Default for Separator {
             direction: Direction::Right,
             color: SeparatorColor::Previous,
             overlap: 0.0,
+        }
+    }
+}
+
+/// How a group's outer boundary meets the bar behind it.
+///
+/// A separator is a transition between two modules; this is the same transition between a
+/// module and nothing, which is what turns a run of blocks into a ribbon with a point on
+/// the end. The shapes face the way the group's separators do.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Ends {
+    pub left: SeparatorShape,
+    pub right: SeparatorShape,
+    pub width: f32,
+    pub overlap: f32,
+}
+
+impl Ends {
+    /// Space the left end needs beside the modules, which is none unless it is drawn.
+    pub fn left_width(&self) -> f32 {
+        if self.left.is_none() { 0.0 } else { self.width }
+    }
+
+    pub fn right_width(&self) -> f32 {
+        if self.right.is_none() {
+            0.0
+        } else {
+            self.width
         }
     }
 }
@@ -1065,6 +1108,16 @@ fn resolve_group(
         None => Separator::default(),
     };
 
+    let ends = match &raw_group.ends {
+        Some(raw) => Ends {
+            left: raw.left,
+            right: raw.right,
+            width: raw.width.unwrap_or(separator.width).max(0.0),
+            overlap: raw.overlap.unwrap_or(separator.overlap).max(0.0),
+        },
+        None => Ends::default(),
+    };
+
     let edges = match &raw_group.edges {
         Some(raw) => Edges {
             left: raw.left,
@@ -1090,6 +1143,7 @@ fn resolve_group(
         spacing: raw_group.spacing,
         separator,
         edges,
+        ends,
         wildcard,
         modules: if wildcard && modules.is_empty() {
             vec![Module {

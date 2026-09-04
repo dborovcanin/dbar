@@ -6,7 +6,7 @@
 use crate::collect::Registry;
 use crate::color::Color;
 use crate::config::{
-    Config, Direction, EdgeShape, Edges, Group as GroupCfg, Module as ModuleCfg, Separator,
+    Config, Direction, EdgeShape, Edges, Ends, Group as GroupCfg, Module as ModuleCfg, Separator,
     SeparatorColor, SeparatorShape, Source, StateFlags, Style,
 };
 use crate::format::Format;
@@ -139,6 +139,7 @@ struct SizedGroup {
     /// Horizontal space between neighbouring modules.
     advance: f32,
     separator: Separator,
+    ends: Ends,
     /// Module widths paired with their content.
     modules: Vec<SizedModule>,
 }
@@ -457,7 +458,9 @@ fn size_group(
 
     let content: f32 = modules.iter().map(|m| m.width).sum();
     let gaps = advance * (modules.len() - 1) as f32;
-    let width = content + gaps + group.padding * 2.0;
+    // A shaped end needs room of its own: it is drawn beside the modules, not over them.
+    let ends = group.ends.left_width() + group.ends.right_width();
+    let width = content + gaps + ends + group.padding * 2.0;
     let _ = height;
 
     Some(SizedGroup {
@@ -467,6 +470,7 @@ fn size_group(
         padding: group.padding,
         advance,
         separator: group.separator,
+        ends: group.ends,
         modules,
     })
 }
@@ -482,6 +486,25 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
 
     let mut modules: Vec<PlacedModule> = Vec::with_capacity(sized.modules.len());
     let mut separators = Vec::new();
+
+    // The left end is drawn before the first module, in space reserved for it.
+    let ends = sized.ends;
+    let lead = ends.left_width();
+    if lead > 0.0
+        && let Some(first) = sized.modules.first()
+    {
+        separators.push(end_separator(
+            ends.left,
+            x,
+            inner_y,
+            lead,
+            inner_h,
+            &ends,
+            separator.direction,
+            first.background,
+        ));
+    }
+    x += lead;
 
     for (i, m) in sized.modules.into_iter().enumerate() {
         if i > 0 {
@@ -502,8 +525,13 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
                         SeparatorColor::Background => sized.background,
                         SeparatorColor::Fixed(c) => c,
                     },
-                    // Whatever the boundary leads into shows behind the shape.
-                    under: m.background,
+                    // The ground the shape is drawn over: the neighbour whose colour the
+                    // shape did not take. Taking the same one twice would paint the gap in
+                    // a single colour and leave the boundary invisible.
+                    under: match separator.color {
+                        SeparatorColor::Next => previous.background,
+                        _ => m.background,
+                    },
                 });
             }
             x += sized.advance;
@@ -549,6 +577,22 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         x += m.width;
     }
 
+    let trail = ends.right_width();
+    if trail > 0.0
+        && let Some(last) = modules.last()
+    {
+        separators.push(end_separator(
+            ends.right,
+            x,
+            inner_y,
+            trail,
+            inner_h,
+            &ends,
+            separator.direction,
+            last.background,
+        ));
+    }
+
     PlacedGroup {
         x: group_x,
         y: 0.0,
@@ -558,6 +602,40 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         edges: sized.edges,
         modules,
         separators,
+    }
+}
+
+/// The transition between a module at the edge of a group and the bar behind it.
+///
+/// The shape is filled with the module's colour and the rest of the space is left alone,
+/// so the ribbon appears to come to a point over whatever is behind the bar. Which of the
+/// two colours the drawing code treats as the shape depends on the direction, because a
+/// mirrored separator swaps them.
+#[allow(clippy::too_many_arguments)]
+fn end_separator(
+    shape: SeparatorShape,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    ends: &Ends,
+    direction: Direction,
+    module: Color,
+) -> PlacedSeparator {
+    let (fill, under) = match direction {
+        Direction::Left => (Color::TRANSPARENT, module),
+        Direction::Right => (module, Color::TRANSPARENT),
+    };
+    PlacedSeparator {
+        x,
+        y,
+        width,
+        height,
+        shape,
+        direction,
+        overlap: ends.overlap,
+        fill,
+        under,
     }
 }
 
@@ -898,6 +976,73 @@ format = "cpu{ $percent}"
         // No percentage in the text, so the source published none and the group goes.
         let frame = frame_of(config, &[item("cpu", "busy")]);
         assert_eq!(frame.groups[0].modules[0].text, "cpu");
+    }
+
+    const TWO_TONE: &str = r##"
+[colors]
+a = "#ff0000"
+b = "#0000ff"
+
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["one", "two"]
+
+[module.one]
+padding = 0
+background = "$a"
+
+[module.two]
+padding = 0
+background = "$b"
+"##;
+
+    #[test]
+    fn a_separator_is_never_the_same_colour_on_both_sides() {
+        // Whichever neighbour the shape takes its colour from, the ground behind it has to
+        // be the other one, or the boundary is invisible.
+        for mode in ["previous", "next"] {
+            let config = format!(
+                "{TWO_TONE}\n[group.g.separator]\nshape = \"chevron\"\nwidth = 4\ncolor = \"{mode}\"\n"
+            );
+            let frame = frame_of(&config, &[item("one", "a"), item("two", "b")]);
+            let sep = &frame.groups[0].separators[0];
+            assert_ne!(sep.fill, sep.under, "with color = {mode:?}");
+        }
+    }
+
+    #[test]
+    fn an_end_comes_to_a_point_over_whatever_is_behind_the_bar() {
+        let config = format!(
+            "{TWO_TONE}\n[group.g.ends]\nleft = \"chevron\"\nright = \"chevron\"\nwidth = 6\n"
+        );
+        let frame = frame_of(&config, &[item("one", "a"), item("two", "b")]);
+        let group = &frame.groups[0];
+        assert_eq!(group.separators.len(), 2, "one end at each side");
+
+        // Each end pairs its module's colour with nothing, so the shape reads against the
+        // bar rather than against another module.
+        for end in &group.separators {
+            let colours = [end.fill, end.under];
+            assert!(
+                colours.contains(&Color::TRANSPARENT),
+                "an end must leave one side clear: {colours:?}"
+            );
+        }
+
+        // The ends are drawn beside the modules, not over them.
+        let modules_width: f32 = group.modules.iter().map(|m| m.width).sum();
+        assert_eq!(group.width, modules_width + 12.0);
+        assert_eq!(group.modules[0].x, group.x + 6.0);
+    }
+
+    #[test]
+    fn a_group_without_ends_reserves_no_room_for_them() {
+        let frame = frame_of(TWO_TONE, &[item("one", "a"), item("two", "b")]);
+        let group = &frame.groups[0];
+        assert!(group.separators.is_empty());
+        assert_eq!(group.modules[0].x, group.x);
     }
 
     #[test]
