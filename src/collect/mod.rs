@@ -12,7 +12,11 @@
 pub mod backlight;
 pub mod battery;
 pub mod cpu;
+pub mod disk;
+pub mod load;
 pub mod memory;
+pub mod network;
+pub mod temperature;
 pub mod time;
 
 use std::collections::HashMap;
@@ -23,62 +27,86 @@ use anyhow::Result;
 use crate::status::{FieldSpec, Fields, State};
 
 /// One thing a native module can be built on.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+///
+/// Two of these carry what they are pointed at, because "the disk" and "the network" are
+/// not single things. That also makes them the registry's key, so two modules watching the
+/// same path share one reading while two watching different paths do not.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Which {
     Cpu,
     Memory,
     Battery,
     Backlight,
+    Load,
+    Temperature(Option<String>),
+    Disk(String),
+    Network(Option<String>),
     Time,
 }
 
 impl Which {
-    pub fn parse(name: &str) -> Option<Which> {
-        Some(match name {
-            "cpu" => Which::Cpu,
-            "memory" => Which::Memory,
-            "battery" => Which::Battery,
-            "backlight" => Which::Backlight,
-            "time" => Which::Time,
-            _ => return None,
-        })
-    }
-
-    pub fn name(self) -> &'static str {
+    /// The bare source name, without whatever it is pointed at.
+    pub fn name(&self) -> &'static str {
         match self {
             Which::Cpu => "cpu",
             Which::Memory => "memory",
             Which::Battery => "battery",
             Which::Backlight => "backlight",
+            Which::Load => "load",
+            Which::Temperature(_) => "temperature",
+            Which::Disk(_) => "disk",
+            Which::Network(_) => "network",
             Which::Time => "time",
         }
     }
 
-    pub fn fields(self) -> &'static [FieldSpec] {
+    /// How this source appears in a log, which for a parameterised one includes what it is
+    /// pointed at, or there is no telling two of them apart.
+    fn describe(&self) -> String {
+        match self {
+            Which::Disk(path) => format!("disk {path}"),
+            Which::Temperature(Some(chip)) => format!("temperature {chip}"),
+            Which::Network(Some(device)) => format!("network {device}"),
+            other => other.name().to_string(),
+        }
+    }
+
+    pub fn fields(&self) -> &'static [FieldSpec] {
         match self {
             Which::Cpu => cpu::FIELDS,
             Which::Memory => memory::FIELDS,
             Which::Battery => battery::FIELDS,
             Which::Backlight => backlight::FIELDS,
+            Which::Load => load::FIELDS,
+            Which::Temperature(_) => temperature::FIELDS,
+            Which::Disk(_) => disk::FIELDS,
+            Which::Network(_) => network::FIELDS,
             Which::Time => time::FIELDS,
         }
     }
 
     /// What the module says when the config does not give it a format.
-    pub fn default_format(self) -> &'static str {
+    pub fn default_format(&self) -> &'static str {
         match self {
             Which::Cpu => " $utilization ",
             Which::Memory => " $percent ",
             Which::Battery => " $percent ",
             Which::Backlight => " $brightness ",
+            Which::Load => " $one ",
+            Which::Temperature(_) => " $temp ",
+            Which::Disk(_) => " $available ",
+            Which::Network(_) => " $down  $up ",
             Which::Time => " $now.time(f:'%a %d %b %H:%M') ",
         }
     }
 
     /// How often to read, when the config does not say.
-    pub fn default_interval(self) -> Duration {
+    pub fn default_interval(&self) -> Duration {
         match self {
-            Which::Cpu | Which::Memory => Duration::from_secs(2),
+            Which::Cpu | Which::Memory | Which::Load | Which::Network(_) => Duration::from_secs(2),
+            Which::Temperature(_) => Duration::from_secs(5),
+            // A disk fills slowly, and reading it can wake a spinning one.
+            Which::Disk(_) => Duration::from_secs(60),
             // A battery moves slowly, and reading it wakes the embedded controller.
             Which::Battery => Duration::from_secs(30),
             // A backlight only changes when something changes it.
@@ -91,16 +119,20 @@ impl Which {
     ///
     /// A clock that ticks 1.3 seconds after every minute is visibly wrong for most of a
     /// second; nothing else cares when in the second it is sampled.
-    fn aligned(self) -> bool {
+    fn aligned(&self) -> bool {
         matches!(self, Which::Time)
     }
 
-    fn open(self) -> Box<dyn Collector> {
+    fn open(&self) -> Box<dyn Collector> {
         match self {
             Which::Cpu => Box::new(cpu::Cpu::new()),
             Which::Memory => Box::new(memory::Memory),
             Which::Battery => Box::new(battery::Battery::new()),
             Which::Backlight => Box::new(backlight::Backlight::new()),
+            Which::Load => Box::new(load::Load),
+            Which::Temperature(chip) => Box::new(temperature::Temperature::new(chip.clone())),
+            Which::Disk(path) => Box::new(disk::Disk::new(path.clone())),
+            Which::Network(device) => Box::new(network::Network::new(device.clone())),
             Which::Time => Box::new(time::Time),
         }
     }
@@ -150,10 +182,10 @@ impl Registry {
         let now = Instant::now();
         let mut entries: Vec<Entry> = wanted
             .iter()
-            .map(|(&which, &interval)| Entry {
-                which,
-                interval,
+            .map(|(which, &interval)| Entry {
                 collector: which.open(),
+                which: which.clone(),
+                interval,
                 reading: Reading::default(),
                 due: now,
                 failures: 0,
@@ -161,7 +193,7 @@ impl Registry {
             })
             .collect();
         // A stable order keeps logs and tests from depending on hash iteration.
-        entries.sort_by_key(|e| e.which.name());
+        entries.sort_by_key(|e| e.which.describe());
         Registry { entries }
     }
 
@@ -180,7 +212,7 @@ impl Registry {
             match entry.collector.read() {
                 Ok(reading) => {
                     if entry.failures > 0 {
-                        log::info!("{} is reporting again", entry.which.name());
+                        log::info!("{} is reporting again", entry.which.describe());
                     }
                     entry.failures = 0;
                     entry.reported = false;
@@ -192,7 +224,7 @@ impl Registry {
                     entry.reading.state = State::Error;
                     entry.failures = entry.failures.saturating_add(1);
                     if !entry.reported {
-                        log::warn!("{} could not be read: {e:#}", entry.which.name());
+                        log::warn!("{} could not be read: {e:#}", entry.which.describe());
                         entry.reported = true;
                     }
                 }
@@ -207,8 +239,8 @@ impl Registry {
     ///
     /// The interval starts over from the refresh, so a source that is asked for often is
     /// not then read again a moment later out of habit.
-    pub fn refresh(&mut self, which: Which) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| e.which == which) {
+    pub fn refresh(&mut self, which: &Which) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| &e.which == which) {
             entry.due = Instant::now();
         }
     }
@@ -243,10 +275,10 @@ impl Registry {
         }
     }
 
-    pub fn reading(&self, which: Which) -> Option<&Reading> {
+    pub fn reading(&self, which: &Which) -> Option<&Reading> {
         self.entries
             .iter()
-            .find(|e| e.which == which)
+            .find(|e| &e.which == which)
             .map(|e| &e.reading)
     }
 }
@@ -296,17 +328,23 @@ mod tests {
     use super::*;
 
     /// Every source, so a new one cannot be added without the checks below covering it.
-    const ALL: [Which; 5] = [
-        Which::Cpu,
-        Which::Memory,
-        Which::Battery,
-        Which::Backlight,
-        Which::Time,
-    ];
+    fn all() -> Vec<Which> {
+        vec![
+            Which::Cpu,
+            Which::Memory,
+            Which::Battery,
+            Which::Backlight,
+            Which::Load,
+            Which::Temperature(None),
+            Which::Disk("/".to_string()),
+            Which::Network(None),
+            Which::Time,
+        ]
+    }
 
     #[test]
     fn every_source_has_a_default_format_it_can_actually_render() {
-        for which in ALL {
+        for which in all() {
             let format = crate::format::Format::parse(which.default_format())
                 .unwrap_or_else(|e| panic!("{} default format: {e:#}", which.name()));
             format
@@ -316,11 +354,16 @@ mod tests {
     }
 
     #[test]
-    fn source_names_round_trip() {
-        for which in ALL {
-            assert_eq!(Which::parse(which.name()), Some(which));
-        }
-        assert_eq!(Which::parse("nonesuch"), None);
+    fn a_parameterised_source_says_what_it_is_pointed_at() {
+        // Two disk modules on different paths are two sources to read, and a log that
+        // called both "disk" would be no help at all.
+        let root = Which::Disk("/".to_string());
+        let home = Which::Disk("/home".to_string());
+        assert_ne!(root, home);
+        assert_eq!(root.name(), home.name());
+        assert_eq!(home.describe(), "disk /home");
+        // An unparameterised one has nothing to add.
+        assert_eq!(Which::Cpu.describe(), "cpu");
     }
 
     /// A collector whose answers the test dictates.
@@ -359,7 +402,7 @@ mod tests {
     }
 
     fn text_of(registry: &Registry) -> Option<String> {
-        match registry.reading(Which::Cpu)?.fields.get("text")? {
+        match registry.reading(&Which::Cpu)?.fields.get("text")? {
             crate::status::Value::Text(t) => Some(t.clone()),
             _ => None,
         }
@@ -380,7 +423,7 @@ mod tests {
             "a momentary failure should not blank a module that was working"
         );
         assert_eq!(
-            registry.reading(Which::Cpu).map(|r| r.state),
+            registry.reading(&Which::Cpu).map(|r| r.state),
             Some(State::Error)
         );
     }

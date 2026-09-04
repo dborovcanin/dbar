@@ -31,8 +31,8 @@ exclusive = true       # default: true; reserve the space so windows do not sit 
 # ---------------------------------------------------------------------------
 # External status provider
 #
-# Only needed for what dbar cannot yet read itself: here, disk, wifi and volume.
-# The provider is started with `args` and its own configuration file.
+# Only needed for what dbar cannot yet read itself: here, just the volume. The
+# provider is started with `args` and its own configuration file.
 #
 # The i3bar protocol gives blocks no names worth selecting on - i3status-rs
 # numbers them - so `names` says what they are, in the order the provider emits
@@ -42,8 +42,8 @@ exclusive = true       # default: true; reserve the space so windows do not sit 
 
 [i3bar]
 command = "i3status-rs"
-args = ["~/.config/i3status-rust/config.toml"]
-names = ["disk", "wifi", "volume"]
+args = ["/path/to/i3status-rust/config.toml"]
+names = ["volume"]
 
 # ---------------------------------------------------------------------------
 # Named colors, referenced elsewhere as "$name"
@@ -255,7 +255,7 @@ right = "round"
 radius = 12
 
 [group.system]
-modules = ["cpu", "memory", "disk"]
+modules = ["cpu", "memory", "load", "temperature", "disk"]
 background = "$surface"
 radius = 12
 padding = 0
@@ -451,16 +451,72 @@ format = " $brightness.n(w:4) "
 style = "plain"
 icon = "brightness"
 
-# The rest come from the provider, which sends rendered text and nothing else.
+# A disk module is pointed at a filesystem; without `path` it is the root. The
+# percentage leaves out the reserve only root may write into, so a disk with no
+# room left for an ordinary program reads as full rather than as 95%.
 [module.disk]
+source = "disk"
+path = "/"
+interval = "1m"
+format = " $available "
+format_alt = " $percent.n(w:4) of $total.n(d:0) "
 style = "mint"
 icon = "disk"
-format = " $text "
 
-# Graded icons pick one of five steps from the percentage the source published.
+[module.disk.states.filling]
+above = 90
+style = "warning"
+
+# Without `interface` this follows whichever one is actually up, so unplugging
+# the cable moves it to the wireless card. Container and bridge interfaces are
+# never picked: a machine running Docker has dozens, and none of them is what a
+# person means by "the network".
 [module.wifi]
+source = "network"
+interval = "2s"
+format = " $down{  $up} "
+format_alt = " $device $state "
 style = "plain"
 icon = "wifi"
+
+[module.wifi.states.offline]
+field = "state"
+equals = "down"
+icon = "wifi-off"
+
+# Load is a count of runnable processes, not a percentage, so what "busy" means
+# depends on the machine: 4.0 saturates a quad-core and idles a sixteen. The
+# raw figure is what a load module shows; `percent` is the same thing against
+# the core count, which is what a threshold should key on.
+[module.load]
+source = "load"
+interval = "5s"
+format = " $one.n(d:2) "
+style = "plain"
+
+[module.load.states.busy]
+field = "percent"
+above = 80
+style = "warning"
+
+# Without `chip` this finds the processor's own sensor by driver name, since
+# every other reading on the machine is also a real temperature and none of
+# them is the answer. The sensors firmware lists for hardware that is not
+# fitted read zero, and are left out.
+[module.temperature]
+source = "temperature"
+interval = "5s"
+format = " $temp.n(d:0) "
+format_alt = " $temp.n(d:0) $label ($chip) "
+style = "plain"
+
+[module.temperature.states.warm]
+state = "warning"
+style = "warning"
+
+[module.temperature.states.hot]
+state = "critical"
+style = "critical"
 
 [module.volume]
 style = "plain"

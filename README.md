@@ -12,8 +12,9 @@ This is the **V0** milestone from [spec.md](spec.md).
   exclusive zone
 - per-pixel transparency, so SwayFX blur shows through
 - text rendering with shaping and font fallback (`cosmic-text`)
-- native collectors for cpu, memory, battery, backlight and the clock, read on
-  one shared timer that wakes only when something is due
+- native collectors for cpu, memory, battery, backlight, load, temperature,
+  disk, network and the clock, read on one shared timer that wakes only when
+  something is due
 - i3bar input under `[i3bar]`: any i3bar-compatible provider, `i3status-rs` by
   default. A config that reads nothing from one starts no child process at all
 - module state styling, keyed on a value, on a named field, on how the source
@@ -387,12 +388,44 @@ A module says where its content comes from:
 
 ```toml
 [module.cpu]
-source = "cpu"        # cpu, memory, battery, backlight, time
+source = "cpu"
 interval = "2s"       # how often dbar reads it; a unit is required
 ```
 
-`cpu`, `memory`, `battery`, `backlight` and `time` are read by dbar itself, from
-`/proc` and `/sys`. They share one timer, which wakes when the earliest is due, reads
+These are read by dbar itself, from `/proc` and `/sys`:
+
+| source | fields |
+|---|---|
+| `cpu` | `$utilization` |
+| `memory` | `$percent` `$used` `$total` `$available` `$swap_percent` `$swap_used` `$swap_total` |
+| `battery` | `$percent` `$status` `$power` `$time` `$health` `$threshold` |
+| `backlight` | `$brightness` `$device` |
+| `load` | `$one` `$five` `$fifteen` `$percent` |
+| `temperature` | `$temp` `$average` `$label` `$chip` |
+| `disk` | `$percent` `$used` `$total` `$available` `$free` `$path` |
+| `network` | `$down` `$up` `$device` `$state` `$received` `$sent` |
+| `time` | `$now` |
+
+Three of them are pointed at something, and take that from a key of their own:
+
+```toml
+[module.root]
+source = "disk"
+path = "/"            # default: the root filesystem
+
+[module.net]
+source = "network"
+interface = "wlp3s0"  # default: whichever hardware interface is up
+
+[module.temp]
+source = "temperature"
+chip = "amdgpu"       # default: the processor's own sensor
+```
+
+A `network` module left to choose follows whichever real interface is up, so
+unplugging a cable moves it to the wireless card. Container and bridge
+interfaces are never picked — a machine running Docker has dozens of them, and
+none is what a person means by "the network". They share one timer, which wakes when the earliest is due, reads
 everything that has come due and redraws once — ten modules on one interval
 cost one wake-up between them. The clock lands its readings on the wall clock,
 so a module showing minutes changes when the minute does.

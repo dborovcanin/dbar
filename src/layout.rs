@@ -256,7 +256,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
     }
 
     for module in &group.modules {
-        match module.source {
+        match &module.source {
             Source::Native(which) => {
                 // A collector that has not read yet has nothing to show, which is the same
                 // as a provider that has not spoken: the module simply is not there.

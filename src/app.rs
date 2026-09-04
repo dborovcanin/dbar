@@ -253,7 +253,7 @@ impl App {
             sources.len()
         );
         for which in sources.clone() {
-            self.native.refresh(which);
+            self.native.refresh(&which);
         }
         self.on_collect();
     }

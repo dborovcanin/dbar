@@ -65,7 +65,7 @@ pub enum EdgeShape {
 }
 
 /// Where a module's content comes from.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Source {
     /// Something dbar measures itself.
     Native(Which),
@@ -79,17 +79,8 @@ pub enum Source {
 }
 
 impl Source {
-    fn parse(name: &str) -> Option<Source> {
-        Some(match name {
-            "provider" => Source::Provider,
-            "sway:window" => Source::SwayWindow,
-            "sway:workspaces" => Source::SwayWorkspaces,
-            other => Source::Native(Which::parse(other)?),
-        })
-    }
-
     /// What a format written against this source may name.
-    pub fn fields(self) -> &'static [FieldSpec] {
+    pub fn fields(&self) -> &'static [FieldSpec] {
         match self {
             Source::Native(which) => which.fields(),
             Source::Provider => crate::status::i3bar::FIELDS,
@@ -102,7 +93,7 @@ impl Source {
     ///
     /// Each source has one thing it is obviously for, so the common case needs no `format`
     /// line at all.
-    fn default_format(self) -> &'static str {
+    fn default_format(&self) -> &'static str {
         match self {
             Source::Native(which) => which.default_format(),
             Source::Provider => "$text",
@@ -286,6 +277,12 @@ struct RawModule {
     format_alt: Option<String>,
     /// How often to read, for a source dbar measures itself: "2s", "500ms", "1m".
     interval: Option<String>,
+    /// Which filesystem a `disk` module is about. Defaults to the root.
+    path: Option<String>,
+    /// Which interface a `network` module watches. Defaults to whichever is up.
+    interface: Option<String>,
+    /// Which hwmon chip a `temperature` module reads. Defaults to the processor's own.
+    chip: Option<String>,
     /// Read this module's source again on SIGRTMIN+N.
     signal: Option<i32>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
@@ -753,12 +750,12 @@ impl Config {
     pub fn collectors(&self) -> HashMap<Which, Duration> {
         let mut wanted: HashMap<Which, Duration> = HashMap::new();
         for module in self.modules() {
-            let Source::Native(which) = module.source else {
+            let Source::Native(which) = &module.source else {
                 continue;
             };
             let interval = module.interval.unwrap_or_else(|| which.default_interval());
             wanted
-                .entry(which)
+                .entry(which.clone())
                 .and_modify(|current| *current = (*current).min(interval))
                 .or_insert(interval);
         }
@@ -772,12 +769,12 @@ impl Config {
     pub fn signals(&self) -> HashMap<i32, Vec<Which>> {
         let mut wanted: HashMap<i32, Vec<Which>> = HashMap::new();
         for module in self.modules() {
-            let (Some(offset), Source::Native(which)) = (module.signal, module.source) else {
+            let (Some(offset), Source::Native(which)) = (module.signal, &module.source) else {
                 continue;
             };
             let sources = wanted.entry(offset).or_default();
-            if !sources.contains(&which) {
-                sources.push(which);
+            if !sources.contains(which) {
+                sources.push(which.clone());
             }
         }
         wanted
@@ -926,11 +923,62 @@ fn parse_duration(written: &str) -> Result<Duration> {
     Ok(Duration::from_secs_f64(seconds))
 }
 
+/// Work out where a module's content comes from.
+///
+/// Two sources are pointed at something - a filesystem, an interface - and take that from
+/// the module's own keys rather than from the source name, so the name stays a plain word
+/// and the parameter reads as what it is.
+fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> {
+    let name = raw.and_then(|m| m.source.as_deref()).unwrap_or("provider");
+    let source = match name {
+        "provider" => Source::Provider,
+        "sway:window" => Source::SwayWindow,
+        "sway:workspaces" => Source::SwayWorkspaces,
+        "cpu" => Source::Native(Which::Cpu),
+        "memory" => Source::Native(Which::Memory),
+        "battery" => Source::Native(Which::Battery),
+        "backlight" => Source::Native(Which::Backlight),
+        "load" => Source::Native(Which::Load),
+        "time" => Source::Native(Which::Time),
+        "temperature" => Source::Native(Which::Temperature(raw.and_then(|m| m.chip.clone()))),
+        // A disk module has to be pointed at something, and the root filesystem is what
+        // one is usually about.
+        "disk" => Source::Native(Which::Disk(
+            raw.and_then(|m| m.path.clone())
+                .unwrap_or_else(|| "/".to_string()),
+        )),
+        "network" => Source::Native(Which::Network(raw.and_then(|m| m.interface.clone()))),
+        other => bail!(
+            "module {module_name:?} has unknown source {other:?}; expected one of cpu, \
+             memory, battery, backlight, load, temperature, disk, network, time, provider, \
+             sway:window or sway:workspaces"
+        ),
+    };
+
+    // A key that belongs to a source this module is not built on would silently do
+    // nothing, and silently doing nothing is how a config comes to be wrong for months.
+    let misplaced = [
+        ("path", raw.and_then(|m| m.path.as_ref()), "disk"),
+        (
+            "interface",
+            raw.and_then(|m| m.interface.as_ref()),
+            "network",
+        ),
+        ("chip", raw.and_then(|m| m.chip.as_ref()), "temperature"),
+    ];
+    for (key, given, belongs_to) in misplaced {
+        if given.is_some() && name != belongs_to {
+            bail!("module {module_name:?} sets `{key}`, which only a {belongs_to} module reads");
+        }
+    }
+    Ok(source)
+}
+
 /// Parse a module's format and check it against what its source can publish.
 ///
 /// Checking here means a typo in a field name is a message when dbar starts, rather than a
 /// module that silently says nothing.
-fn resolve_format(source: Source, written: Option<&str>) -> Result<Format> {
+fn resolve_format(source: &Source, written: Option<&str>) -> Result<Format> {
     let format = Format::parse(written.unwrap_or_else(|| source.default_format()))?;
     format.check(source.fields())?;
     Ok(format)
@@ -948,16 +996,7 @@ fn resolve_group(
     let mut modules = Vec::new();
     for module_name in raw_group.modules.iter().filter(|m| *m != "*") {
         let raw_module = raw.modules.get(module_name);
-        let source = match raw_module.and_then(|m| m.source.as_deref()) {
-            None => Source::Provider,
-            Some(name) => Source::parse(name).ok_or_else(|| {
-                anyhow!(
-                    "module {module_name:?} has unknown source {name:?}; expected one of \
-                     cpu, memory, battery, backlight, time, provider, sway:window or \
-                     sway:workspaces"
-                )
-            })?,
-        };
+        let source = resolve_source(module_name, raw_module)?;
 
         let style = match raw.modules.get(module_name) {
             Some(raw_module) => {
@@ -1076,7 +1115,7 @@ fn resolve_group(
                     .with_context(|| format!("in [module.{module_name}] interval"))?,
             ),
             // Only dbar's own collectors are on a schedule dbar controls.
-            None => match source {
+            None => match &source {
                 Source::Native(which) => Some(which.default_interval()),
                 _ => None,
             },
@@ -1105,17 +1144,12 @@ fn resolve_group(
             }
         }
 
-        let format = resolve_format(
-            source,
-            raw.modules
-                .get(module_name)
-                .and_then(|m| m.format.as_deref()),
-        )
-        .with_context(|| format!("in [module.{module_name}] format"))?;
+        let format = resolve_format(&source, raw_module.and_then(|m| m.format.as_deref()))
+            .with_context(|| format!("in [module.{module_name}] format"))?;
 
         let format_alt = match raw_module.and_then(|m| m.format_alt.as_deref()) {
             Some(written) => Some(
-                resolve_format(source, Some(written))
+                resolve_format(&source, Some(written))
                     .with_context(|| format!("in [module.{module_name}] format_alt"))?,
             ),
             None => None,
@@ -1191,7 +1225,7 @@ fn resolve_group(
                 source: Source::Provider,
                 interval: None,
                 signal: None,
-                format: resolve_format(Source::Provider, None)?,
+                format: resolve_format(&Source::Provider, None)?,
                 format_alt: None,
                 style: fallback,
                 states: Vec::new(),
