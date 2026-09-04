@@ -17,7 +17,7 @@ height = 34
 position = "top"
 margin = 3
 gap = 3
-font = "sans-serif 20"
+font = "sans-serif 18"
 icon_size = 20
 
 # ---------------------------------------------------------------------------
@@ -54,17 +54,17 @@ groups = ["system", "storage", "power", "time"]
 
 [style.panel]
 foreground = "$text"
-padding = 8
+padding = 6
 
 [style.warning]
 background = "$warning"
 foreground = "$background"
-padding = 8
+padding = 6
 
 [style.critical]
 background = "$critical"
 foreground = "$background"
-padding = 8
+padding = 6
 
 # A pill inside a panel: its own rounded background, sitting on the group's. The
 # workspaces use it to say which ones exist on another output.
@@ -96,6 +96,10 @@ foreground = "$text"
 # Every group is the same island: one surface, both corners rounded, hairlines
 # between the modules inside it. Uniformity is the point - a shape that differs
 # should mean something differs, and here nothing does.
+#
+# What sits between two readings is the separator's `width` plus a `padding` from
+# each of them, so those three numbers decide how long the bar is. They are kept
+# tight here because a bar this full has nine of every gap.
 # ---------------------------------------------------------------------------
 
 [group.desktop]
@@ -139,7 +143,7 @@ radius = 12
 
 [group.system.separator]
 shape = "line"
-width = 13
+width = 9
 color = "$divider"
 
 [group.system.edges]
@@ -153,7 +157,7 @@ radius = 12
 
 [group.storage.separator]
 shape = "line"
-width = 13
+width = 9
 color = "$divider"
 
 [group.storage.edges]
@@ -167,7 +171,7 @@ radius = 12
 
 [group.power.separator]
 shape = "line"
-width = 13
+width = 9
 color = "$divider"
 
 [group.power.edges]
