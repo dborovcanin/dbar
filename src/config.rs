@@ -272,6 +272,8 @@ struct RawModule {
     format_alt: Option<String>,
     /// How often to read, for a source dbar measures itself: "2s", "500ms", "1m".
     interval: Option<String>,
+    /// Read this module's source again on SIGRTMIN+N.
+    signal: Option<i32>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
     #[serde(default)]
     states: HashMap<String, RawState>,
@@ -453,6 +455,8 @@ pub struct Module {
     /// How often the source behind this module is read. Only native sources are read by
     /// dbar, so this is `None` for everything else.
     pub interval: Option<Duration>,
+    /// The offset from SIGRTMIN that reads this module's source again.
+    pub signal: Option<i32>,
     /// What the module says, already parsed and checked against the source's fields.
     pub format: Format,
     /// The wording a left click swaps to, when the config gives one.
@@ -696,6 +700,24 @@ impl Config {
         wanted
     }
 
+    /// Which sources each realtime signal reads again, by offset from SIGRTMIN.
+    ///
+    /// One signal may refresh several sources, and several modules may share one signal;
+    /// what is refreshed is the source behind them, since that is what does the reading.
+    pub fn signals(&self) -> HashMap<i32, Vec<Which>> {
+        let mut wanted: HashMap<i32, Vec<Which>> = HashMap::new();
+        for module in self.modules() {
+            let (Some(offset), Source::Native(which)) = (module.signal, module.source) else {
+                continue;
+            };
+            let sources = wanted.entry(offset).or_default();
+            if !sources.contains(&which) {
+                sources.push(which);
+            }
+        }
+        wanted
+    }
+
     /// Whether anything in this config comes from an external status provider.
     ///
     /// Nothing does on a native configuration, and then there is no child process to run.
@@ -788,6 +810,14 @@ impl Config {
             },
         }
     }
+}
+
+/// How many realtime signals this system has above SIGRTMIN.
+///
+/// The range is decided by the C library rather than fixed, because the first few are
+/// reserved for the threading implementation.
+pub fn signal_range() -> i32 {
+    (libc::SIGRTMAX() - libc::SIGRTMIN()).max(0)
 }
 
 /// The names a config uses for how a source rates itself.
@@ -975,6 +1005,23 @@ fn resolve_group(
             );
         }
 
+        let signal = raw_module.and_then(|m| m.signal);
+        if let Some(offset) = signal {
+            if !matches!(source, Source::Native(_)) {
+                bail!(
+                    "module {module_name:?} sets a signal, but its source is not one dbar \
+                     reads; a provider handles its own signals"
+                );
+            }
+            let highest = signal_range();
+            if offset < 0 || offset > highest {
+                bail!(
+                    "module {module_name:?} asks for signal {offset}, but only 0 to {highest} \
+                     exist on this system; they are counted from SIGRTMIN"
+                );
+            }
+        }
+
         let format = resolve_format(
             source,
             raw.modules
@@ -995,6 +1042,7 @@ fn resolve_group(
             name: module_name.clone(),
             source,
             interval,
+            signal,
             format,
             format_alt,
             style,
@@ -1048,6 +1096,7 @@ fn resolve_group(
                 name: "*".to_string(),
                 source: Source::Provider,
                 interval: None,
+                signal: None,
                 format: resolve_format(Source::Provider, None)?,
                 format_alt: None,
                 style: fallback,
@@ -1314,6 +1363,70 @@ format_alt = "$nonesuch"
         let message = format!("{e:#}");
         assert!(message.contains("format_alt"), "{message}");
         assert!(message.contains("nonesuch"), "{message}");
+    }
+
+    #[test]
+    fn a_signal_names_the_sources_it_reads_again() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["light", "light2", "cpu"]
+
+[module.light]
+source = "backlight"
+signal = 8
+
+[module.light2]
+source = "backlight"
+signal = 8
+
+[module.cpu]
+source = "cpu"
+signal = 9
+"##;
+        let signals = Config::parse(config).expect("parses").signals();
+        // Two modules on one source and one signal is still one source to read.
+        assert_eq!(signals[&8], vec![Which::Backlight]);
+        assert_eq!(signals[&9], vec![Which::Cpu]);
+    }
+
+    #[test]
+    fn a_signal_outside_the_realtime_range_is_rejected() {
+        let template = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["light"]
+
+[module.light]
+source = "backlight"
+signal = N
+"##;
+        assert!(Config::parse(&template.replace("N", "0")).is_ok());
+        assert!(Config::parse(&template.replace("N", "-1")).is_err());
+        let too_high = (signal_range() + 1).to_string();
+        let e = Config::parse(&template.replace("N", &too_high))
+            .expect_err("a signal this system does not have is a mistake");
+        assert!(format!("{e:#}").contains("SIGRTMIN"), "{e:#}");
+    }
+
+    #[test]
+    fn a_signal_on_a_source_dbar_does_not_read_is_rejected() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+signal = 8
+"##;
+        let e = Config::parse(config).expect_err("a provider handles its own signals");
+        assert!(format!("{e:#}").contains("signal"), "{e:#}");
     }
 
     #[test]

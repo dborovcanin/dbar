@@ -29,7 +29,7 @@ use wayland_client::{
     protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
 
-use crate::collect::Registry;
+use crate::collect::{Registry, Which};
 use crate::config::{Config, Edge};
 use crate::layout::{self, Frame, Inputs};
 use crate::render;
@@ -61,6 +61,8 @@ pub struct App {
     native: Registry,
     /// Modules showing their second wording, by name.
     alt: std::collections::HashSet<String>,
+    /// Which sources each realtime signal reads again.
+    signals: std::collections::HashMap<i32, Vec<Which>>,
     /// Workspaces and the focused window, when a compositor is talking to us.
     sway: SwayState,
     frame: Frame,
@@ -103,6 +105,7 @@ impl App {
         let layer = layer_shell.create_layer_surface(qh, surface, Layer::Top, Some("dbar"), None);
 
         let config_collectors = config.collectors();
+        let config_signals = config.signals();
         let bar = &config.bar;
         let edge = match bar.position {
             Edge::Top => Anchor::TOP,
@@ -143,6 +146,7 @@ impl App {
             text,
             native: Registry::new(&config_collectors),
             alt: std::collections::HashSet::new(),
+            signals: config_signals,
             provider,
             items: Vec::new(),
             sway: SwayState::default(),
@@ -233,6 +237,25 @@ impl App {
             names.len()
         );
         self.name_count_warned = true;
+    }
+
+    /// Read again whatever a signal asks for.
+    ///
+    /// The timer that was already scheduled still fires at its old deadline; it finds
+    /// nothing due by then and simply asks for the next one, so it corrects itself rather
+    /// than needing to be rescheduled from here.
+    pub fn on_signal(&mut self, offset: i32) {
+        let Some(sources) = self.signals.get(&offset) else {
+            return;
+        };
+        log::debug!(
+            "SIGRTMIN+{offset}: reading {} source(s) again",
+            sources.len()
+        );
+        for which in sources.clone() {
+            self.native.refresh(which);
+        }
+        self.on_collect();
     }
 
     /// Read every collector that has come due, and say when the next one is.

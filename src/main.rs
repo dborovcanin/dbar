@@ -8,6 +8,7 @@ mod format;
 mod icon;
 mod layout;
 mod render;
+mod signal;
 mod status;
 mod sway;
 mod text;
@@ -100,6 +101,9 @@ fn main() -> Result<()> {
 
     let collectors = !config.collectors().is_empty();
     let listening = provider.is_some();
+    // A signal brings a reading forward: after `brightnessctl set`, the bar should say so
+    // now rather than when the interval next comes round.
+    let offsets: Vec<i32> = config.signals().keys().copied().collect();
     let mut app = App::new(&globals, &qh, conn.clone(), config, provider)?;
 
     if listening {
@@ -110,6 +114,18 @@ fn main() -> Result<()> {
                 }
             })
             .map_err(|e| anyhow::anyhow!("inserting the status source: {e}"))?;
+    }
+
+    let (signal_tx, signal_rx) = calloop::channel::channel();
+    crate::signal::spawn(&offsets, signal_tx)?;
+    if !offsets.is_empty() {
+        handle
+            .insert_source(signal_rx, |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(offset) = event {
+                    app.on_signal(offset);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("inserting the signal source: {e}"))?;
     }
 
     // Collectors share one timer: it fires when the earliest is due, reads everything that

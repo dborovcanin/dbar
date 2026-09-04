@@ -74,8 +74,12 @@ foreground = "$critical"
 
 # A machine with no backlight publishes nothing for it, and a module with
 # nothing to report is not drawn at all.
+#
+# `signal` reads it again on demand: bind a brightness key to
+# `brightnessctl set +10%; pkill -RTMIN+8 dbar` and the bar keeps up.
 [module.backlight]
 source = "backlight"
+signal = 8
 format = " $brightness.n(w:4) "
 style = "default"
 icon = "brightness"

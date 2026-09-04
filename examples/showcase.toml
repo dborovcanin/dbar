@@ -422,8 +422,13 @@ field = "swap_percent"
 above = 20
 style = "warning"
 
+# `signal` reads the source again on demand, counted from SIGRTMIN because
+# where the realtime range starts is up to the C library. A brightness key
+# bound to `brightnessctl set +10%; pkill -RTMIN+8 dbar` then shows the new
+# value straight away rather than when the interval next comes round.
 [module.brightness]
 source = "backlight"
+signal = 8
 format = " $brightness.n(w:4) "
 style = "plain"
 icon = "brightness"

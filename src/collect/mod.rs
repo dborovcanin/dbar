@@ -194,6 +194,16 @@ impl Registry {
         changed
     }
 
+    /// Read one source again at the next opportunity, whatever its interval said.
+    ///
+    /// The interval starts over from the refresh, so a source that is asked for often is
+    /// not then read again a moment later out of habit.
+    pub fn refresh(&mut self, which: Which) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.which == which) {
+            entry.due = Instant::now();
+        }
+    }
+
     /// When the loop should wake up next, if anything is scheduled at all.
     pub fn next_due(&self) -> Option<Instant> {
         self.entries.iter().map(|e| e.due).min()

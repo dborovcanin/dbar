@@ -19,6 +19,7 @@ This is the **V0** milestone from [spec.md](spec.md).
 - module state styling, keyed on a value, on a named field, on how the source
   rates itself, or on hover
 - `format_alt`: a second wording a left click swaps to and back
+- `signal = N`: read a source again on SIGRTMIN+N
 - `left` / `center` / `right` positions holding groups of modules
 - rounded group and module backgrounds
 - click forwarding back to the provider (left, middle, right, scroll)
@@ -353,6 +354,24 @@ so a module showing minutes changes when the minute does.
 A collector that fails keeps its last good reading on screen, says so once in
 the log, and is tried less often until it recovers. `state = "error"` is how a
 config styles that.
+
+`signal` reads a source again on demand, so an interval only has to be short
+enough for changes nothing else announces:
+
+```toml
+[module.backlight]
+source = "backlight"
+signal = 8            # counted from SIGRTMIN
+```
+
+```sh
+brightnessctl set +10%; pkill -RTMIN+8 dbar
+```
+
+The offsets count from SIGRTMIN rather than being absolute numbers, because
+where the realtime range starts is decided by the C library — the first few are
+reserved for the threading implementation — so an absolute number is not
+portable even between two Linux machines.
 
 `sway:window` and `sway:workspaces` come from the compositor. Everything else
 comes from an external i3bar-protocol provider, which is the default when a
