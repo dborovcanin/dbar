@@ -90,12 +90,16 @@ impl Which {
     ///
     /// A source that is not here is read on an interval; one that is here is read on an
     /// interval only while its file is missing.
-    pub const WATCHABLE: &'static [Which] = &[Which::Backlight];
+    pub const WATCHABLE: &'static [Which] = &[Which::Backlight, Which::Battery];
 
-    /// The file whose change the kernel will report for this source, if there is one.
-    fn watch_path(&self) -> Option<std::path::PathBuf> {
+    /// How the kernel reports a change to this source, if it does.
+    fn watch(&self) -> Option<watch::Watch> {
         match self {
-            Which::Backlight => backlight::watch_path(),
+            Which::Backlight => backlight::watch_path().map(watch::Watch::Attribute),
+            // A battery has no attribute to wait on, and what its firmware announces is
+            // not everything that happens to it, so this brings the reading forward
+            // rather than replacing the interval.
+            Which::Battery => Some(watch::Watch::Uevent("power_supply")),
             _ => None,
         }
     }
@@ -202,11 +206,11 @@ impl Registry {
             .iter()
             .map(|(which, &interval)| Entry {
                 collector: which.open(),
-                which: which.clone(),
                 interval,
                 reading: Reading::default(),
                 due: Some(now),
                 watched: false,
+                which: which.clone(),
                 failures: 0,
                 reported: false,
             })

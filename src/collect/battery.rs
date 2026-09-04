@@ -28,6 +28,13 @@ pub const FIELDS: &[FieldSpec] = &[
         name: "status",
         kind: Kind::Text,
     },
+    // `mains` or `battery`: what the machine is running on, which is not the same
+    // question as whether the battery is charging. A full battery on the mains says
+    // `not charging`, and so does one a charge threshold is holding back.
+    FieldSpec {
+        name: "supply",
+        kind: Kind::Text,
+    },
     // What the battery is drawing or taking on. Absent when the hardware cannot say.
     FieldSpec {
         name: "power",
@@ -85,6 +92,8 @@ impl Collector for Battery {
 
         let mut fields = Fields::default();
         fields.set_primary("percent");
+
+        fields.set("supply", mains(&self.class));
 
         let Some(total) = Total::of(&cells) else {
             for name in ["percent", "status", "power", "time", "health", "threshold"] {
@@ -152,6 +161,48 @@ impl Collector for Battery {
     }
 }
 
+/// What the machine is running on.
+///
+/// A laptop plugged in at 100% reports `not charging`, and so does one a charge threshold
+/// is holding at 80%, so the status alone cannot say whether the charger is in. The mains
+/// adapter can: it is a power supply of its own, and `online` is what it is there to say.
+fn mains(class: &Path) -> Value {
+    let Ok(entries) = std::fs::read_dir(class) else {
+        return Value::Absent;
+    };
+    let mut plugged = None;
+    for path in entries.flatten().map(|e| e.path()) {
+        let kind = super::read_to_string(path.join("type")).unwrap_or_default();
+        // A charger is `Mains`, and a USB-C one is `USB`. Both power the machine; a
+        // `Device` supply is a mouse or a headset, and powers only itself.
+        if !matches!(kind.trim(), "Mains" | "USB") || powers_a_device(&path) {
+            continue;
+        }
+        let Ok(online) = super::read_to_string(path.join("online")) else {
+            continue;
+        };
+        plugged = Some(plugged.unwrap_or(false) || online.trim() == "1");
+    }
+    match plugged {
+        Some(true) => Value::Text("mains".to_string()),
+        Some(false) => Value::Text("battery".to_string()),
+        // A machine that lists no adapter at all cannot be asked, and saying "battery"
+        // would be a guess dressed as a reading.
+        None => Value::Absent,
+    }
+}
+
+/// Whether this supply powers a peripheral rather than the machine.
+///
+/// A wireless mouse publishes a battery of its own, and summing it into the laptop's would
+/// be nonsense. `scope` is how the kernel says which is which; a supply that does not
+/// mention one is the machine's.
+fn powers_a_device(path: &Path) -> bool {
+    super::read_to_string(path.join("scope"))
+        .map(|scope| scope.trim() == "Device")
+        .unwrap_or(false)
+}
+
 /// Every battery the kernel is currently listing, in a stable order.
 fn batteries(class: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(class) else {
@@ -161,11 +212,13 @@ fn batteries(class: &Path) -> Vec<PathBuf> {
         .flatten()
         .map(|e| e.path())
         .filter(|p| {
-            // A power supply is also the mains adapter, a UPS or a wireless mouse; only a
-            // battery has a charge to report.
+            // A power supply is also the mains adapter, a UPS or a wireless mouse. Only a
+            // battery has a charge to report, and only one powering the machine is part of
+            // how much the machine has left.
             super::read_to_string(p.join("type"))
                 .map(|t| t.trim() == "Battery")
                 .unwrap_or(false)
+                && !powers_a_device(p)
         })
         .collect();
     found.sort();
@@ -431,6 +484,84 @@ mod tests {
 
     fn num(fields: &Fields, name: &str) -> Option<f64> {
         fields.get(name)?.num()
+    }
+
+    fn text(fields: &Fields, name: &str) -> Option<String> {
+        match fields.get(name)? {
+            Value::Text(t) => Some(t.clone()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn being_on_the_mains_is_not_the_same_as_charging() {
+        // What this laptop reports when it is plugged in at full charge. The status alone
+        // cannot tell that apart from being unplugged and idle.
+        let root = class(
+            "plugged-and-full",
+            &[
+                ("AC", &[("type", "Mains"), ("online", "1")]),
+                ("BAT0", &energy("Not charging", "50000000")),
+            ],
+        );
+        let fields = read(&root);
+        assert_eq!(text(&fields, "status").as_deref(), Some("not charging"));
+        assert_eq!(text(&fields, "supply").as_deref(), Some("mains"));
+    }
+
+    #[test]
+    fn an_unplugged_machine_is_running_on_its_battery() {
+        let root = class(
+            "unplugged",
+            &[
+                ("AC", &[("type", "Mains"), ("online", "0")]),
+                ("BAT0", &energy("Discharging", "25000000")),
+            ],
+        );
+        assert_eq!(text(&read(&root), "supply").as_deref(), Some("battery"));
+    }
+
+    #[test]
+    fn a_machine_that_lists_no_adapter_says_nothing_rather_than_guessing() {
+        let root = class(
+            "no-adapter",
+            &[("BAT0", &energy("Discharging", "25000000"))],
+        );
+        assert!(matches!(read(&root).get("supply"), Some(Value::Absent)));
+    }
+
+    #[test]
+    fn a_peripheral_is_not_part_of_the_machines_power() {
+        // A wireless mouse publishes a battery and charges over USB. Neither is the
+        // laptop's, and summing them in would report a charge nobody asked about.
+        let root = class(
+            "peripheral",
+            &[
+                ("AC", &[("type", "Mains"), ("online", "0")]),
+                (
+                    "hidpp_battery_0",
+                    &[
+                        ("type", "Battery"),
+                        ("scope", "Device"),
+                        ("present", "1"),
+                        ("status", "Full"),
+                        ("capacity", "100"),
+                    ],
+                ),
+                (
+                    "mouse_charger",
+                    &[("type", "USB"), ("scope", "Device"), ("online", "1")],
+                ),
+                ("BAT0", &energy("Discharging", "25000000")),
+            ],
+        );
+        let fields = read(&root);
+        assert_eq!(num(&fields, "percent"), Some(50.0), "the laptop's, alone");
+        assert_eq!(
+            text(&fields, "supply").as_deref(),
+            Some("battery"),
+            "a mouse on its dock does not put the laptop on the mains"
+        );
     }
 
     #[test]
