@@ -567,7 +567,8 @@ worker thread feeding a calloop channel.
 
 - Running an unmodified i3status-rust config file.
 - Depending on i3status-rust internals, or copying its collector implementations.
-- CSS, or any scripting language.
+- CSS, or an embedded interpreter. Running a user's own command as a source is in scope
+  (`source = "command:..."`); growing a language of dbar's own is not.
 - Async runtime.
 - A widget tree. The renderer draws text, icons, rects and separators; that is
   the whole vocabulary.
