@@ -29,13 +29,13 @@
 [bar]
 height = 34
 position = "top"
-margin = 6
-gap = 6
+margin = 3
+gap = 3
 # Kept font-agnostic, since this is the built-in default. Icon sizes follow it
 # unless [bar] icon_size says otherwise.
 font = "sans-serif 15"
 icon_size = 20
-exclusive = true        # default: true; reserve the space so windows do not sit under the bar
+exclusive = true       # default: true; reserve the space so windows do not sit under the bar
 
 [status]
 command = "i3status-rs"
@@ -152,49 +152,49 @@ groups = ["system", "media", "power"]
 
 [style.default]
 foreground = "$text"
-padding = 9
+padding = 4
 background = "#00000000" # default: transparent
-radius = 0              # default: 0
-min_width = 0           # default: 0
-icon = "none"           # default: none
-icon_size = 20          # default: 1.4x the font size
+radius = 0               # default: 0
+min_width = 0            # default: 0
+icon = "none"            # default: none
+icon_size = 20           # default: 1.4x the font size
 
 # Filled transitions need neighbouring modules to contrast, so these alternate.
 [style.cool]
 background = "$accent"
 foreground = "$background"
-padding = 9
-radius = 0              # default: 0
-min_width = 0           # default: 0
-icon = "none"           # default: none
-icon_size = 20          # default: 1.4x the font size
+padding = 4
+radius = 0                 # default: 0
+min_width = 0              # default: 0
+icon = "none"              # default: none
+icon_size = 20             # default: 1.4x the font size
 
 [style.warm]
 background = "$warning"
 foreground = "$background"
-padding = 9
-radius = 0              # default: 0
-min_width = 0           # default: 0
-icon = "none"           # default: none
-icon_size = 20          # default: 1.4x the font size
+padding = 4
+radius = 0                 # default: 0
+min_width = 0              # default: 0
+icon = "none"              # default: none
+icon_size = 20             # default: 1.4x the font size
 
 [style.mint]
 background = "$teal"
 foreground = "$background"
-padding = 9
-radius = 0              # default: 0
-min_width = 0           # default: 0
-icon = "none"           # default: none
-icon_size = 20          # default: 1.4x the font size
+padding = 4
+radius = 0                 # default: 0
+min_width = 0              # default: 0
+icon = "none"              # default: none
+icon_size = 20             # default: 1.4x the font size
 
 [style.stone]
 background = "$slate"
 foreground = "$text"
-padding = 9
-radius = 0              # default: 0
-min_width = 0           # default: 0
-icon = "none"           # default: none
-icon_size = 20          # default: 1.4x the font size
+padding = 4
+radius = 0            # default: 0
+min_width = 0         # default: 0
+icon = "none"         # default: none
+icon_size = 20        # default: 1.4x the font size
 
 # No background of its own, so the group background shows through continuously.
 # Hover is paint-only: background, foreground and radius. Anything affecting
@@ -202,7 +202,7 @@ icon_size = 20          # default: 1.4x the font size
 [style.hovered]
 background = "$overlay"
 foreground = "$text"    # default: #cdd6f4
-padding = 8             # default: 8
+padding = 4             # default: 8
 radius = 0              # default: 0
 min_width = 0           # default: 0
 icon = "none"           # default: none
@@ -210,30 +210,30 @@ icon_size = 20          # default: 1.4x the font size
 
 [style.plain]
 foreground = "$text"
-padding = 12
+padding = 4
 background = "#00000000" # default: transparent
-radius = 0              # default: 0
-min_width = 0           # default: 0
-icon = "none"           # default: none
-icon_size = 20          # default: 1.4x the font size
+radius = 0               # default: 0
+min_width = 0            # default: 0
+icon = "none"            # default: none
+icon_size = 20           # default: 1.4x the font size
 
 [style.warning]
 background = "$warning"
 foreground = "$background"
-padding = 9
-radius = 0              # default: 0
-min_width = 0           # default: 0
-icon = "none"           # default: none
-icon_size = 20          # default: 1.4x the font size
+padding = 4
+radius = 0                 # default: 0
+min_width = 0              # default: 0
+icon = "none"              # default: none
+icon_size = 20             # default: 1.4x the font size
 
 [style.critical]
 background = "$critical"
 foreground = "$background"
-padding = 9
-radius = 0              # default: 0
-min_width = 0           # default: 0
-icon = "none"           # default: none
-icon_size = 20          # default: 1.4x the font size
+padding = 4
+radius = 0                 # default: 0
+min_width = 0              # default: 0
+icon = "none"              # default: none
+icon_size = 20             # default: 1.4x the font size
 
 # ---------------------------------------------------------------------------
 # Groups
@@ -268,12 +268,12 @@ spacing = 3
 
 # A workspace module expands into several, so a group separator lands between
 # them like it would between any other pair.
-[group.desktop.separator]
-shape = "line"
-width = 9
-direction = "right"
-color = "$subtext"
-overlap = 0
+#[group.desktop.separator]
+#shape = "line"
+#width = 9
+#direction = "right"
+#color = "$subtext"
+#overlap = 0
 
 [group.desktop.edges]
 left = "round"
@@ -325,7 +325,7 @@ modules = ["cpu", "memory", "disk"]
 background = "$surface"
 radius = 12
 padding = 0
-spacing = 0             # only used when the group has no separator
+spacing = 0                         # only used when the group has no separator
 
 [group.system.separator]
 shape = "slant"
@@ -336,7 +336,7 @@ overlap = 1
 
 [group.system.edges]
 left = "round"
-right = "none"          # a squared trailing edge
+right = "none" # a squared trailing edge
 radius = 12
 
 # Wireless, volume and brightness share one surface, divided by hairlines. A
