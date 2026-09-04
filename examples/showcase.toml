@@ -21,6 +21,10 @@
 [bar]
 height = 34
 position = "top"
+# Where the bar sits in the compositor's stack: "top" (default) is above
+# ordinary windows, "bottom" lets a floating window be dragged over the bar,
+# "overlay" covers even a screen locker, and "background" is wallpaper level.
+layer = "top"
 margin = 3
 gap = 3
 # Kept font-agnostic, since this is the built-in default. Icon sizes follow it

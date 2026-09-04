@@ -30,7 +30,7 @@ use wayland_client::{
 };
 
 use crate::collect::{Registry, Which, watch};
-use crate::config::{Config, Edge};
+use crate::config::{BarLayer, Config, Edge};
 use crate::layout::{self, Frame, Inputs};
 use crate::render;
 use crate::status::{
@@ -114,12 +114,19 @@ impl App {
             .context("zwlr_layer_shell_v1 is not available; is this a wlroots compositor?")?;
         let shm = Shm::bind(globals, qh).context("wl_shm is not available")?;
 
-        let surface = compositor.create_surface(qh);
-        let layer = layer_shell.create_layer_surface(qh, surface, Layer::Top, Some("dbar"), None);
-
         let config_collectors = config.collectors();
         let config_signals = config.signals();
         let bar = &config.bar;
+        let stack = match bar.layer {
+            BarLayer::Background => Layer::Background,
+            BarLayer::Bottom => Layer::Bottom,
+            BarLayer::Top => Layer::Top,
+            BarLayer::Overlay => Layer::Overlay,
+        };
+
+        let surface = compositor.create_surface(qh);
+        let layer = layer_shell.create_layer_surface(qh, surface, stack, Some("dbar"), None);
+
         let edge = match bar.position {
             Edge::Top => Anchor::TOP,
             Edge::Bottom => Anchor::BOTTOM,

@@ -26,6 +26,20 @@ pub enum Edge {
     Bottom,
 }
 
+/// Which layer-shell layer the bar sits on, and so what it is drawn over.
+///
+/// `top` is above ordinary windows and below fullscreen-style overlays, which is what a bar
+/// normally wants. `bottom` puts the bar under floating windows, so one can be dragged over
+/// it; `overlay` puts it above everything, including screen lockers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BarLayer {
+    Background,
+    Bottom,
+    Top,
+    Overlay,
+}
+
 /// The transition drawn between two neighbouring modules.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -151,6 +165,9 @@ struct RawBar {
     height: u32,
     #[serde(default = "default_edge")]
     position: Edge,
+    /// Where the bar sits in the compositor's stack. Defaults to above ordinary windows.
+    #[serde(default = "default_layer")]
+    layer: BarLayer,
     #[serde(default)]
     margin: i32,
     #[serde(default = "default_gap")]
@@ -364,6 +381,9 @@ fn default_height() -> u32 {
 fn default_edge() -> Edge {
     Edge::Top
 }
+fn default_layer() -> BarLayer {
+    BarLayer::Top
+}
 fn default_gap() -> f32 {
     6.0
 }
@@ -388,6 +408,7 @@ impl Default for RawBar {
         RawBar {
             height: default_height(),
             position: default_edge(),
+            layer: default_layer(),
             margin: 0,
             gap: default_gap(),
             font: default_font(),
@@ -424,6 +445,7 @@ pub struct Config {
 pub struct Bar {
     pub height: u32,
     pub position: Edge,
+    pub layer: BarLayer,
     pub margin: i32,
     pub gap: f32,
     pub font_family: String,
@@ -849,6 +871,7 @@ impl Config {
         let bar = Bar {
             height: raw.bar.height.max(1),
             position: raw.bar.position,
+            layer: raw.bar.layer,
             margin: raw.bar.margin,
             gap: raw.bar.gap,
             font_family,
@@ -1869,6 +1892,15 @@ signal = 8
 "##;
         let e = Config::parse(config).expect_err("a provider handles its own signals");
         assert!(format!("{e:#}").contains("signal"), "{e:#}");
+    }
+
+    #[test]
+    fn the_bar_sits_above_ordinary_windows_unless_told_otherwise() {
+        assert_eq!(Config::parse("").unwrap().bar.layer, BarLayer::Top);
+        let config = Config::parse("[bar]\nlayer = \"bottom\"\n").unwrap();
+        assert_eq!(config.bar.layer, BarLayer::Bottom);
+        let e = Config::parse("[bar]\nlayer = \"above\"\n").expect_err("not a layer");
+        assert!(format!("{e:#}").contains("layer"), "{e:#}");
     }
 
     #[test]

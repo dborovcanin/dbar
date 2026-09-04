@@ -15,6 +15,10 @@
 [bar]
 height = 34
 position = "top"
+# The bar sits under floating windows, so one dragged across the top of the
+# screen passes over it rather than behind it. Tiled windows never reach it -
+# the exclusive zone keeps the strip to itself.
+layer = "bottom"
 margin = 3
 gap = 3
 font = "sans-serif 18"
