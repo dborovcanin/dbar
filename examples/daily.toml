@@ -42,7 +42,7 @@ groups = ["desktop", "window"]
 groups = ["playing"]
 
 [right]
-groups = ["system", "storage", "power", "time"]
+groups = ["system", "network", "power", "time"]
 
 # ---------------------------------------------------------------------------
 # Styles
@@ -133,11 +133,11 @@ radius = 12
 left = "round"
 right = "round"
 
-# The processor's three numbers share one island, divided by hairlines: the load
-# average has no icon of its own, and giving each number one would say they are
-# three unrelated things rather than three views of the same chip.
+# What the machine is doing with itself: how hard it is working, how much it is
+# holding, and how hot that is making it. Three readings of one thing, so they
+# share one island.
 [group.system]
-modules = ["cpu", "load", "temperature"]
+modules = ["cpu", "memory", "temperature"]
 background = "$surface"
 radius = 12
 
@@ -150,17 +150,17 @@ color = "$divider"
 left = "round"
 right = "round"
 
-[group.storage]
-modules = ["memory", "disk", "network"]
+[group.network]
+modules = ["network"]
 background = "$surface"
 radius = 12
 
-[group.storage.separator]
+[group.network.separator]
 shape = "line"
 width = 9
 color = "$divider"
 
-[group.storage.edges]
+[group.network.edges]
 left = "round"
 right = "round"
 
@@ -257,16 +257,16 @@ style = "warning"
 state = "error"
 style = "critical"
 
-# The raw load average is what is shown; the threshold keys on the same figure
-# against the core count, since 4.0 saturates a quad-core and idles a sixteen.
-[module.load]
-source = "load"
+# Click for what is actually in use rather than the share.
+[module.memory]
+source = "memory"
 interval = "5s"
-format = " $one.n(d:2) "
+format = " $percent.n(w:4) "
+format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
 style = "panel"
+icon = "memory"
 
-[module.load.states.busy]
-field = "percent"
+[module.memory.states.full]
 above = 90
 style = "warning"
 
@@ -288,34 +288,6 @@ style = "warning"
 [module.temperature.states.hot]
 state = "critical"
 style = "critical"
-
-# Click for what is actually in use rather than the share.
-[module.memory]
-source = "memory"
-interval = "5s"
-format = " $percent.n(w:4) "
-format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
-style = "panel"
-icon = "memory"
-
-[module.memory.states.full]
-above = 90
-style = "warning"
-
-# What an ordinary program can still write, which leaves out the reserve only
-# root may touch.
-[module.disk]
-source = "disk"
-path = "/"
-interval = "1m"
-format = " $available "
-format_alt = " $percent.n(w:4) of $total.n(d:0) "
-style = "panel"
-icon = "disk"
-
-[module.disk.states.filling]
-above = 90
-style = "warning"
 
 # Follows whichever interface is actually up, so unplugging a cable moves it to
 # the wireless card without a restart.
