@@ -371,8 +371,15 @@ icon = "brightness"
 [module.battery]
 source = "battery"
 interval = "30s"
-format = " $percent.n(w:4){  $time.dur(style:short) left} "
-format_alt = " $percent.n(w:4)  $status{  $power.n(d:1)}  health $health.n(d:0) "
+# The percentage is the whole of it at rest; a click asks for the detail, and
+# another for how long the charge is expected to last. What is left is an
+# estimate from the current draw, so it is worth a click rather than a place on
+# the bar at all times.
+format = " $percent.n(w:4) "
+format_alt = [
+    " $percent.n(w:4)  $status{  $power.n(d:1)}  health $health.n(d:0) ",
+    " $percent.n(w:4){  $time.dur(style:short) left} ",
+]
 style = "panel"
 icon = "battery"
 
