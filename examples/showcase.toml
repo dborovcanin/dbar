@@ -454,6 +454,10 @@ style = "warning"
 # costs nothing when it is never sent.
 [module.brightness]
 source = "backlight"
+# `scroll` is what one notch of the wheel is worth, and only the sources dbar can
+# set as well as read take it: a backlight and the volume. On audio, the middle
+# button mutes.
+scroll = "5%"
 signal = 8
 format = " $brightness.n(w:4) "
 style = "plain"

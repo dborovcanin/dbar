@@ -15,7 +15,7 @@ use crate::collect::Which;
 use crate::color::Color;
 use crate::format::Format;
 use crate::icon::Icon;
-use crate::status::{FieldSpec, Fields, State, Value};
+use crate::status::{Control, FieldSpec, Fields, State, Value};
 
 pub const DEFAULT_CONFIG: &str = include_str!("../examples/config.toml");
 
@@ -285,6 +285,9 @@ struct RawModule {
     chip: Option<String>,
     /// Read this module's source again on SIGRTMIN+N.
     signal: Option<i32>,
+    /// What one scroll notch over this module is worth: "5%". Only for the sources dbar
+    /// can change as well as read.
+    scroll: Option<String>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
     #[serde(default)]
     states: HashMap<String, RawState>,
@@ -499,6 +502,8 @@ pub struct Module {
     pub interval: Option<Duration>,
     /// The offset from SIGRTMIN that reads this module's source again.
     pub signal: Option<i32>,
+    /// How much one scroll notch changes what this module shows, in percentage points.
+    pub scroll: Option<f64>,
     /// What the module says, already parsed and checked against the source's fields.
     pub format: Format,
     /// The wording a left click swaps to, when the config gives one.
@@ -901,6 +906,34 @@ fn parse_state(name: &str) -> Result<State> {
 ///
 /// A bare number is refused. `interval = 2` reads as two of something, and which something
 /// is exactly the thing worth being explicit about.
+/// What a module can be made to change, if anything.
+///
+/// dbar changes these itself rather than running a helper: it already knows where the
+/// brightness lives and holds the connection the volume travels over, so shelling out to
+/// a program that does the same thing would be a slower way to be less sure it worked.
+pub fn control_of(source: &Source) -> Option<Control> {
+    match source {
+        Source::Native(Which::Backlight) => Some(Control::Brightness),
+        Source::Native(Which::Audio) => Some(Control::Volume),
+        _ => None,
+    }
+}
+
+/// A step written as a percentage: "5%", or "5" for the same thing.
+///
+/// It is a share of the whole range rather than of the current value, because a scroll
+/// that moves less the darker it gets never reaches either end.
+fn parse_percent(written: &str) -> Result<f64> {
+    let text = written.trim().strip_suffix('%').unwrap_or(written.trim());
+    let step: f64 = text
+        .parse()
+        .with_context(|| format!("{written:?} is not a percentage like \"5%\""))?;
+    if !(step.is_finite() && step > 0.0 && step <= 100.0) {
+        bail!("a scroll step is between 0 and 100 percent, not {written:?}");
+    }
+    Ok(step)
+}
+
 fn parse_duration(written: &str) -> Result<Duration> {
     let text = written.trim();
     let split = text
@@ -1145,6 +1178,19 @@ fn resolve_group(
             }
         }
 
+        let scroll = match raw_module.and_then(|m| m.scroll.as_deref()) {
+            Some(written) => Some(
+                parse_percent(written)
+                    .with_context(|| format!("in [module.{module_name}] scroll"))?,
+            ),
+            None => None,
+        };
+        if scroll.is_some() && control_of(&source).is_none() {
+            bail!(
+                "module {module_name:?} asks to be scrolled, but dbar can only change what                  it can also set: a backlight or the volume"
+            );
+        }
+
         let format = resolve_format(&source, raw_module.and_then(|m| m.format.as_deref()))
             .with_context(|| format!("in [module.{module_name}] format"))?;
 
@@ -1161,6 +1207,7 @@ fn resolve_group(
             source,
             interval,
             signal,
+            scroll,
             format,
             format_alt,
             style,
@@ -1226,6 +1273,7 @@ fn resolve_group(
                 source: Source::Provider,
                 interval: None,
                 signal: None,
+                scroll: None,
                 format: resolve_format(&Source::Provider, None)?,
                 format_alt: None,
                 style: fallback,
@@ -1532,6 +1580,52 @@ format_alt = "$nonesuch"
         let message = format!("{e:#}");
         assert!(message.contains("format_alt"), "{message}");
         assert!(message.contains("nonesuch"), "{message}");
+    }
+
+    #[test]
+    fn only_what_dbar_can_set_may_be_scrolled() {
+        let broken = r#"
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+source = "cpu"
+scroll = "5%"
+"#;
+        let message = Config::parse(broken)
+            .expect_err("cpu cannot be scrolled")
+            .to_string();
+        assert!(message.contains("cpu"), "{message}");
+
+        let fine = r#"
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["light"]
+
+[module.light]
+source = "backlight"
+scroll = "5%"
+"#;
+        let config = Config::parse(fine).expect("a backlight can be scrolled");
+        let module = config
+            .modules()
+            .find(|m| m.name == "light")
+            .expect("the module is there");
+        assert_eq!(module.scroll, Some(5.0));
+    }
+
+    #[test]
+    fn a_scroll_step_is_a_percentage_or_an_error_saying_so() {
+        for written in ["0%", "101%", "some"] {
+            assert!(parse_percent(written).is_err(), "{written} was accepted");
+        }
+        assert_eq!(parse_percent("5%").ok(), Some(5.0));
+        assert_eq!(parse_percent(" 2.5 ").ok(), Some(2.5));
     }
 
     #[test]

@@ -23,6 +23,8 @@ This is the **V0** milestone from [spec.md](spec.md).
 - module state styling, keyed on a value, on a named field, on how the source
   rates itself, or on hover
 - `format_alt`: a second wording a left click swaps to and back
+- `scroll = "5%"`: scrolling over a backlight or volume module changes it, and a
+  middle click mutes; dbar sets both itself rather than running a helper
 - `signal = N`: read a source again on SIGRTMIN+N
 - `left` / `center` / `right` positions holding groups of modules
 - rounded group and module backgrounds

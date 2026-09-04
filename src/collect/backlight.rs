@@ -97,6 +97,48 @@ fn name_of(device: &Path) -> Value {
     }
 }
 
+/// Move the brightness by a share of the controller's whole range.
+///
+/// A share of the range rather than of the current value: a step that shrinks as the panel
+/// darkens takes ever smaller bites and never arrives at either end.
+///
+/// Writing the file is the whole operation. The kernel then notifies the watcher, which is
+/// what puts the new number on the bar - so what is drawn is what the hardware accepted,
+/// never what dbar hoped it would.
+pub fn adjust(step: f64) -> Result<()> {
+    adjust_in(Path::new(CLASS), step)
+}
+
+fn adjust_in(class: &Path, step: f64) -> Result<()> {
+    let device = pick(class).context("no backlight controller to change")?;
+    let max = number(&device.join("max_brightness"))?;
+    let current = number(&device.join("brightness"))?;
+    if max == 0 {
+        bail!("{} reports a maximum brightness of zero", device.display());
+    }
+
+    let moved = current as f64 + step * max as f64 / 100.0;
+    let wanted = moved.round().clamp(0.0, max as f64) as u64;
+    // A step too small to move an integer still has to move: on a panel counting to 10, a
+    // 5% notch would otherwise do nothing at all, for ever.
+    let wanted = match (wanted == current, step > 0.0) {
+        (true, true) => (current + 1).min(max),
+        (true, false) => current.saturating_sub(1),
+        (false, _) => wanted,
+    };
+    if wanted == current {
+        return Ok(());
+    }
+
+    let path = device.join("brightness");
+    std::fs::write(&path, wanted.to_string()).with_context(|| {
+        format!(
+            "writing {}; dbar changes the brightness itself, which needs write access -              the usual way is membership of the `video` group",
+            path.display()
+        )
+    })
+}
+
 /// The file the kernel notifies on when the brightness changes.
 ///
 /// `brightness` is what was last asked for; `actual_brightness` is what the panel is
@@ -155,6 +197,44 @@ mod tests {
             std::fs::write(dir.join("max_brightness"), format!("{max}\n")).expect("writable");
         }
         root
+    }
+
+    fn brightness_of(root: &Path, device: &str) -> u64 {
+        number(&root.join(device).join("brightness")).expect("the fixture holds a number")
+    }
+
+    #[test]
+    fn a_scroll_moves_a_share_of_the_whole_range() {
+        let root = class("adjust", &[("intel_backlight", 48, 96)]);
+        adjust_in(&root, 25.0).expect("the fixture is writable");
+        assert_eq!(brightness_of(&root, "intel_backlight"), 72);
+        adjust_in(&root, -25.0).expect("the fixture is writable");
+        assert_eq!(brightness_of(&root, "intel_backlight"), 48);
+    }
+
+    #[test]
+    fn a_step_never_runs_past_either_end() {
+        let root = class("clamp", &[("intel_backlight", 90, 96)]);
+        adjust_in(&root, 50.0).expect("writable");
+        assert_eq!(brightness_of(&root, "intel_backlight"), 96);
+        adjust_in(&root, -500.0).expect("writable");
+        assert_eq!(brightness_of(&root, "intel_backlight"), 0);
+    }
+
+    #[test]
+    fn a_step_too_small_to_land_on_a_new_number_still_moves() {
+        // A panel counting to ten has no 5% to give, and a scroll that does nothing is a
+        // broken scroll rather than a subtle one.
+        let root = class("coarse", &[("intel_backlight", 5, 10)]);
+        adjust_in(&root, 5.0).expect("writable");
+        assert_eq!(brightness_of(&root, "intel_backlight"), 6);
+        adjust_in(&root, -5.0).expect("writable");
+        assert_eq!(brightness_of(&root, "intel_backlight"), 5);
+    }
+
+    #[test]
+    fn a_machine_with_no_backlight_says_so_rather_than_writing_somewhere_else() {
+        assert!(adjust_in(Path::new("/nonexistent/backlight"), 5.0).is_err());
     }
 
     #[test]

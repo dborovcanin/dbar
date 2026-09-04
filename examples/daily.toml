@@ -297,6 +297,10 @@ icon = "wifi-off"
 # the moment one is plugged in.
 [module.volume]
 source = "audio"
+# Scroll over it to change the volume, middle click to mute. dbar sets it itself
+# rather than running a helper, and shows what PipeWire accepted rather than what
+# was asked for.
+scroll = "5%"
 format = " $volume.n(w:4) "
 format_alt = " $volume.n(w:4)  $device "
 style = "panel"
@@ -314,6 +318,10 @@ icon = "volume-muted"
 # never in between - no interval, and nothing to press after a brightness key.
 [module.brightness]
 source = "backlight"
+# Scrolling writes the controller's own file, which needs write access to it -
+# on most systems that is membership of the `video` group. The number that then
+# appears is the one the panel accepted, reported back by the kernel.
+scroll = "5%"
 format = " $brightness.n(w:4) "
 style = "panel"
 icon = "brightness"

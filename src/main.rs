@@ -150,7 +150,8 @@ fn main() -> Result<()> {
     // own, and the reading arrives here finished.
     if config_collectors.contains_key(&crate::collect::Which::Audio) {
         let (audio_tx, audio_rx) = calloop::channel::channel();
-        crate::collect::audio::spawn(audio_tx)?;
+        let commands = crate::collect::audio::spawn(audio_tx)?;
+        app.set_audio(commands);
         handle
             .insert_source(audio_rx, |event, _, app: &mut App| {
                 if let calloop::channel::Event::Msg(reading) = event {

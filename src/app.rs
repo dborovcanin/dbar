@@ -33,7 +33,9 @@ use crate::collect::{Registry, Which, watch};
 use crate::config::{Config, Edge};
 use crate::layout::{self, Frame, Inputs};
 use crate::render;
-use crate::status::{ActionTarget, ClickEvent, I3BarProvider, StatusEvent, StatusItem, i3bar};
+use crate::status::{
+    ActionTarget, ClickEvent, Control, I3BarProvider, StatusEvent, StatusItem, i3bar,
+};
 use crate::sway::{self, SwayEvent, SwayState};
 use crate::text::TextRenderer;
 
@@ -66,6 +68,10 @@ pub struct App {
     /// Whether a timer is waiting to read collectors. False once every source left is
     /// watched, since then there is nothing to wait for.
     collect_scheduled: bool,
+    /// The way into the PipeWire thread, when a module can change the volume.
+    audio: Option<crate::collect::audio::Commands>,
+    /// Whether a failed control has already been reported, so a scroll logs once.
+    control_warned: bool,
     /// Workspaces and the focused window, when a compositor is talking to us.
     sway: SwayState,
     frame: Frame,
@@ -151,6 +157,8 @@ impl App {
             alt: std::collections::HashSet::new(),
             signals: config_signals,
             collect_scheduled: true,
+            audio: None,
+            control_warned: false,
             provider,
             items: Vec::new(),
             sway: SwayState::default(),
@@ -280,6 +288,57 @@ impl App {
             self.invalidate();
         }
         self.native.next_due()
+    }
+
+    /// Change what a module is showing, because someone scrolled or clicked on it.
+    ///
+    /// The bar does not record what it asked for. The brightness comes back through the
+    /// watcher and the volume through PipeWire, so what is drawn is what the hardware
+    /// accepted rather than what dbar hoped for.
+    fn control(&mut self, what: Control, step: f64, button: u32) {
+        // The i3bar numbering the pointer handler already speaks: 4 is a notch up, 5 a
+        // notch down, 2 the middle button.
+        let delta = match button {
+            4 => step,
+            5 => -step,
+            _ => 0.0,
+        };
+        match (what, button) {
+            (Control::Volume, 2) => self.tell_audio(crate::collect::audio::Command::ToggleMute),
+            (Control::Volume, 4 | 5) => {
+                self.tell_audio(crate::collect::audio::Command::Volume(delta))
+            }
+            (Control::Brightness, 4 | 5) => {
+                if let Err(e) = crate::collect::backlight::adjust(delta) {
+                    // Once: a scroll is a dozen notches, and a dozen identical lines say
+                    // nothing the first did not.
+                    if !self.control_warned {
+                        log::warn!("the brightness could not be changed: {e:#}");
+                        self.control_warned = true;
+                    }
+                    return;
+                }
+                self.control_warned = false;
+                // The watcher reports this a moment later anyway; asking now means the
+                // number moves with the scroll rather than after it.
+                self.native.refresh(&Which::Backlight);
+                self.collect();
+            }
+            _ => {}
+        }
+    }
+
+    fn tell_audio(&self, command: crate::collect::audio::Command) {
+        if let Some(commands) = &self.audio
+            && commands.send(command).is_err()
+        {
+            log::warn!("the volume could not be changed: PipeWire is not listening");
+        }
+    }
+
+    /// Where to send what a click on a volume module asks for.
+    pub fn set_audio(&mut self, commands: crate::collect::audio::Commands) {
+        self.audio = Some(commands);
     }
 
     /// Take a reading a source pushed of its own accord, like the volume from PipeWire.
@@ -474,6 +533,7 @@ impl App {
                     sway::run_command(&command);
                 }
             }
+            ActionTarget::Control { what, step } => self.control(what, step, button),
             ActionTarget::I3Bar { name, instance } => {
                 let event = ClickEvent {
                     name: name.as_deref(),

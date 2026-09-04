@@ -176,6 +176,19 @@ pub enum ActionTarget {
     },
     /// Run a compositor command.
     Sway(String),
+    /// Change what the module is showing, by the step a scroll notch is worth.
+    ///
+    /// The bar is the control as well as the display: scrolling over the brightness is
+    /// how a person expects to change it, and having to bind a key to a helper that then
+    /// signals the bar is a worse version of the same thing.
+    Control { what: Control, step: f64 },
+}
+
+/// Something the bar can change, as well as show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Control {
+    Brightness,
+    Volume,
 }
 
 /// One thing the bar can show, independent of where it came from.
