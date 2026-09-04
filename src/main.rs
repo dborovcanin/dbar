@@ -92,7 +92,7 @@ fn main() -> Result<()> {
     // A native configuration runs no child process at all.
     let (status_tx, status_rx) = calloop::channel::channel();
     let provider = if config.needs_provider() {
-        Some(I3BarProvider::spawn(&config.status, status_tx)?)
+        Some(I3BarProvider::spawn(&config.i3bar, status_tx)?)
     } else {
         log::info!("no module reads from a status provider, so none is started");
         None

@@ -9,6 +9,7 @@ use crate::config::{
     Config, Direction, EdgeShape, Edges, Group as GroupCfg, Module as ModuleCfg, Separator,
     SeparatorColor, SeparatorShape, Source, StateFlags, Style,
 };
+use crate::format::Format;
 use crate::icon::{self, Icon};
 use crate::status::{ActionTarget, Fields, StatusItem, Value};
 use crate::sway::SwayState;
@@ -23,6 +24,8 @@ pub struct Inputs<'a> {
     /// The latest reading from each collector dbar runs itself.
     pub native: &'a Registry,
     pub sway: &'a SwayState,
+    /// Modules currently showing their second wording, by name.
+    pub alt: &'a std::collections::HashSet<String>,
 }
 
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
@@ -59,6 +62,8 @@ pub struct PlacedModule {
     pub radius: f32,
     /// What a click here does, if anything.
     pub action: Option<ActionTarget>,
+    /// The module's name, when it has a second wording a click can swap to.
+    pub alt: Option<String>,
 }
 
 /// A transition drawn in the gap between two neighbouring modules.
@@ -174,6 +179,17 @@ fn truncate(text: &str, budget: f32, measure: &mut dyn Measure) -> String {
     format!("{}{ELLIPSIS}", text[..cuts[best]].trim_end())
 }
 
+/// The wording a module is currently showing.
+///
+/// A module with a second wording keeps both parsed; which one is drawn is the only thing
+/// a click changes, so nothing has to be re-read or re-collected to swap them.
+fn wording<'g>(module: &'g ModuleCfg, alt: &std::collections::HashSet<String>) -> &'g Format {
+    match module.format_alt.as_ref() {
+        Some(second) if alt.contains(&module.name) => second,
+        _ => &module.format,
+    }
+}
+
 /// Space between an icon and the text beside it, as a fraction of the icon size.
 const ICON_GAP: f32 = 0.4;
 
@@ -190,6 +206,7 @@ struct SizedModule {
     foreground: Color,
     background: Color,
     action: Option<ActionTarget>,
+    alt: Option<String>,
 }
 
 /// Colour used for messages dbar generates itself, matching the i3bar convention.
@@ -200,8 +217,9 @@ struct Candidate<'g> {
     module: &'g ModuleCfg,
     text: String,
     flags: StateFlags,
-    /// The number thresholds and graded icons key on, when the source published one.
-    value: Option<f64>,
+    /// What the source published, so a threshold can read the value it names rather than
+    /// the one the format happened to show.
+    values: Fields,
     /// Colours the source asked for, which win over the style's own.
     foreground: Option<Color>,
     background: Option<Color>,
@@ -217,12 +235,13 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
 
     let from_item = |module: &'g ModuleCfg, item: &StatusItem| Candidate {
         module,
-        text: module.format.render(&item.fields),
+        text: wording(module, inputs.alt).render(&item.fields),
         flags: StateFlags {
             urgent: item.urgent,
+            state: item.state,
             ..StateFlags::default()
         },
-        value: item.fields.primary().and_then(|v| v.num()),
+        values: item.fields.clone(),
         foreground: item.foreground,
         background: item.background,
         action: item.action.clone(),
@@ -243,9 +262,12 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                 if let Some(reading) = inputs.native.reading(which) {
                     out.push(Candidate {
                         module,
-                        text: module.format.render(&reading.fields),
-                        flags: StateFlags::default(),
-                        value: reading.fields.primary().and_then(|v| v.num()),
+                        text: wording(module, inputs.alt).render(&reading.fields),
+                        flags: StateFlags {
+                            state: reading.state,
+                            ..StateFlags::default()
+                        },
+                        values: reading.fields.clone(),
                         foreground: None,
                         background: None,
                         action: None,
@@ -265,9 +287,9 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     fields.set("title", Value::Text(title.clone()));
                     out.push(Candidate {
                         module,
-                        text: module.format.render(&fields),
+                        text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
-                        value: None,
+                        values: fields,
                         foreground: None,
                         background: None,
                         action: None,
@@ -280,13 +302,14 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     fields.set("name", Value::Text(workspace.name.clone()));
                     out.push(Candidate {
                         module,
-                        text: module.format.render(&fields),
+                        text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags {
                             urgent: workspace.urgent,
                             focused: workspace.focused,
                             visible: workspace.visible,
+                            ..StateFlags::default()
                         },
-                        value: None,
+                        values: fields.clone(),
                         foreground: None,
                         background: None,
                         // Switching is what clicking a workspace is for.
@@ -319,7 +342,7 @@ fn size_group(
             module,
             text: content,
             flags,
-            value,
+            values,
             foreground,
             background,
             action,
@@ -328,16 +351,22 @@ fn size_group(
         if content.is_empty() {
             continue;
         }
-        // The state rules and the graded icons both key on the source's own number, not
-        // on whatever the text happens to say.
+        // The state rules and the graded icons both key on the source's own numbers, not
+        // on whatever the text happens to say. A rule naming a field reads that one; the
+        // rest read whichever value the source is mainly about.
+        let bound = |rule: &crate::config::StateRule| match &rule.field {
+            Some(name) => values.get(name).and_then(|v| v.num()),
+            None => values.primary().and_then(|v| v.num()),
+        };
         let resolve = |hovered: bool, text: &str| {
             module
                 .states
                 .iter()
-                .find(|rule| rule.matches(flags, hovered, value, text))
+                .find(|rule| rule.matches(flags, hovered, bound(rule), text))
                 .map(|rule| rule.style)
                 .unwrap_or(module.style)
         };
+        let value = values.primary().and_then(|v| v.num());
         let style = resolve(false, &content);
 
         // A provider often has to spell a state into the text for a rule to match on. Once
@@ -345,7 +374,7 @@ fn size_group(
         let content = match module
             .states
             .iter()
-            .find(|rule| rule.strip && rule.matches(flags, false, value, &content))
+            .find(|rule| rule.strip && rule.matches(flags, false, bound(rule), &content))
         {
             Some(rule) => {
                 let needle = rule.contains.as_deref().unwrap_or_default();
@@ -412,6 +441,7 @@ fn size_group(
             foreground: foreground.unwrap_or(style.foreground),
             background: background.unwrap_or(style.background),
             action,
+            alt: module.format_alt.is_some().then(|| module.name.clone()),
         });
     }
     if modules.is_empty() {
@@ -514,6 +544,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             background,
             radius: paint.radius,
             action: m.action,
+            alt: m.alt,
         });
         x += m.width;
     }
@@ -627,6 +658,7 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
                 foreground: FAULT_COLOR,
                 background: Color::TRANSPARENT,
                 radius: 0.0,
+                alt: None,
             }],
             separators: Vec::new(),
         }],
@@ -682,11 +714,21 @@ mod tests {
     }
 
     fn frame_with(config: &str, items: &[StatusItem], native: Registry) -> Frame {
+        frame_showing(config, items, native, &Default::default())
+    }
+
+    fn frame_showing(
+        config: &str,
+        items: &[StatusItem],
+        native: Registry,
+        alt: &std::collections::HashSet<String>,
+    ) -> Frame {
         let cfg = Config::parse(config).expect("test config parses");
         let inputs = Inputs {
             items,
             native: &native,
             sway: &SwayState::default(),
+            alt,
         };
         compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
     }
@@ -856,6 +898,150 @@ format = "cpu{ $percent}"
         // No percentage in the text, so the source published none and the group goes.
         let frame = frame_of(config, &[item("cpu", "busy")]);
         assert_eq!(frame.groups[0].modules[0].text, "cpu");
+    }
+
+    #[test]
+    fn a_click_target_marks_a_module_that_has_a_second_wording() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu", "mem"]
+
+[module.cpu]
+padding = 0
+format_alt = "$percent"
+
+[module.mem]
+padding = 0
+"##;
+        let frame = frame_of(config, &[item("cpu", "a"), item("mem", "b")]);
+        assert_eq!(frame.groups[0].modules[0].alt.as_deref(), Some("cpu"));
+        assert_eq!(frame.groups[0].modules[1].alt, None);
+    }
+
+    #[test]
+    fn the_second_wording_is_what_is_drawn_once_it_is_showing() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+padding = 0
+format = "short"
+format_alt = "the long way round"
+"##;
+        let showing = std::collections::HashSet::from(["cpu".to_string()]);
+        let plain = frame_of(config, &[item("cpu", "x")]);
+        assert_eq!(plain.groups[0].modules[0].text, "short");
+
+        let swapped = frame_showing(
+            config,
+            &[item("cpu", "x")],
+            Registry::new(&Default::default()),
+            &showing,
+        );
+        assert_eq!(swapped.groups[0].modules[0].text, "the long way round");
+    }
+
+    #[test]
+    fn a_rule_can_key_on_how_the_source_rates_itself() {
+        let config = r##"
+[colors]
+bad = "#ff0000"
+
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+source = "cpu"
+format = "x"
+
+[module.cpu.states.broken]
+state = "error"
+foreground = "$bad"
+"##;
+        let mut fields = Fields::default();
+        fields.set(
+            "utilization",
+            Value::Num {
+                v: 1.0,
+                unit: crate::status::Unit::Percent,
+            },
+        );
+        fields.set_primary("utilization");
+
+        let working = Registry::fixture(
+            Which::Cpu,
+            Reading {
+                fields: fields.clone(),
+                state: State::Idle,
+            },
+        );
+        assert_ne!(
+            frame_with(config, &[], working).groups[0].modules[0].foreground,
+            Color::rgba(0xff, 0, 0, 0xff)
+        );
+
+        let broken = Registry::fixture(
+            Which::Cpu,
+            Reading {
+                fields,
+                state: State::Error,
+            },
+        );
+        assert_eq!(
+            frame_with(config, &[], broken).groups[0].modules[0].foreground,
+            Color::rgba(0xff, 0, 0, 0xff)
+        );
+    }
+
+    #[test]
+    fn a_threshold_can_read_a_field_other_than_the_main_one() {
+        let config = r##"
+[colors]
+warn = "#ffff00"
+
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["mem"]
+
+[module.mem]
+source = "memory"
+format = "x"
+
+[module.mem.states.swapping]
+field = "swap_percent"
+above = 20
+foreground = "$warn"
+"##;
+        let unit = crate::status::Unit::Percent;
+        let mut fields = Fields::default();
+        // The main value is calm; the one the rule names is not.
+        fields.set("percent", Value::Num { v: 5.0, unit });
+        fields.set("swap_percent", Value::Num { v: 90.0, unit });
+        fields.set_primary("percent");
+
+        let native = Registry::fixture(
+            Which::Memory,
+            Reading {
+                fields,
+                state: State::Idle,
+            },
+        );
+        assert_eq!(
+            frame_with(config, &[], native).groups[0].modules[0].foreground,
+            Color::rgba(0xff, 0xff, 0, 0xff)
+        );
     }
 
     #[test]

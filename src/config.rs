@@ -15,7 +15,7 @@ use crate::collect::Which;
 use crate::color::Color;
 use crate::format::Format;
 use crate::icon::Icon;
-use crate::status::FieldSpec;
+use crate::status::{FieldSpec, State};
 
 pub const DEFAULT_CONFIG: &str = include_str!("../examples/config.toml");
 
@@ -135,8 +135,8 @@ pub enum SeparatorColor {
 struct RawConfig {
     #[serde(default)]
     bar: RawBar,
-    #[serde(default)]
-    status: RawStatus,
+    #[serde(default, rename = "i3bar")]
+    i3bar: RawI3Bar,
     #[serde(default)]
     colors: HashMap<String, String>,
     #[serde(default)]
@@ -186,21 +186,14 @@ struct RawBarBackground {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawStatus {
-    #[serde(default = "default_status_command")]
+struct RawI3Bar {
+    #[serde(default = "default_i3bar_command")]
     command: String,
     #[serde(default)]
     args: Vec<String>,
-    /// Names for the provider's blocks, in the order it emits them. External mode only.
+    /// Names for the provider's blocks, in the order it emits them.
     #[serde(default)]
-    blocks: Vec<String>,
-    /// `[[status.block]]` entries. Their presence switches to generated mode: dbar writes
-    /// the provider's own configuration and starts it against that.
-    #[serde(default, rename = "block")]
-    block: Vec<toml::Table>,
-    /// Passed through to the generated configuration verbatim.
-    theme: Option<toml::Table>,
-    icons: Option<toml::Table>,
+    names: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -275,6 +268,8 @@ struct RawModule {
     source: Option<String>,
     /// What the module says, written against the source's fields.
     format: Option<String>,
+    /// A second wording, which a left click swaps to and back.
+    format_alt: Option<String>,
     /// How often to read, for a source dbar measures itself: "2s", "500ms", "1m".
     interval: Option<String>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
@@ -288,6 +283,12 @@ struct RawModule {
 struct RawState {
     /// Name of a `[style.*]` table whose keys are applied over the module's own.
     style: Option<String>,
+    /// Matches when the source itself rates what it is reporting this way: "good",
+    /// "warning", "critical", "error".
+    state: Option<String>,
+    /// The field a threshold applies to. Without it, thresholds read whichever value the
+    /// source nominated as the one it is mainly about.
+    field: Option<String>,
     /// Matches when the block's percentage is under this.
     below: Option<f32>,
     /// Matches when the block's percentage is over this.
@@ -328,7 +329,7 @@ fn default_font() -> String {
 fn default_true() -> bool {
     true
 }
-fn default_status_command() -> String {
+fn default_i3bar_command() -> String {
     "i3status-rs".to_string()
 }
 fn default_separator_width() -> f32 {
@@ -353,15 +354,12 @@ impl Default for RawBar {
     }
 }
 
-impl Default for RawStatus {
+impl Default for RawI3Bar {
     fn default() -> Self {
-        RawStatus {
-            command: default_status_command(),
+        RawI3Bar {
+            command: default_i3bar_command(),
             args: Vec::new(),
-            blocks: Vec::new(),
-            block: Vec::new(),
-            theme: None,
-            icons: None,
+            names: Vec::new(),
         }
     }
 }
@@ -373,7 +371,7 @@ impl Default for RawStatus {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bar: Bar,
-    pub status: Status,
+    pub i3bar: I3Bar,
     /// Groups per position, in `POSITIONS` order.
     pub positions: [Vec<Group>; 3],
 }
@@ -393,8 +391,9 @@ pub struct Bar {
     pub exclusive: bool,
 }
 
+/// How to start an external i3bar-protocol provider, when a module reads from one.
 #[derive(Debug, Clone)]
-pub struct Status {
+pub struct I3Bar {
     pub command: String,
     pub args: Vec<String>,
     /// Stable names for the provider's blocks, by position.
@@ -402,44 +401,7 @@ pub struct Status {
     /// The i3bar protocol has no way for a provider to name its blocks usefully -
     /// i3status-rs numbers them - so groups would otherwise have to select on "0", "1",
     /// and silently follow the wrong block whenever the provider's order changed.
-    pub blocks: Vec<String>,
-    /// Set when dbar writes the provider's configuration itself.
-    pub generated: Option<Generated>,
-}
-
-/// A provider configuration dbar writes and owns.
-///
-/// Block bodies are carried as opaque tables, so dbar never models the provider's schema
-/// and does not drift as that schema changes.
-#[derive(Debug, Clone)]
-pub struct Generated {
-    pub theme: Option<toml::Table>,
-    pub icons: Option<toml::Table>,
-    pub blocks: Vec<toml::Table>,
-}
-
-impl Generated {
-    /// Render the provider's configuration file.
-    pub fn to_toml(&self) -> Result<String> {
-        let mut doc = toml::Table::new();
-        if let Some(theme) = &self.theme {
-            doc.insert("theme".to_string(), toml::Value::Table(theme.clone()));
-        }
-        if let Some(icons) = &self.icons {
-            doc.insert("icons".to_string(), toml::Value::Table(icons.clone()));
-        }
-        doc.insert(
-            "block".to_string(),
-            toml::Value::Array(
-                self.blocks
-                    .iter()
-                    .cloned()
-                    .map(toml::Value::Table)
-                    .collect(),
-            ),
-        );
-        toml::to_string_pretty(&doc).context("rendering the generated provider config")
-    }
+    pub names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -493,6 +455,8 @@ pub struct Module {
     pub interval: Option<Duration>,
     /// What the module says, already parsed and checked against the source's fields.
     pub format: Format,
+    /// The wording a left click swaps to, when the config gives one.
+    pub format_alt: Option<Format>,
     pub style: Style,
     /// Checked in order; the first match replaces the module's style.
     pub states: Vec<StateRule>,
@@ -504,6 +468,8 @@ pub struct StateFlags {
     pub urgent: bool,
     pub focused: bool,
     pub visible: bool,
+    /// How the source rates what it is reporting.
+    pub state: State,
 }
 
 /// One conditional restyling of a module.
@@ -513,6 +479,10 @@ pub struct StateRule {
     pub hover: bool,
     pub focused: bool,
     pub visible: bool,
+    /// Matches when the source rates itself this way.
+    pub state: Option<State>,
+    /// The field the bounds read. Without one they read the source's primary value.
+    pub field: Option<String>,
     /// Substring the module's text must contain.
     pub contains: Option<String>,
     /// Whether that substring is removed from the drawn text once matched.
@@ -532,6 +502,11 @@ impl StateRule {
         text: &str,
     ) -> bool {
         if self.urgent && !flags.urgent {
+            return false;
+        }
+        if let Some(state) = self.state
+            && flags.state != state
+        {
             return false;
         }
         if self.hover && !hovered {
@@ -564,6 +539,7 @@ impl StateRule {
             || self.hover
             || self.focused
             || self.visible
+            || self.state.is_some()
             || self.contains.is_some()
             || self.below.is_some()
             || self.above.is_some()
@@ -574,7 +550,7 @@ impl StateRule {
     /// critical state visible while the pointer is over it.
     fn specificity(&self) -> (bool, f32) {
         (
-            !(self.urgent || self.focused || self.contains.is_some()),
+            !(self.urgent || self.focused || self.state.is_some() || self.contains.is_some()),
             self.below
                 .unwrap_or(f32::MAX)
                 .min(self.above.map(|a| 100.0 - a).unwrap_or(f32::MAX)),
@@ -782,7 +758,11 @@ impl Config {
 
         Ok(Config {
             bar,
-            status: resolve_status(&raw.status)?,
+            i3bar: I3Bar {
+                command: raw.i3bar.command.clone(),
+                args: raw.i3bar.args.clone(),
+                names: raw.i3bar.names.clone(),
+            },
             positions,
         })
     }
@@ -808,6 +788,21 @@ impl Config {
             },
         }
     }
+}
+
+/// The names a config uses for how a source rates itself.
+fn parse_state(name: &str) -> Result<State> {
+    Ok(match name {
+        "idle" => State::Idle,
+        "info" => State::Info,
+        "good" => State::Good,
+        "warning" => State::Warning,
+        "critical" => State::Critical,
+        "error" => State::Error,
+        other => {
+            bail!("unknown state {other:?}; expected idle, info, good, warning, critical or error")
+        }
+    })
 }
 
 /// Parse a duration written the way a person would: "500ms", "2s", "1m", "1h".
@@ -857,6 +852,17 @@ fn resolve_group(
     let wildcard = raw_group.modules.iter().any(|m| m == "*");
     let mut modules = Vec::new();
     for module_name in raw_group.modules.iter().filter(|m| *m != "*") {
+        let raw_module = raw.modules.get(module_name);
+        let source = match raw_module.and_then(|m| m.source.as_deref()) {
+            None => Source::Provider,
+            Some(name) => Source::parse(name).ok_or_else(|| {
+                anyhow!(
+                    "module {module_name:?} has unknown source {name:?}; expected one of \
+                     cpu, memory, backlight, time, provider, sway:window or sway:workspaces"
+                )
+            })?,
+        };
+
         let style = match raw.modules.get(module_name) {
             Some(raw_module) => {
                 let start = match &raw_module.style {
@@ -893,11 +899,49 @@ fn resolve_group(
                 let state_style = state_style
                     .overlay(&raw_state.overrides, palette)
                     .with_context(|| format!("in [module.{module_name}.states.{state_name}]"))?;
+                let rule_state = match &raw_state.state {
+                    Some(name) => Some(parse_state(name).with_context(|| {
+                        format!("in [module.{module_name}.states.{state_name}]")
+                    })?),
+                    None => None,
+                };
+                // A field a threshold reads has to be one this source publishes, and it has
+                // to be a number, or the rule could never fire.
+                if let Some(field) = &raw_state.field {
+                    let known = source.fields().iter().find(|f| f.name == field);
+                    match known.map(|f| f.kind) {
+                        Some(crate::status::Kind::Num(_)) => {}
+                        Some(kind) => bail!(
+                            "[module.{module_name}.states.{state_name}] keys on ${field}, \
+                             which is {} rather than a number",
+                            kind.describe()
+                        ),
+                        None => bail!(
+                            "[module.{module_name}.states.{state_name}] keys on ${field}, \
+                             which this module's source does not publish"
+                        ),
+                    }
+                }
+                // Matching on text is what a rule has to do when text is all there is. A
+                // native source publishes values, so a rule that reads its wording would
+                // be reading the format's output rather than what was measured.
+                if (raw_state.contains.is_some() || raw_state.strip)
+                    && !matches!(source, Source::Provider)
+                {
+                    bail!(
+                        "[module.{module_name}.states.{state_name}] matches on text, which \
+                         only makes sense for a module fed by an external provider; key on \
+                         a value or on `state` instead"
+                    );
+                }
+
                 states.push(StateRule {
                     urgent: raw_state.urgent,
                     hover: raw_state.hover,
                     focused: raw_state.focused,
                     visible: raw_state.visible,
+                    state: rule_state,
+                    field: raw_state.field.clone(),
                     contains: raw_state.contains.clone(),
                     strip: raw_state.strip,
                     below: raw_state.below,
@@ -912,17 +956,6 @@ fn resolve_group(
                 .partial_cmp(&b.specificity())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
-
-        let raw_module = raw.modules.get(module_name);
-        let source = match raw_module.and_then(|m| m.source.as_deref()) {
-            None => Source::Provider,
-            Some(name) => Source::parse(name).ok_or_else(|| {
-                anyhow!(
-                    "module {module_name:?} has unknown source {name:?}; expected one of \
-                     cpu, memory, backlight, time, provider, sway:window or sway:workspaces"
-                )
-            })?,
-        };
 
         let interval = match raw_module.and_then(|m| m.interval.as_deref()) {
             Some(written) => Some(
@@ -950,11 +983,20 @@ fn resolve_group(
         )
         .with_context(|| format!("in [module.{module_name}] format"))?;
 
+        let format_alt = match raw_module.and_then(|m| m.format_alt.as_deref()) {
+            Some(written) => Some(
+                resolve_format(source, Some(written))
+                    .with_context(|| format!("in [module.{module_name}] format_alt"))?,
+            ),
+            None => None,
+        };
+
         modules.push(Module {
             name: module_name.clone(),
             source,
             interval,
             format,
+            format_alt,
             style,
             states,
         });
@@ -1007,71 +1049,13 @@ fn resolve_group(
                 source: Source::Provider,
                 interval: None,
                 format: resolve_format(Source::Provider, None)?,
+                format_alt: None,
                 style: fallback,
                 states: Vec::new(),
             }]
         } else {
             modules
         },
-    })
-}
-
-/// Split `[status]` into the two provider modes.
-fn resolve_status(raw: &RawStatus) -> Result<Status> {
-    if raw.block.is_empty() {
-        return Ok(Status {
-            command: raw.command.clone(),
-            args: raw.args.clone(),
-            blocks: raw.blocks.clone(),
-            generated: None,
-        });
-    }
-
-    if !raw.blocks.is_empty() {
-        anyhow::bail!(
-            "[status] sets both `blocks` and [[status.block]]; the first names an external \
-             provider's blocks, the second declares them, so only one applies"
-        );
-    }
-    if !raw.args.is_empty() {
-        anyhow::bail!(
-            "[status] sets both `args` and [[status.block]]; dbar passes the generated \
-             config path as the only argument, so `args` would be ignored"
-        );
-    }
-
-    // Each block's `name` is dbar's handle for it; everything else belongs to the provider.
-    let mut names = Vec::with_capacity(raw.block.len());
-    let mut blocks = Vec::with_capacity(raw.block.len());
-    for (index, table) in raw.block.iter().enumerate() {
-        let mut table = table.clone();
-        let name = match table.remove("name") {
-            Some(toml::Value::String(name)) => name,
-            Some(other) => anyhow::bail!(
-                "[[status.block]] #{} has a non-string name {other}",
-                index + 1
-            ),
-            None => anyhow::bail!(
-                "[[status.block]] #{} needs a `name`, which is how groups refer to it",
-                index + 1
-            ),
-        };
-        if names.contains(&name) {
-            anyhow::bail!("two [[status.block]] entries are both named {name:?}");
-        }
-        names.push(name);
-        blocks.push(table);
-    }
-
-    Ok(Status {
-        command: raw.command.clone(),
-        args: Vec::new(),
-        blocks: names,
-        generated: Some(Generated {
-            theme: raw.theme.clone(),
-            icons: raw.icons.clone(),
-            blocks,
-        }),
     })
 }
 
@@ -1191,11 +1175,21 @@ modules = ["clock"]
 source = "time"
 "##;
         assert!(!Config::parse(native).expect("parses").needs_provider());
+        // The built-in default reads everything itself, so it starts nothing.
         assert!(
-            Config::parse(DEFAULT_CONFIG)
+            !Config::parse(DEFAULT_CONFIG)
                 .expect("parses")
                 .needs_provider()
         );
+
+        let external = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["net"]
+"##;
+        assert!(Config::parse(external).expect("parses").needs_provider());
     }
 
     #[test]
@@ -1230,6 +1224,96 @@ source = "nonesuch"
         let message = format!("{e:#}");
         assert!(message.contains("nonesuch"), "{message}");
         assert!(message.contains("cpu"), "{message}");
+    }
+
+    #[test]
+    fn matching_on_text_is_only_for_provider_modules() {
+        let native = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+source = "cpu"
+
+[module.cpu.states.busy]
+contains = "busy"
+"##;
+        let e = Config::parse(native).expect_err("a native source publishes values, not wording");
+        assert!(format!("{e:#}").contains("text"), "{e:#}");
+
+        // The same rule is exactly right for a module fed rendered text.
+        let provider = native.replace("source = \"cpu\"\n", "");
+        assert!(Config::parse(&provider).is_ok());
+    }
+
+    #[test]
+    fn a_threshold_field_has_to_be_a_number_the_source_publishes() {
+        let template = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["mem"]
+
+[module.mem]
+source = "memory"
+
+[module.mem.states.rule]
+field = "FIELD"
+above = 10
+"##;
+        assert!(Config::parse(&template.replace("FIELD", "swap_percent")).is_ok());
+
+        let unknown = Config::parse(&template.replace("FIELD", "nonesuch"))
+            .expect_err("a field the source does not publish is a mistake");
+        assert!(format!("{unknown:#}").contains("nonesuch"), "{unknown:#}");
+
+        let wrong_kind = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["clock"]
+
+[module.clock]
+source = "time"
+
+[module.clock.states.rule]
+field = "now"
+above = 10
+"##;
+        let e = Config::parse(wrong_kind).expect_err("a bound on a time could never fire");
+        assert!(format!("{e:#}").contains("number"), "{e:#}");
+    }
+
+    #[test]
+    fn state_names_are_the_ones_a_source_can_report() {
+        assert_eq!(parse_state("critical").unwrap(), State::Critical);
+        assert_eq!(parse_state("error").unwrap(), State::Error);
+        let e = parse_state("urgent").expect_err("urgent is a flag, not a rating");
+        assert!(format!("{e:#}").contains("warning"), "{e:#}");
+    }
+
+    #[test]
+    fn a_second_wording_is_checked_like_the_first() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+source = "cpu"
+format_alt = "$nonesuch"
+"##;
+        let e = Config::parse(config).expect_err("format_alt is checked too");
+        let message = format!("{e:#}");
+        assert!(message.contains("format_alt"), "{message}");
+        assert!(message.contains("nonesuch"), "{message}");
     }
 
     #[test]

@@ -2,29 +2,13 @@
 #
 #   dbar -c examples/showcase.toml
 #
-# A realistic bar: every block the provider sends appears exactly once, spread
-# across four groups and all three positions, each group using a different
-# separator shape.
+# A realistic bar, mixing the two kinds of module dbar has: the ones it reads
+# itself, and the ones an external i3bar-protocol provider sends. Everything
+# appears exactly once, spread across six groups and all three positions, each
+# group using a different separator shape.
 #
-# Blocks are named by # ---------------------------------------------------------------------------
-# Status provider
-#
-# Declaring blocks here is "generated mode": dbar writes the provider's own
-# configuration into $XDG_RUNTIME_DIR/dbar/provider.toml and starts it against
-# that, so there is one file to maintain instead of two.
-#
-# Every key except `name` is passed through to the provider untouched, so dbar
-# does not model its schema and does not drift as that schema changes. `name` is
-# dbar's own handle, which the groups and modules below refer to.
-#
-# To drive an external provider instead, drop the [[status.block]] entries and
-# use `args` with `blocks` to name what it emits by position:
-#
-#   [status]
-#   command = "i3status-rs"
-#   args = ["/path/to/its/config.toml"]
-#   blocks = ["cpu", "memory", ...]
-# ---------------------------------------------------------------------------
+# See examples/config.toml for a bar that reads everything itself and starts no
+# child process at all.
 
 [bar]
 height = 34
@@ -37,79 +21,22 @@ font = "sans-serif 15"
 icon_size = 20
 exclusive = true       # default: true; reserve the space so windows do not sit under the bar
 
-[status]
+# ---------------------------------------------------------------------------
+# External status provider
+#
+# Only needed for what dbar cannot yet read itself: here, disk, wifi, volume and
+# battery. The provider is started with `args` and its own configuration file.
+#
+# The i3bar protocol gives blocks no names worth selecting on - i3status-rs
+# numbers them - so `names` says what they are, in the order the provider emits
+# them. Get the order wrong and a module follows the wrong block, so the names
+# are held back until the counts agree.
+# ---------------------------------------------------------------------------
+
+[i3bar]
 command = "i3status-rs"
-
-# "native" leaves colors and separators to dbar rather than baking them into the
-# protocol output. "none" is not "no icon": it substitutes short text labels, so
-# "$icon" reads CPU, MEM, DISK. Set icons = "material-nf" for glyphs, and pair it
-# with a font that carries them.
-[status.theme]
-theme = "native"
-
-[status.icons]
-icons = "none"
-
-# dbar draws its own icons, so the provider's text labels are turned off. What
-# is left are markers for the states a module cannot otherwise detect: the sound
-# block signals headphones and mute only through its icon, so those keep a word
-# for a state rule to match on, and `strip` removes it once matched.
-[status.icons.overrides]
-volume = ""
-volume_muted = "MUTED"
-headphones = "HEAD "
-bat = ""
-bat_charging = ""
-
-[[status.block]]
-name = "cpu"
-block = "cpu"
-format = " $utilization "
-
-# format_alt toggles on click, and dbar forwards clicks, so this expands to
-# used/total when clicked and collapses again.
-[[status.block]]
-name = "memory"
-block = "memory"
-format = " $mem_used_percents "
-format_alt = " $mem_used/$mem_total "
-
-[[status.block]]
-name = "disk"
-block = "disk_space"
-path = "/"
-format = " $free "
-
-# Signal strength, so the graded wifi icon has a percentage to read.
-[[status.block]]
-name = "wifi"
-block = "net"
-format = " $signal_strength "
-
-[[status.block]]
-name = "volume"
-block = "sound"
-format = " $icon$volume|$icon "
-
-[[status.block]]
-name = "brightness"
-block = "backlight"
-format = " $brightness "
-
-# Each state gets its own wording, so the module can tell them apart without
-# depending on which icon set is in use.
-[[status.block]]
-name = "battery"
-block = "battery"
-format = " $percentage "
-charging_format = " CHARGING $percentage "
-full_format = " $percentage "
-
-[[status.block]]
-name = "clock"
-block = "time"
-interval = 5
-format = " $timestamp.datetime(f:'%a %d %b %H:%M') "
+args = ["~/.config/i3status-rust/config.toml"]
+names = ["disk", "wifi", "volume", "battery"]
 
 # ---------------------------------------------------------------------------
 # Named colors, referenced elsewhere as "$name"
@@ -436,72 +363,78 @@ source = "sway:window"
 style = "plain"
 max_width = 320
 
+# `source` says where a module's content comes from, and `format` is what it
+# says, written against the fields that source publishes:
+#
+#   cpu               $utilization
+#   memory            $percent $used $total $available $swap_*
+#   backlight         $brightness $device
+#   time              $now
+#   provider          $text $percent
+#   sway:window       $title
+#   sway:workspaces   $name
+#
+# The first four are read by dbar itself and take an `interval`, which needs a
+# unit. The rest arrive from elsewhere, and how often is not dbar's business.
+# Every source has a default format, so a module wanting the ordinary thing
+# says only where it comes from.
+#
+# A field can be formatted: $percent.n(w:4) pads to a fixed width so the module
+# stops resizing as the number changes, and $title.str(max:40) caps its length
+# in characters. Text in {braces} disappears whole when a field inside it has
+# nothing to report, and $a|$b|'fallback' says the best thing it can. Write a
+# literal $ or { as $$ or {{. The whole format is itself a group, so a module
+# with nothing to report draws nothing rather than an empty box.
 [module.clock]
+source = "time"
+# Read on the minute rather than drifting from whenever dbar started.
+interval = "1m"
+format = " $now.time(f:'%a %d %b %H:%M') "
 style = "cool"
 icon = "clock"
 
 [module.cpu]
+source = "cpu"
+interval = "2s"
+format = " $utilization.n(w:4) "
 style = "cool"
 icon = "cpu"
 
+# `state` matches how the source rates itself rather than any number it sends.
+# A collector that cannot read says so, and this is how that looks.
+[module.cpu.states.unreadable]
+state = "error"
+style = "critical"
+
+# `format_alt` is a second wording a left click swaps to, and back.
 [module.memory]
+source = "memory"
+interval = "5s"
+format = " $percent.n(w:4) "
+format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
 style = "warm"
 icon = "memory"
 
-# `format` is what a module says, written against the fields its source
-# publishes. Every source has a default, so most modules never need one:
-#
-#   cpu               $utilization
-#   memory            $percent $used $total $available $swap_*
-#   backlight         $brightness $device
-#   time              $now
-#   provider          $text, $percent
-#   sway:window       $title
-#   sway:workspaces   $name
-#
-# The first four are read by dbar itself and take an `interval`; see
-# examples/native.toml. The rest arrive from elsewhere, and how often is not
-# dbar's business.
-#
-# A field can be formatted: $percent.n(w:3) pads to a fixed width so the module
-# stops resizing as the number changes, and $title.str(max:40) caps its length
-# in characters. Text in {braces} disappears whole when a field inside it has
-# nothing to report, and $a|$b|'fallback' says the best thing it can. Write a
-# literal $ or { as $$ or {{. The whole format is itself a group, so a module
-# with nothing to report draws nothing rather than an empty box.
-#
-# The provider sends rendered text, so $text is nearly always what to use here.
-# Native sources publish real values, and formats come into their own there.
+# Thresholds read the value the source nominated as its main one. `field` names
+# a different one, which has to be a number the source actually publishes.
+[module.memory.states.swapping]
+field = "swap_percent"
+above = 20
+style = "warning"
+
+[module.brightness]
+source = "backlight"
+format = " $brightness.n(w:4) "
+style = "plain"
+icon = "brightness"
+
+# The rest come from the provider, which sends rendered text and nothing else.
 [module.disk]
 style = "mint"
 icon = "disk"
-format = "$text"
+format = " $text "
 
-# `format` is what a module says, written against the fields its source
-# publishes. Every source has a default, so most modules never need one:
-#
-#   cpu               $utilization
-#   memory            $percent $used $total $available $swap_*
-#   backlight         $brightness $device
-#   time              $now
-#   provider          $text, $percent
-#   sway:window       $title
-#   sway:workspaces   $name
-#
-# The first four are read by dbar itself and take an `interval`; see
-# examples/native.toml. The rest arrive from elsewhere, and how often is not
-# dbar's business.
-#
-# A field can be formatted: $percent.n(w:3) pads to a fixed width so the module
-# stops resizing as the number changes, and $title.str(max:40) caps its length
-# in characters. Text in {braces} disappears whole when a field inside it has
-# nothing to report, and $a|$b|'fallback' says the best thing it can. Write a
-# literal $ or { as $$ or {{. The whole format is itself a group, so a module
-# with nothing to report draws nothing rather than an empty box.
-#
-# The provider sends rendered text, so $text is nearly always what to use here.
-# Native sources publish real values, and formats come into their own there.
-# Graded icons pick one of five steps from a percentage in their own text.
+# Graded icons pick one of five steps from the percentage the source published.
 [module.wifi]
 style = "plain"
 icon = "wifi"
@@ -514,6 +447,9 @@ icon = "volume"
 # a rule reads it there. "strip" drops the wording once matched, so what is left
 # is the icon saying it. Stripping "MUTED" empties the text, and a module with an
 # icon still draws, so a muted volume is the icon alone.
+#
+# Matching on text is only allowed for provider modules, because text is all the
+# protocol carries. A native source publishes values, so its rules key on those.
 [module.volume.states.muted]
 contains = "MUTED"
 strip = true
@@ -523,10 +459,6 @@ icon = "volume-muted"
 contains = "HEAD"
 strip = true
 icon = "headphones"
-
-[module.brightness]
-style = "plain"
-icon = "brightness"
 
 [module.battery]
 style = "stone"

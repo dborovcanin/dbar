@@ -10,7 +10,6 @@
 
 use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 use anyhow::{Context as _, Result};
@@ -180,20 +179,11 @@ pub struct I3BarProvider {
 impl I3BarProvider {
     /// Spawn the provider and start forwarding its output into `sender`.
     pub fn spawn(
-        cfg: &config::Status,
+        cfg: &config::I3Bar,
         sender: calloop::channel::Sender<StatusEvent>,
     ) -> Result<I3BarProvider> {
-        // In generated mode dbar owns the provider's configuration, and passes its path as
-        // the only argument.
-        let mut args = cfg.args.clone();
-        if let Some(generated) = &cfg.generated {
-            let path = write_generated(generated)?;
-            log::info!("wrote provider config to {}", path.display());
-            args = vec![path.to_string_lossy().into_owned()];
-        }
-
         let mut child = Command::new(&cfg.command)
-            .args(&args)
+            .args(&cfg.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Leave stderr attached so provider diagnostics reach our own log.
@@ -263,23 +253,6 @@ impl Drop for I3BarProvider {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-/// Write the generated provider configuration, and return its path.
-///
-/// It lives in the runtime directory rather than a temporary file, so it survives for the
-/// life of the session and can be read when diagnosing what the provider was told.
-fn write_generated(generated: &config::Generated) -> Result<PathBuf> {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("dbar");
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-
-    let path = dir.join("provider.toml");
-    let body = generated.to_toml()?;
-    std::fs::write(&path, body).with_context(|| format!("writing {}", path.display()))?;
-    Ok(path)
 }
 
 fn read_loop(stdout: std::process::ChildStdout, sender: calloop::channel::Sender<StatusEvent>) {

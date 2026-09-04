@@ -14,8 +14,11 @@ This is the **V0** milestone from [spec.md](spec.md).
 - text rendering with shaping and font fallback (`cosmic-text`)
 - native collectors for cpu, memory, backlight and the clock, read on one shared
   timer that wakes only when something is due
-- i3bar input: any i3bar-compatible provider, `i3status-rs` by default. A config
-  that reads nothing from one starts no child process at all
+- i3bar input under `[i3bar]`: any i3bar-compatible provider, `i3status-rs` by
+  default. A config that reads nothing from one starts no child process at all
+- module state styling, keyed on a value, on a named field, on how the source
+  rates itself, or on hover
+- `format_alt`: a second wording a left click swaps to and back
 - `left` / `center` / `right` positions holding groups of modules
 - rounded group and module backgrounds
 - click forwarding back to the provider (left, middle, right, scroll)
@@ -85,10 +88,6 @@ font = "Inter 10"
 color = "#00000000"   # last two hex digits are alpha
 radius = 0
 
-[status]
-command = "i3status-rs"
-args = []
-
 [colors]
 surface = "#313244cc"
 text = "#cdd6f4"
@@ -100,8 +99,13 @@ groups = ["system"]
 foreground = "$text"  # "$name" refers to a [colors] entry
 padding = 8
 
+[module.cpu]
+source = "cpu"        # read by dbar itself
+interval = "2s"       # needs a unit
+format = " $utilization.n(w:4) "
+
 [group.system]
-modules = ["*"]       # "*" takes every block the provider emits
+modules = ["cpu"]
 background = "$surface"
 radius = 10
 padding = 4
@@ -135,11 +139,13 @@ left out it defaults to 1.4x the font size, so icons scale with the text.
 Fixed: `cpu`, `memory`, `disk`, `clock`, `ethernet`, `headphones`, `wifi-off`,
 `volume-muted`.
 
-Graded: `battery`, `battery-charging`, `wifi`, `volume`, `brightness`. These have five steps and
-pick one by reading a percentage out of the text beside them - a battery at
-`58%` draws a little over half full. Only an `NN%` pattern counts, so text such
-as `92GB`, `23:59` or `3h 5m` leaves a graded icon at its lowest step rather
-than grading on a number that means something else.
+Graded: `battery`, `battery-charging`, `wifi`, `volume`, `brightness`. These
+have five steps and pick one from the value the source published — a battery at
+58% draws a little over half full. A native source publishes what it measured;
+for a provider module, where rendered text is all there is, the percentage is
+read back out of it, and only an `NN%` pattern counts, so text such as `92GB`,
+`23:59` or `3h 5m` leaves the icon at its lowest step rather than grading on a
+number that means something else.
 
 `battery-charging` grades like `battery` and cuts its bolt out of the charge
 bar, so it reads at any level. Nothing selects the off states automatically
@@ -147,17 +153,8 @@ yet; `wifi-off`, `volume-muted` and `headphones` are named outright. Value-drive
 
 #### Provider glyph icons
 
-Alternatively the status provider can emit icons as text. i3status-rs ships
-several icon sets, and a block whose format includes `$icon` picks one up, so
-one line under `[status.icons]` decides what you get:
-
-```toml
-[status.icons]
-icons = "none"          # the default: not "no icon", but short text labels
-# icons = "material-nf" # glyph icons - needs a font that carries them
-```
-
-Glyph sets live in the Unicode private use area, so the font has to carry them.
+Alternatively an external provider can emit icons as text, in which case its own
+configuration decides which set. Glyph sets live in the Unicode private use area, so the font has to carry them.
 Pair one with a proportional Nerd Font such as `DejaVuSansM Nerd Font Propo`, so
 body text still reads like a UI font while the icons resolve from the same face:
 
@@ -255,26 +252,30 @@ icon = "battery-charging"
 ```
 
 A rule matches when every condition it states holds: `below` and `above`
-compare against a percentage in the module's text, `contains` against the text
-itself, `urgent` against the flag the provider sets, `hover` against the
-pointer, and `focused` and `visible` against a workspace. A rule stating no
-condition never fires.
-
-`contains` is what lets one module cover a state the provider only spells out
-in words - a muted volume, a charging battery, headphones plugged in - instead
-of needing a second module for each. `strip` then removes that wording from
-what is drawn, so the marker does its job without being read: the icon says it.
-
-Since dbar draws its own icons, the provider's text labels are usually turned
-off entirely, leaving only the markers a rule needs:
+compare against the value the source nominated as its main one, `field` points
+them at a different value it publishes, `state` matches how the source rates
+what it is reporting, `contains` matches the module's own text, `urgent`
+matches the flag the provider sets, `hover` matches the pointer, and `focused`
+and `visible` match a workspace. A rule stating no condition never fires.
 
 ```toml
-[status.icons.overrides]
-volume = ""             # no "VOL" prefix; dbar draws the icon
-volume_muted = "MUTED"  # kept, because nothing else signals mute
-headphones = "HEAD "    # kept and stripped, so only the icon shows
-bat = ""
+[module.memory.states.swapping]
+field = "swap_percent"  # any number the source publishes
+above = 20
+style = "warning"
+
+[module.cpu.states.unreadable]
+state = "error"         # idle, info, good, warning, critical, error
+style = "critical"
 ```
+
+`contains` and `strip` are only allowed on a module fed by an external
+provider, because rendered text is all that protocol carries. They are what
+lets one module cover a state the provider only spells out in words — a muted
+volume, a charging battery, headphones plugged in — instead of needing a second
+module for each. `strip` then removes that wording from what is drawn, so the
+marker does its job without being read: the icon says it. A native source
+publishes values, so its rules key on those instead.
 
 Rules are checked tightest bound first, so `below = 15` wins over `below = 30`
 at 10%, whatever order they appear in the file. Urgent rules are checked before
@@ -333,49 +334,52 @@ modules = ["cpu", "memory", "time"]
 style = "default"
 ```
 
-### The status provider
+### Sources
 
-The i3bar protocol gives a provider no way to name its blocks usefully -
-`i3status-rs` numbers them `"0"`, `"1"`, ... and rejects a `name` key on a
-block - so dbar names them itself. There are two ways to do that.
-
-**Generated mode**, the default: declare the blocks in dbar's own config. dbar
-writes the provider's configuration to `$XDG_RUNTIME_DIR/dbar/provider.toml`
-and starts it against that, so there is one file to maintain instead of two.
+A module says where its content comes from:
 
 ```toml
-[status]
-command = "i3status-rs"
-
-[status.theme]
-theme = "native"
-
-[[status.block]]
-name = "cpu"                      # dbar's handle for it
-block = "cpu"                     # everything else goes to the provider as-is
-format = " $icon $utilization "
+[module.cpu]
+source = "cpu"        # cpu, memory, backlight, time
+interval = "2s"       # how often dbar reads it; a unit is required
 ```
 
-Every key but `name` is passed through untouched, so dbar models none of the
-provider's schema and does not drift as that schema changes.
+`cpu`, `memory`, `backlight` and `time` are read by dbar itself, from `/proc`
+and `/sys`. They share one timer, which wakes when the earliest is due, reads
+everything that has come due and redraws once — ten modules on one interval
+cost one wake-up between them. The clock lands its readings on the wall clock,
+so a module showing minutes changes when the minute does.
 
-**External mode**: point at a provider that has its own configuration, and name
-what it emits by position.
+A collector that fails keeps its last good reading on screen, says so once in
+the log, and is tried less often until it recovers. `state = "error"` is how a
+config styles that.
+
+`sway:window` and `sway:workspaces` come from the compositor. Everything else
+comes from an external i3bar-protocol provider, which is the default when a
+module names no source at all.
+
+### The i3bar provider
+
+For what dbar cannot read yet — disk, network, audio, battery — point `[i3bar]`
+at a provider with its own configuration:
 
 ```toml
-[status]
+[i3bar]
 command = "i3status-rs"
 args = ["/path/to/its/config.toml"]
-blocks = ["cpu", "memory", "disk", "volume", "clock"]
+names = ["disk", "wifi", "volume", "battery"]
 ```
 
-Either way, groups and modules select on those names:
+The protocol gives a provider no way to name its blocks usefully — `i3status-rs`
+numbers them `"0"`, `"1"`, ... and rejects a `name` key — so `names` says what
+they are, in the order the provider emits them. Groups and modules then select
+on those names:
 
 ```toml
 [group.desktop]
-modules = ["cpu", "memory"]
+modules = ["disk", "wifi"]
 
-[module.cpu]
+[module.disk]
 style = "accent"
 ```
 
@@ -383,6 +387,10 @@ The names are dbar's own; click events still carry the name the provider gave
 the block, so it can route them back. Positions are only trusted once the
 provider has emitted as many blocks as are named — until then the array is
 short and every name after a missing block would land on the wrong one.
+
+**No module reading from a provider means no provider.** dbar starts no child
+process for a configuration that does not need one, which is the case for the
+built-in default.
 
 If a group's module list matches nothing, dbar logs a warning naming the block
 names the provider is actually sending, rather than leaving a blank bar with no

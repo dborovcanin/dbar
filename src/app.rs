@@ -59,6 +59,8 @@ pub struct App {
     items: Vec<StatusItem>,
     /// What dbar measures for itself.
     native: Registry,
+    /// Modules showing their second wording, by name.
+    alt: std::collections::HashSet<String>,
     /// Workspaces and the focused window, when a compositor is talking to us.
     sway: SwayState,
     frame: Frame,
@@ -140,6 +142,7 @@ impl App {
             config,
             text,
             native: Registry::new(&config_collectors),
+            alt: std::collections::HashSet::new(),
             provider,
             items: Vec::new(),
             sway: SwayState::default(),
@@ -174,7 +177,7 @@ impl App {
             }
             StatusEvent::Blocks(blocks) => {
                 self.warn_about_names(&blocks);
-                self.items = i3bar::to_items(&blocks, &self.config.status.blocks);
+                self.items = i3bar::to_items(&blocks, &self.config.i3bar.names);
                 self.fault = None;
                 self.invalidate();
             }
@@ -208,7 +211,7 @@ impl App {
     /// The naming itself happens in the i3bar backend; this is only the explanation of why
     /// a config's names may not have taken effect.
     fn warn_about_names(&mut self, blocks: &[i3bar::I3BarBlock]) {
-        let names = &self.config.status.blocks;
+        let names = &self.config.i3bar.names;
         if names.is_empty() || blocks.len() == names.len() || self.name_count_warned {
             return;
         }
@@ -224,7 +227,7 @@ impl App {
             return;
         }
         log::warn!(
-            "provider sends {} block(s) but [status] blocks names {}; the extra blocks keep \
+            "provider sends {} block(s) but [i3bar] names {}; the extra blocks keep \
              the names the provider gave them",
             blocks.len(),
             names.len()
@@ -273,6 +276,7 @@ impl App {
                     items: &self.items,
                     native: &self.native,
                     sway: &self.sway,
+                    alt: &self.alt,
                 };
                 let frame = layout::compute(
                     &self.config,
@@ -378,6 +382,17 @@ impl App {
             return;
         };
         let (mx, my, mw, mh) = (module.x, module.y, module.width, module.height);
+        // A module with a second wording claims the left button for swapping between them,
+        // which is the whole point of having one. The other buttons carry on as usual.
+        if button == 1
+            && let Some(name) = module.alt.clone()
+        {
+            if !self.alt.remove(&name) {
+                self.alt.insert(name);
+            }
+            self.invalidate();
+            return;
+        }
         // Cloned because acting on the target needs the provider, and the module is
         // borrowed out of the frame we are still holding.
         let Some(action) = module.action.clone() else {

@@ -5,7 +5,10 @@
 #
 #   dbar --print-config > ~/.config/dbar/config.toml
 #
-# See examples/showcase.toml for every key dbar understands.
+# Everything here is read by dbar itself, so nothing else has to be installed,
+# configured or running. See examples/showcase.toml for every key dbar
+# understands, including how to bring in an external i3bar provider for the
+# things dbar cannot read yet.
 
 [bar]
 height = 34
@@ -21,65 +24,83 @@ font = "sans-serif 10"
 color = "#00000000"
 radius = 0
 
-# Declaring blocks here is "generated mode": dbar writes the provider's own
-# configuration and starts it against that, so there is one file to maintain.
-# Every key except `name` is passed through to the provider untouched.
-[status]
-command = "i3status-rs"
-
-[status.theme]
-theme = "native"
-
-[status.icons]
-icons = "none"
-
-[[status.block]]
-name = "cpu"
-block = "cpu"
-format = " $icon $utilization "
-
-[[status.block]]
-name = "memory"
-block = "memory"
-format = " $icon $mem_used_percents "
-
-[[status.block]]
-name = "disk"
-block = "disk_space"
-path = "/"
-format = " $icon $free "
-
-[[status.block]]
-name = "volume"
-block = "sound"
-format = " $icon $volume "
-
-[[status.block]]
-name = "clock"
-block = "time"
-interval = 5
-format = " $icon $timestamp.datetime(f:'%a %d %b %H:%M') "
-
 [colors]
 background = "#1e1e2e"
 surface = "#313244cc"   # alpha cc, so SwayFX blur shows through
 text = "#cdd6f4"
-
-[right]
-groups = ["system"]
+warning = "#f9e2af"
+critical = "#f38ba8"
 
 [style.default]
 foreground = "$text"
 padding = 8
 
+# `source` is what dbar reads; `interval` is how often, and it needs a unit so
+# that "2s" cannot be misread as two of something else. Both the interval and
+# the wording have sensible defaults, so a module that wants the ordinary thing
+# says only where it comes from.
+#
+# The fields a format may name are the ones its source publishes:
+#
+#   cpu         $utilization
+#   memory      $percent $used $total $available
+#               $swap_percent $swap_used $swap_total
+#   backlight   $brightness $device
+#   time        $now
+[module.cpu]
+source = "cpu"
+interval = "2s"
+# A fixed width stops the module resizing every time the number crosses ten.
+format = " $utilization.n(w:4) "
+style = "default"
+icon = "cpu"
+
+[module.cpu.states.busy]
+above = 80
+foreground = "$warning"
+
+[module.memory]
+source = "memory"
+interval = "5s"
+format = " $percent.n(w:4) "
+# A left click swaps to this and back.
+format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
+style = "default"
+icon = "memory"
+
+[module.memory.states.high]
+above = 85
+foreground = "$critical"
+
+# A machine with no backlight publishes nothing for it, and a module with
+# nothing to report is not drawn at all.
+[module.backlight]
+source = "backlight"
+format = " $brightness.n(w:4) "
+style = "default"
+icon = "brightness"
+
+[module.clock]
+source = "time"
+# Read once a minute, and the reading lands on the minute rather than drifting
+# from whenever dbar happened to start.
+interval = "1m"
+format = " $now.time(f:'%a %d %b  %H:%M') "
+style = "default"
+icon = "clock"
+
+[right]
+groups = ["system", "clock"]
+
 [group.system]
-# "*" takes every block the provider emits, in the order it sends them. Naming
-# them explicitly, as showcase.toml does, allows per-module styling.
-modules = ["*"]
+modules = ["cpu", "memory", "backlight"]
 background = "$surface"
 radius = 10
 padding = 4
 spacing = 0
 
-[module.default]
-style = "default"
+[group.clock]
+modules = ["clock"]
+background = "$surface"
+radius = 10
+padding = 4
