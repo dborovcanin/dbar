@@ -207,7 +207,7 @@ different face, leaving them mismatched in weight and size.
 This route leaves the provider choosing which glyph each block gets, and ties
 icon size to the font size. dbar's own icons are independent of both.
 
-### Workspaces and the focused window
+### Workspaces, the focused window and the keyboard layout
 
 These come from the compositor rather than the status provider, so their modules
 say where they are from:
@@ -233,6 +233,25 @@ style = "plain"
 A `sway:workspaces` module expands into one rectangle per workspace, each with
 its own state and its own click target - clicking switches to that workspace.
 `focused` and `visible` join `urgent` as state conditions.
+
+The keyboard layout comes from the same place, and is reported again the moment
+it is switched, so it costs no interval:
+
+```toml
+[module.language]
+source = "sway:language"
+format = " $short "     # "US", from xkb's "English (US)"
+format_alt = " $layout "
+
+[module.language.layouts]
+"English (US)" = "EN"
+"Serbian" = "RS"
+```
+
+xkb names a layout for a person to read and offers no code beside it, so `$short`
+takes the qualifier in brackets where there is one and cuts the name down where
+there is not. `layouts` says what to call a layout instead. With two keyboards
+attached, what is shown follows the one that was switched.
 
 dbar speaks the compositor's IPC directly, so this costs no dependencies. It is
 optional: without a compositor to talk to, these modules simply show nothing and
@@ -471,8 +490,8 @@ where the realtime range starts is decided by the C library — the first few ar
 reserved for the threading implementation — so an absolute number is not
 portable even between two Linux machines.
 
-`sway:window` and `sway:workspaces` come from the compositor. Everything else
-comes from an external i3bar-protocol provider, which is the default when a
+`sway:window`, `sway:workspaces` and `sway:language` come from the compositor.
+Everything else comes from an external i3bar-protocol provider, which is the default when a
 module names no source at all.
 
 ### The i3bar provider

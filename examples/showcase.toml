@@ -200,7 +200,7 @@ icon_size = 20             # default: 1.4x the font size
 # status provider, so their modules say where they are from. A workspace module
 # expands into one rectangle per workspace, each clickable.
 [group.desktop]
-modules = ["workspaces"]
+modules = ["workspaces", "language"]
 background = "$surface"
 radius = 12
 padding = 3
@@ -324,7 +324,9 @@ overlap = 1
 #
 #   style      name of a [style.*] to start from        default: built-in defaults
 #   source     "provider" | "sway:window" |
-#              "sway:workspaces"                        default: "provider"
+#              "sway:workspaces" | "sway:language"      default: "provider"
+#   layouts    what a sway:language module calls each
+#              layout, keyed by xkb's name for it
 #
 # and on a [module.*.states.*]:
 #
@@ -379,6 +381,27 @@ style = "cool"
 urgent = true
 style = "warning"
 
+# The compositor reports the layout of whichever keyboard was last switched, and
+# reports it again as it is switched, so nothing here is on a timer. `$short` is
+# xkb's own name for the layout cut down to a couple of letters; `layouts` says
+# what to call one instead, for the layouts whose abbreviation is not the wording
+# wanted. `$index` is its place in the list the keyboard was configured with,
+# which is what a state rule keys on to avoid depending on xkb's spelling.
+[module.language]
+source = "sway:language"
+format = " $short "
+format_alt = " $layout "
+style = "plain"
+
+[module.language.layouts]
+"English (US)" = "EN"
+"Serbian" = "RS"
+
+[module.language.states.secondary]
+field = "index"
+above = 0
+style = "cool"
+
 # A window title has no length limit of its own, so it is capped here rather
 # than allowed to push the clock aside. What does not fit is cut with an
 # ellipsis.
@@ -400,6 +423,7 @@ max_width = 320
 #   provider          $text $percent
 #   sway:window       $title
 #   sway:workspaces   $name
+#   sway:language     $layout $short $index
 #
 # The first four are read by dbar itself and take an `interval`, which needs a
 # unit. The rest arrive from elsewhere, and how often is not dbar's business.

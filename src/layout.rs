@@ -11,7 +11,7 @@ use crate::config::{
 };
 use crate::format::Format;
 use crate::icon::{self, Icon};
-use crate::status::{ActionTarget, Fields, StatusItem, Value};
+use crate::status::{ActionTarget, Fields, StatusItem, Unit, Value};
 use crate::sway::SwayState;
 
 /// Everything the bar currently knows, whoever it came from.
@@ -302,6 +302,38 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                 if let Some(title) = &inputs.sway.window {
                     let mut fields = Fields::default();
                     fields.set("title", Value::Text(title.clone()));
+                    out.push(Candidate {
+                        module,
+                        text: wording(module, inputs.alt).render(&fields),
+                        flags: StateFlags::default(),
+                        values: fields,
+                        foreground: None,
+                        background: None,
+                        action: None,
+                    });
+                }
+            }
+            Source::SwayLanguage(layouts) => {
+                if let Some(layout) = &inputs.sway.layout {
+                    let mut fields = Fields::default();
+                    // What the module calls this layout if it says, and an abbreviation of
+                    // xkb's own name if it does not.
+                    let short = layouts
+                        .get(&layout.name)
+                        .cloned()
+                        .unwrap_or_else(|| crate::sway::abbreviate(&layout.name));
+                    fields.set("layout", Value::Text(layout.name.clone()));
+                    fields.set("short", Value::Text(short));
+                    fields.set(
+                        "index",
+                        Value::Num {
+                            v: layout.index as f64,
+                            unit: Unit::None,
+                        },
+                    );
+                    // Which layout it is, rather than what it is called: a rule keyed on
+                    // the index survives xkb renaming anything.
+                    fields.set_primary("index");
                     out.push(Candidate {
                         module,
                         text: wording(module, inputs.alt).render(&fields),
@@ -890,6 +922,54 @@ padding = 0
 [module.mem]
 padding = 0
 "##;
+
+    #[test]
+    fn a_language_module_says_what_the_config_calls_the_layout() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["lang"]
+
+[module.lang]
+source = "sway:language"
+padding = 0
+
+[module.lang.layouts]
+"English (US)" = "EN"
+"##;
+        let cfg = Config::parse(config).expect("test config parses");
+        let mut sway = SwayState::default();
+        let render = |sway: &SwayState| {
+            let inputs = Inputs {
+                items: &[],
+                native: &Registry::new(&Default::default()),
+                sway,
+                alt: &Default::default(),
+                collapsed: &Default::default(),
+            };
+            let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
+            frame.groups.first().map(|g| g.modules[0].text.clone())
+        };
+
+        // Nothing to show before the compositor has said anything, the same as a collector
+        // that has not read yet.
+        assert_eq!(render(&sway), None);
+
+        sway.layout = Some(crate::sway::Layout {
+            name: "English (US)".to_string(),
+            index: 0,
+        });
+        assert_eq!(render(&sway).as_deref(), Some(" EN "));
+
+        // A layout the config does not name is abbreviated rather than left out.
+        sway.layout = Some(crate::sway::Layout {
+            name: "Serbian".to_string(),
+            index: 1,
+        });
+        assert_eq!(render(&sway).as_deref(), Some(" SE "));
+    }
 
     #[test]
     fn a_native_module_draws_what_its_collector_measured() {

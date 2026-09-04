@@ -52,6 +52,7 @@ pub enum Icon {
     Headphones,
     Play,
     Pause,
+    Keyboard,
 }
 
 impl Icon {
@@ -73,6 +74,7 @@ impl Icon {
             "headphones" => Icon::Headphones,
             "play" => Icon::Play,
             "pause" => Icon::Pause,
+            "keyboard" | "language" => Icon::Keyboard,
             _ => return None,
         })
     }
@@ -198,6 +200,7 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
         Icon::Headphones => headphones(&mut out),
         Icon::Play => play(&mut out),
         Icon::Pause => pause(&mut out),
+        Icon::Keyboard => keyboard(&mut out),
     }
     IconArt::Paths(out)
 }
@@ -290,6 +293,25 @@ fn ethernet(out: &mut Vec<IconPath>) {
         line(&mut pins, x, 0.62, x, 0.80);
     }
     finish(pins, Ink::Stroke(0.09), out);
+}
+
+fn keyboard(out: &mut Vec<IconPath>) {
+    let mut body = PathBuilder::new();
+    rounded(&mut body, 0.06, 0.28, 0.94, 0.72, 0.08);
+    finish(body, Ink::Stroke(0.07), out);
+
+    // Two rows of keys and a spacebar. Round caps make the short strokes read as keys at
+    // the size a bar draws this.
+    let mut keys = PathBuilder::new();
+    for row in 0..2 {
+        let y = 0.40 + row as f32 * 0.12;
+        for column in 0..4 {
+            let x = 0.19 + column as f32 * 0.18;
+            line(&mut keys, x, y, x + 0.08, y);
+        }
+    }
+    line(&mut keys, 0.32, 0.62, 0.68, 0.62);
+    finish(keys, Ink::Stroke(0.07), out);
 }
 
 fn battery(out: &mut Vec<IconPath>, level: usize) {

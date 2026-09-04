@@ -118,6 +118,8 @@ fn main() -> Result<()> {
     };
 
     let config_collectors = config.collectors();
+    // Read before the config is handed to the app, which is what owns it from here on.
+    let language = config.needs_language();
     let collectors = !config_collectors.is_empty();
     let listening = provider.is_some();
     // A signal brings a reading forward: after `brightnessctl set`, the bar should say so
@@ -215,7 +217,7 @@ fn main() -> Result<()> {
     // The compositor is optional: without it the workspace and window modules simply have
     // nothing to show, and the rest of the bar is unaffected.
     let (sway_tx, sway_rx) = calloop::channel::channel();
-    match crate::sway::spawn(sway_tx) {
+    match crate::sway::spawn(sway_tx, language) {
         Ok(()) => {
             handle
                 .insert_source(sway_rx, |event, _, app: &mut App| {

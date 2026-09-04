@@ -179,7 +179,8 @@ New on `[module.*]`, alongside the existing style cascade and `states`:
 
 ```text
 source     required; "cpu" | "memory" | "backlight" | ... | "i3bar:<name>"
-            | "sway:window" | "sway:workspaces" | "command:<...>"
+            | "sway:window" | "sway:workspaces" | "sway:language"
+            | "command:<...>"
 format     format string; defaults to a sensible per-source default
 format_alt optional; click toggles between the two
 interval   duration string ("2s", "500ms", "1m"); ignored by event-driven sources

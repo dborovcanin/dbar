@@ -4,7 +4,7 @@
 //! `$name` color references and style names into concrete values so that nothing downstream
 //! has to do lookups while rendering.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -90,6 +90,8 @@ pub enum Source {
     SwayWindow,
     /// One entry per workspace, expanded at layout time.
     SwayWorkspaces,
+    /// The active keyboard layout, with the short forms the module gives its layouts.
+    SwayLanguage(BTreeMap<String, String>),
 }
 
 impl Source {
@@ -100,6 +102,7 @@ impl Source {
             Source::Provider => crate::status::i3bar::FIELDS,
             Source::SwayWindow => crate::sway::WINDOW_FIELDS,
             Source::SwayWorkspaces => crate::sway::WORKSPACE_FIELDS,
+            Source::SwayLanguage(_) => crate::sway::LANGUAGE_FIELDS,
         }
     }
 
@@ -113,6 +116,7 @@ impl Source {
             Source::Provider => "$text",
             Source::SwayWindow => "$title",
             Source::SwayWorkspaces => "$name",
+            Source::SwayLanguage(_) => " $short ",
         }
     }
 }
@@ -303,6 +307,10 @@ struct RawModule {
     interface: Option<String>,
     /// Which hwmon chip a `temperature` module reads. Defaults to the processor's own.
     chip: Option<String>,
+    /// What a `sway:language` module calls each layout, keyed by the name xkb gives it.
+    /// A layout named here is what `$short` says; anything else is abbreviated.
+    #[serde(default)]
+    layouts: BTreeMap<String, String>,
     /// Read this module's source again on SIGRTMIN+N.
     signal: Option<i32>,
     /// What one scroll notch over this module is worth: "5%". Only for the sources dbar
@@ -854,6 +862,15 @@ impl Config {
         wanted
     }
 
+    /// Whether anything on the bar shows the keyboard layout.
+    ///
+    /// The compositor is only asked about input devices when there is something to draw
+    /// the answer, so a bar without a language module never asks.
+    pub fn needs_language(&self) -> bool {
+        self.modules()
+            .any(|m| matches!(m.source, Source::SwayLanguage(_)))
+    }
+
     /// Whether anything in this config comes from an external status provider.
     ///
     /// Nothing does on a native configuration, and then there is no child process to run.
@@ -1037,6 +1054,7 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         "provider" => Source::Provider,
         "sway:window" => Source::SwayWindow,
         "sway:workspaces" => Source::SwayWorkspaces,
+        "sway:language" => Source::SwayLanguage(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
         "audio" => Source::Native(Which::Audio),
         "media" => Source::Native(Which::Media),
         "cpu" => Source::Native(Which::Cpu),
@@ -1056,23 +1074,28 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         other => bail!(
             "module {module_name:?} has unknown source {other:?}; expected one of cpu, \
              memory, battery, backlight, load, temperature, disk, network, time, provider, \
-             sway:window or sway:workspaces"
+             sway:window, sway:workspaces or sway:language"
         ),
     };
 
     // A key that belongs to a source this module is not built on would silently do
     // nothing, and silently doing nothing is how a config comes to be wrong for months.
     let misplaced = [
-        ("path", raw.and_then(|m| m.path.as_ref()), "disk"),
+        ("path", raw.is_some_and(|m| m.path.is_some()), "disk"),
         (
             "interface",
-            raw.and_then(|m| m.interface.as_ref()),
+            raw.is_some_and(|m| m.interface.is_some()),
             "network",
         ),
-        ("chip", raw.and_then(|m| m.chip.as_ref()), "temperature"),
+        ("chip", raw.is_some_and(|m| m.chip.is_some()), "temperature"),
+        (
+            "layouts",
+            raw.is_some_and(|m| !m.layouts.is_empty()),
+            "sway:language",
+        ),
     ];
     for (key, given, belongs_to) in misplaced {
-        if given.is_some() && name != belongs_to {
+        if given && name != belongs_to {
             bail!("module {module_name:?} sets `{key}`, which only a {belongs_to} module reads");
         }
     }
@@ -1460,6 +1483,55 @@ format = "$text"
         // `$text` is the provider's field; the window module publishes `$title`.
         let e = Config::parse(config).expect_err("the wrong source's field must be reported");
         assert!(format!("{e:#}").contains("title"), "{e:#}");
+    }
+
+    #[test]
+    fn a_layout_mapping_belongs_to_the_module_that_reads_it() {
+        let config = |source: &str| {
+            format!(
+                r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["lang"]
+
+[module.lang]
+source = "{source}"
+
+[module.lang.layouts]
+"English (US)" = "EN"
+"##
+            )
+        };
+
+        let parsed = Config::parse(&config("sway:language")).expect("parses");
+        assert!(parsed.needs_language());
+        let Source::SwayLanguage(layouts) = &parsed.modules().next().expect("one module").source
+        else {
+            panic!("the module should read the compositor's keyboard layout");
+        };
+        assert_eq!(layouts["English (US)"], "EN");
+
+        // On anything else the table would quietly do nothing, which is how a config comes
+        // to be wrong for months.
+        let e = Config::parse(&config("cpu")).expect_err("a misplaced mapping must be reported");
+        assert!(format!("{e:#}").contains("layouts"), "{e:#}");
+    }
+
+    #[test]
+    fn a_bar_without_a_language_module_never_asks_for_one() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["win"]
+
+[module.win]
+source = "sway:window"
+"##;
+        assert!(!Config::parse(config).expect("parses").needs_language());
     }
 
     #[test]

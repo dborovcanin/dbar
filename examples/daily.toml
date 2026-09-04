@@ -153,8 +153,10 @@ color = "$divider"
 left = "round"
 right = "round"
 
+# The keyboard's layout sits next to the network because both are about what the
+# machine is connected to rather than what it is doing.
 [group.network]
-modules = ["network"]
+modules = ["language", "network"]
 background = "$surface"
 radius = 12
 
@@ -291,6 +293,23 @@ style = "warning"
 [module.temperature.states.hot]
 state = "critical"
 style = "critical"
+
+# The compositor says which layout is active, and says so again the moment it is
+# switched, so this is never read on a timer. A click shows the full name.
+[module.language]
+source = "sway:language"
+format = " $short "
+format_alt = " $layout "
+style = "panel"
+icon = "keyboard"
+
+# What to call each layout, keyed by xkb's own name for it. Optional: a layout
+# with no line here is abbreviated instead, and "English (US)" would be "US".
+# These are the layouts this bar was written on; swap in your own.
+[module.language.layouts]
+"English (US)" = "EN"
+"Serbian (Latin)" = "SR"
+"Serbian" = "RS"
 
 # Follows whichever interface is actually up, so unplugging a cable moves it to
 # the wireless card without a restart.
