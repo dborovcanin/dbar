@@ -474,7 +474,13 @@ pub struct StateRule {
 
 impl StateRule {
     /// Every condition the rule states has to hold. A rule stating none never fires.
-    pub fn matches(&self, flags: StateFlags, hovered: bool, value: Option<u8>, text: &str) -> bool {
+    pub fn matches(
+        &self,
+        flags: StateFlags,
+        hovered: bool,
+        value: Option<f64>,
+        text: &str,
+    ) -> bool {
         if self.urgent && !flags.urgent {
             return false;
         }
@@ -494,13 +500,13 @@ impl StateRule {
         }
         if let Some(limit) = self.below {
             match value {
-                Some(v) if (v as f32) < limit => {}
+                Some(v) if v < limit as f64 => {}
                 _ => return false,
             }
         }
         if let Some(limit) = self.above {
             match value {
-                Some(v) if (v as f32) > limit => {}
+                Some(v) if v > limit as f64 => {}
                 _ => return false,
             }
         }
@@ -942,4 +948,29 @@ pub fn default_config_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(base.join("dbar").join("config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_built_in_default_config_parses() {
+        Config::parse(DEFAULT_CONFIG).expect("the compiled-in default must parse");
+    }
+
+    #[test]
+    fn every_shipped_example_parses() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
+        for entry in std::fs::read_dir(dir).expect("examples/ is readable") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().is_none_or(|e| e != "toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a readable example");
+            if let Err(e) = Config::parse(&text) {
+                panic!("{} does not parse: {e:#}", path.display());
+            }
+        }
+    }
 }

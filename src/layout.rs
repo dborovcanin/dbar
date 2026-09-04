@@ -1,7 +1,7 @@
-//! Turns config plus the current status blocks into positioned rectangles.
+//! Turns config plus the current status items into positioned rectangles.
 //!
 //! The result is purely geometric: the renderer draws it and the pointer code hit-tests it,
-//! neither needs to know about config or the i3bar protocol.
+//! neither needs to know about config or where the items came from.
 
 use crate::color::Color;
 use crate::config::{
@@ -9,7 +9,7 @@ use crate::config::{
     SeparatorColor, SeparatorShape, Source, StateFlags, Style,
 };
 use crate::icon::{self, Icon};
-use crate::status::Block;
+use crate::status::{ActionTarget, StatusItem};
 use crate::sway::SwayState;
 
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
@@ -44,11 +44,8 @@ pub struct PlacedModule {
     pub foreground: Color,
     pub background: Color,
     pub radius: f32,
-    /// Index into the block list this module was built from, for click routing.
-    /// `None` for synthetic modules that no block produced.
-    pub block: Option<usize>,
-    /// A compositor command to run instead of forwarding the click to the provider.
-    pub command: Option<String>,
+    /// What a click here does, if anything.
+    pub action: Option<ActionTarget>,
 }
 
 /// A transition drawn in the gap between two neighbouring modules.
@@ -167,16 +164,6 @@ fn truncate(text: &str, budget: f32, measure: &mut dyn Measure) -> String {
 /// Space between an icon and the text beside it, as a fraction of the icon size.
 const ICON_GAP: f32 = 0.4;
 
-/// A colour the provider set on a block, if it set one.
-fn block_color(
-    blocks: &[Block],
-    index: Option<usize>,
-    pick: impl Fn(&Block) -> Option<&str>,
-) -> Option<Color> {
-    let block = blocks.get(index?)?;
-    Color::parse(pick(block)?).ok()
-}
-
 struct SizedModule {
     width: f32,
     text_width: f32,
@@ -189,8 +176,7 @@ struct SizedModule {
     style: Style,
     foreground: Color,
     background: Color,
-    block: Option<usize>,
-    command: Option<String>,
+    action: Option<ActionTarget>,
 }
 
 /// Colour used for messages dbar generates itself, matching the i3bar convention.
@@ -201,31 +187,37 @@ struct Candidate<'g> {
     module: &'g ModuleCfg,
     text: String,
     flags: StateFlags,
-    /// Index of the block behind it, for routing clicks back to the provider.
-    block: Option<usize>,
-    /// A compositor command to run on click instead.
-    command: Option<String>,
+    /// The number thresholds and graded icons key on, when the source published one.
+    value: Option<f64>,
+    /// Colours the source asked for, which win over the style's own.
+    foreground: Option<Color>,
+    background: Option<Color>,
+    action: Option<ActionTarget>,
 }
 
 /// Everything a group shows, in the order the group asks for.
 ///
 /// A module drawn from the compositor expands here: `sway:workspaces` becomes one candidate
 /// per workspace, so each is its own rectangle with its own state and click target.
-fn collect<'g>(group: &'g GroupCfg, blocks: &[Block], sway: &SwayState) -> Vec<Candidate<'g>> {
+fn collect<'g>(group: &'g GroupCfg, items: &[StatusItem], sway: &SwayState) -> Vec<Candidate<'g>> {
     let mut out = Vec::new();
+
+    let from_item = |module: &'g ModuleCfg, item: &StatusItem| Candidate {
+        module,
+        text: item.text.clone(),
+        flags: StateFlags {
+            urgent: item.urgent,
+            ..StateFlags::default()
+        },
+        value: item.fields.primary().and_then(|v| v.num()),
+        foreground: item.foreground,
+        background: item.background,
+        action: item.action.clone(),
+    };
 
     if group.wildcard {
         if let Some(module) = group.modules.first() {
-            out.extend(blocks.iter().enumerate().map(|(i, b)| Candidate {
-                module,
-                text: b.display_text().into_owned(),
-                flags: StateFlags {
-                    urgent: b.urgent,
-                    ..StateFlags::default()
-                },
-                block: Some(i),
-                command: None,
-            }));
+            out.extend(items.iter().map(|item| from_item(module, item)));
         }
         return out;
     }
@@ -233,18 +225,9 @@ fn collect<'g>(group: &'g GroupCfg, blocks: &[Block], sway: &SwayState) -> Vec<C
     for module in &group.modules {
         match module.source {
             Source::Provider => {
-                for (i, block) in blocks.iter().enumerate() {
-                    if block.selector() == Some(module.name.as_str()) {
-                        out.push(Candidate {
-                            module,
-                            text: block.display_text().into_owned(),
-                            flags: StateFlags {
-                                urgent: block.urgent,
-                                ..StateFlags::default()
-                            },
-                            block: Some(i),
-                            command: None,
-                        });
+                for item in items {
+                    if item.id.as_deref() == Some(module.name.as_str()) {
+                        out.push(from_item(module, item));
                     }
                 }
             }
@@ -254,8 +237,10 @@ fn collect<'g>(group: &'g GroupCfg, blocks: &[Block], sway: &SwayState) -> Vec<C
                         module,
                         text: title.clone(),
                         flags: StateFlags::default(),
-                        block: None,
-                        command: None,
+                        value: None,
+                        foreground: None,
+                        background: None,
+                        action: None,
                     });
                 }
             }
@@ -269,9 +254,14 @@ fn collect<'g>(group: &'g GroupCfg, blocks: &[Block], sway: &SwayState) -> Vec<C
                             focused: workspace.focused,
                             visible: workspace.visible,
                         },
-                        block: None,
+                        value: None,
+                        foreground: None,
+                        background: None,
                         // Switching is what clicking a workspace is for.
-                        command: Some(format!("workspace {}", quote(&workspace.name))),
+                        action: Some(ActionTarget::Sway(format!(
+                            "workspace {}",
+                            quote(&workspace.name)
+                        ))),
                     });
                 }
             }
@@ -287,26 +277,28 @@ fn quote(name: &str) -> String {
 
 fn size_group(
     group: &GroupCfg,
-    blocks: &[Block],
+    items: &[StatusItem],
     sway: &SwayState,
     height: f32,
     text: &mut dyn Measure,
 ) -> Option<SizedGroup> {
     let mut modules = Vec::new();
-    for candidate in collect(group, blocks, sway) {
+    for candidate in collect(group, items, sway) {
         let Candidate {
             module,
             text: content,
             flags,
-            block: index,
-            command,
+            value,
+            foreground,
+            background,
+            action,
         } = candidate;
         // The i3bar protocol uses an empty `full_text` to mean "hide this block".
         if content.is_empty() {
             continue;
         }
-        // One reading of the text serves both the state rules and the graded icons.
-        let value = crate::status::percent(&content);
+        // The state rules and the graded icons both key on the source's own number, not
+        // on whatever the text happens to say.
         let resolve = |hovered: bool, text: &str| {
             module
                 .states
@@ -386,12 +378,9 @@ fn size_group(
             icon,
             text: content,
             style,
-            foreground: block_color(blocks, index, |b| b.color.as_deref())
-                .unwrap_or(style.foreground),
-            background: block_color(blocks, index, |b| b.background.as_deref())
-                .unwrap_or(style.background),
-            block: index,
-            command,
+            foreground: foreground.unwrap_or(style.foreground),
+            background: background.unwrap_or(style.background),
+            action,
         });
     }
     if modules.is_empty() {
@@ -493,8 +482,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             foreground,
             background,
             radius: paint.radius,
-            block: m.block,
-            command: m.command,
+            action: m.action,
         });
         x += m.width;
     }
@@ -514,7 +502,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
 /// Lay the whole bar out for a surface of `width` x `height` logical pixels.
 pub fn compute(
     cfg: &Config,
-    blocks: &[Block],
+    items: &[StatusItem],
     sway: &SwayState,
     width: f32,
     height: f32,
@@ -531,7 +519,7 @@ pub fn compute(
         .map(|groups| {
             groups
                 .iter()
-                .filter_map(|g| size_group(g, blocks, sway, height, text))
+                .filter_map(|g| size_group(g, items, sway, height, text))
                 .collect()
         })
         .collect();
@@ -603,15 +591,253 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
                 width: module_width,
                 height,
                 icon: None,
-                command: None,
+                action: None,
                 text: message.to_string(),
                 text_x: x + padding,
                 foreground: FAULT_COLOR,
                 background: Color::TRANSPARENT,
                 radius: 0.0,
-                block: None,
             }],
             separators: Vec::new(),
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::status::{ActionTarget, Fields, State, StatusItem, Unit, Value};
+
+    /// A text backend with no fonts: every character is one unit wide.
+    ///
+    /// Layout only ever asks how wide a string is, so a fixed width makes every expected
+    /// number in these tests a character count.
+    struct Fixed;
+
+    impl Measure for Fixed {
+        fn measure(&mut self, text: &str) -> f32 {
+            text.chars().count() as f32
+        }
+    }
+
+    fn item(id: &str, text: &str) -> StatusItem {
+        StatusItem {
+            id: Some(id.to_string()),
+            text: text.to_string(),
+            fields: Fields::default(),
+            state: State::Idle,
+            urgent: false,
+            foreground: None,
+            background: None,
+            action: None,
+        }
+    }
+
+    fn with_percent(mut item: StatusItem, percent: f64) -> StatusItem {
+        item.fields.set(
+            "percent",
+            Value::Num {
+                v: percent,
+                unit: Unit::Percent,
+            },
+        );
+        item.fields.set_primary("percent");
+        item
+    }
+
+    fn frame_of(config: &str, items: &[StatusItem]) -> Frame {
+        let cfg = Config::parse(config).expect("test config parses");
+        compute(
+            &cfg,
+            items,
+            &SwayState::default(),
+            200.0,
+            10.0,
+            &mut Fixed,
+            None,
+        )
+    }
+
+    const BASIC: &str = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu", "mem"]
+
+[module.cpu]
+padding = 0
+
+[module.mem]
+padding = 0
+"##;
+
+    #[test]
+    fn modules_select_items_by_name() {
+        let frame = frame_of(BASIC, &[item("mem", "50%"), item("cpu", "10%")]);
+        let texts: Vec<&str> = frame.groups[0]
+            .modules
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect();
+        // Group order wins over the order the source sent them in.
+        assert_eq!(texts, ["10%", "50%"]);
+    }
+
+    #[test]
+    fn an_unmatched_item_draws_nothing() {
+        let frame = frame_of(BASIC, &[item("disk", "1G")]);
+        assert!(frame.groups.is_empty());
+    }
+
+    #[test]
+    fn an_empty_item_is_hidden() {
+        // The i3bar protocol uses empty text to mean "hide this block", and a native
+        // source with nothing to say lands in the same place.
+        let frame = frame_of(BASIC, &[item("cpu", ""), item("mem", "50%")]);
+        assert_eq!(frame.groups[0].modules.len(), 1);
+        assert_eq!(frame.groups[0].modules[0].text, "50%");
+    }
+
+    #[test]
+    fn a_wildcard_group_takes_every_item_in_order() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["*"]
+"##;
+        let frame = frame_of(config, &[item("mem", "50%"), item("cpu", "10%")]);
+        let texts: Vec<&str> = frame.groups[0]
+            .modules
+            .iter()
+            .map(|m| m.text.as_str())
+            .collect();
+        assert_eq!(texts, ["50%", "10%"]);
+    }
+
+    #[test]
+    fn source_colours_win_over_the_style() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+foreground = "#00ff00"
+"##;
+        let mut styled = item("cpu", "10%");
+        styled.foreground = Some(Color::rgba(0xff, 0, 0, 0xff));
+        let frame = frame_of(config, &[styled]);
+        assert_eq!(
+            frame.groups[0].modules[0].foreground,
+            Color::rgba(0xff, 0, 0, 0xff)
+        );
+    }
+
+    #[test]
+    fn thresholds_key_on_the_published_value_not_the_text() {
+        let config = r##"
+[colors]
+warn = "#ffff00"
+
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu.states.high]
+above = 80
+foreground = "$warn"
+"##;
+        // The text says nothing a threshold could be scraped from; the field carries it.
+        let hot = with_percent(item("cpu", "busy"), 90.0);
+        let frame = frame_of(config, &[hot]);
+        assert_eq!(
+            frame.groups[0].modules[0].foreground,
+            Color::rgba(0xff, 0xff, 0, 0xff)
+        );
+
+        let cool = with_percent(item("cpu", "busy"), 10.0);
+        let frame = frame_of(config, &[cool]);
+        assert_ne!(
+            frame.groups[0].modules[0].foreground,
+            Color::rgba(0xff, 0xff, 0, 0xff)
+        );
+    }
+
+    #[test]
+    fn a_graded_icon_takes_its_level_from_the_published_value() {
+        let config = r##"
+[bar]
+icon_size = 10
+
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["bat"]
+
+[module.bat]
+icon = "battery"
+"##;
+        for (percent, level) in [(0.0, 0), (50.0, 2), (100.0, 4)] {
+            let frame = frame_of(config, &[with_percent(item("bat", "x"), percent)]);
+            assert_eq!(
+                frame.groups[0].modules[0].icon.unwrap().level,
+                level,
+                "at {percent}%"
+            );
+        }
+    }
+
+    #[test]
+    fn clicks_route_to_whatever_the_source_asked_for() {
+        let mut clickable = item("cpu", "10%");
+        clickable.action = Some(ActionTarget::I3Bar {
+            name: Some("0".to_string()),
+            instance: None,
+        });
+        let frame = frame_of(BASIC, &[clickable]);
+        let action = frame.groups[0].modules[0].action.as_ref();
+        assert!(matches!(
+            action,
+            Some(ActionTarget::I3Bar { name: Some(n), .. }) if n == "0"
+        ));
+    }
+
+    #[test]
+    fn a_module_wider_than_max_width_loses_text_not_its_neighbours() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu", "mem"]
+
+[module.cpu]
+padding = 0
+max_width = 5
+
+[module.mem]
+padding = 0
+"##;
+        let frame = frame_of(config, &[item("cpu", "0123456789"), item("mem", "ab")]);
+        let modules = &frame.groups[0].modules;
+        assert_eq!(modules[0].width, 5.0);
+        assert_eq!(modules[0].text, "0123\u{2026}");
+        assert_eq!(modules[1].x, 5.0);
+    }
+
+    #[test]
+    fn hit_testing_finds_the_module_under_a_point() {
+        let frame = frame_of(BASIC, &[item("cpu", "abc"), item("mem", "de")]);
+        assert_eq!(frame.module_at(1.0, 5.0).unwrap().text, "abc");
+        assert_eq!(frame.module_at(4.0, 5.0).unwrap().text, "de");
+        assert!(frame.module_at(50.0, 5.0).is_none());
     }
 }

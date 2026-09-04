@@ -32,7 +32,7 @@ use wayland_client::{
 use crate::config::{Config, Edge};
 use crate::layout::{self, Frame};
 use crate::render;
-use crate::status::{Block, ClickEvent, I3BarProvider, StatusEvent};
+use crate::status::{ActionTarget, ClickEvent, I3BarProvider, StatusEvent, StatusItem, i3bar};
 use crate::sway::{self, SwayEvent, SwayState};
 use crate::text::TextRenderer;
 
@@ -54,16 +54,16 @@ pub struct App {
     config: Config,
     text: TextRenderer,
     provider: I3BarProvider,
-    blocks: Vec<Block>,
+    items: Vec<StatusItem>,
     /// Workspaces and the focused window, when a compositor is talking to us.
     sway: SwayState,
     frame: Frame,
     /// Set when the status provider itself has failed; shown in place of the groups.
     fault: Option<String>,
-    /// Block names from the last "nothing matched" warning, so it is not repeated per redraw.
+    /// Item names from the last "nothing matched" warning, so it is not repeated per redraw.
     warned_names: Option<Vec<String>>,
     /// Whether the block-count mismatch has already been reported.
-    alias_count_warned: bool,
+    name_count_warned: bool,
 
     /// Surface size in logical pixels.
     width: u32,
@@ -135,12 +135,12 @@ impl App {
             config,
             text,
             provider,
-            blocks: Vec::new(),
+            items: Vec::new(),
             sway: SwayState::default(),
             frame: Frame::default(),
             fault: None,
             warned_names: None,
-            alias_count_warned: false,
+            name_count_warned: false,
             width: 0,
             height,
             scale: 1,
@@ -164,15 +164,15 @@ impl App {
                 );
                 self.provider.set_accepts_clicks(header.click_events);
             }
-            StatusEvent::Blocks(mut blocks) => {
-                self.apply_aliases(&mut blocks);
-                self.blocks = blocks;
+            StatusEvent::Blocks(blocks) => {
+                self.warn_about_names(&blocks);
+                self.items = i3bar::to_items(&blocks, &self.config.status.blocks);
                 self.fault = None;
                 self.invalidate();
             }
             StatusEvent::Stopped(reason) => {
                 log::error!("status provider stopped: {reason}");
-                self.blocks.clear();
+                self.items.clear();
                 self.fault = Some(format!("status provider stopped: {reason}"));
                 self.invalidate();
             }
@@ -195,42 +195,33 @@ impl App {
         }
     }
 
-    /// Pin the configured names onto the provider's blocks, by position.
+    /// Report a provider that sends a different number of blocks than the config names.
     ///
-    /// Positions are only trustworthy once the provider has emitted every block it is going
-    /// to: until then the array is short and every name after the missing one would land on
-    /// the wrong block. A provider that legitimately emits a different number keeps working,
-    /// positionally, with one warning.
-    fn apply_aliases(&mut self, blocks: &mut [Block]) {
+    /// The naming itself happens in the i3bar backend; this is only the explanation of why
+    /// a config's names may not have taken effect.
+    fn warn_about_names(&mut self, blocks: &[i3bar::I3BarBlock]) {
         let names = &self.config.status.blocks;
-        if names.is_empty() {
+        if names.is_empty() || blocks.len() == names.len() || self.name_count_warned {
             return;
         }
-        if blocks.len() != names.len() && !self.alias_count_warned {
+        if blocks.len() < names.len() {
+            // Still starting up. The names are held back until the counts agree, because a
+            // short list would show one block's value under another block's name.
             log::debug!(
                 "provider sent {} block(s), {} named in the config; names are positional, so \
                  they are applied once the counts agree",
                 blocks.len(),
                 names.len()
             );
-        }
-        if blocks.len() < names.len() {
-            // Still starting up. Leaving the blocks unnamed shows nothing for a moment,
-            // which beats showing one block's value under another block's name.
             return;
         }
-        if blocks.len() > names.len() && !self.alias_count_warned {
-            log::warn!(
-                "provider sends {} block(s) but [status] blocks names {}; the extra blocks \
-                 keep the names the provider gave them",
-                blocks.len(),
-                names.len()
-            );
-            self.alias_count_warned = true;
-        }
-        for (index, block) in blocks.iter_mut().enumerate() {
-            block.alias = names.get(index).cloned();
-        }
+        log::warn!(
+            "provider sends {} block(s) but [status] blocks names {}; the extra blocks keep \
+             the names the provider gave them",
+            blocks.len(),
+            names.len()
+        );
+        self.name_count_warned = true;
     }
 
     /// Mark the bar as needing a redraw and draw immediately if the compositor is ready.
@@ -261,7 +252,7 @@ impl App {
             None => {
                 let frame = layout::compute(
                     &self.config,
-                    &self.blocks,
+                    &self.items,
                     &self.sway,
                     width,
                     height,
@@ -274,11 +265,11 @@ impl App {
         };
 
         log::debug!(
-            "draw: {}x{} scale {}, {} blocks -> {} groups, {} modules",
+            "draw: {}x{} scale {}, {} item(s) -> {} groups, {} modules",
             self.width,
             self.height,
             self.scale,
-            self.blocks.len(),
+            self.items.len(),
             self.frame.groups.len(),
             self.frame
                 .groups
@@ -318,21 +309,21 @@ impl App {
     /// with no explanation of why.
     fn warn_if_nothing_matched(&mut self, frame: &Frame) {
         let drawn: usize = frame.groups.iter().map(|g| g.modules.len()).sum();
-        if drawn > 0 || self.blocks.is_empty() {
+        if drawn > 0 || self.items.is_empty() {
             self.warned_names = None;
             return;
         }
         let names: Vec<String> = self
-            .blocks
+            .items
             .iter()
-            .map(|b| b.selector().unwrap_or("<unnamed>").to_string())
+            .map(|i| i.id.clone().unwrap_or_else(|| "<unnamed>".to_string()))
             .collect();
         if self.warned_names.as_ref() == Some(&names) {
             return;
         }
         log::warn!(
-            "no configured module matched any of the {} block(s) the status provider is \
-             sending ({}); groups select blocks by name, and modules = [\"*\"] takes them all",
+            "no configured module matched any of the {} item(s) the status provider is \
+             sending ({}); groups select items by name, and modules = [\"*\"] takes them all",
             names.len(),
             names.join(", ")
         );
@@ -363,35 +354,40 @@ impl App {
         let Some(module) = self.frame.module_at(x as f32, y as f32) else {
             return;
         };
-        // A module backed by the compositor acts on its own rather than forwarding.
-        if let Some(command) = module.command.clone() {
-            if button == 1 {
-                sway::run_command(&command);
-            }
-            return;
-        }
         let (mx, my, mw, mh) = (module.x, module.y, module.width, module.height);
-        let Some(block) = module.block.and_then(|i| self.blocks.get(i)) else {
+        // Cloned because acting on the target needs the provider, and the module is
+        // borrowed out of the frame we are still holding.
+        let Some(action) = module.action.clone() else {
             return;
         };
 
-        let event = ClickEvent {
-            name: block.name.as_deref(),
-            instance: block.instance.as_deref(),
-            button,
-            x: x as i32,
-            y: y as i32,
-            relative_x: (x as f32 - mx) as i32,
-            relative_y: (y as f32 - my) as i32,
-            width: mw as i32,
-            height: mh as i32,
-        };
-        log::debug!(
-            "click button {button} on block {:?} instance {:?}",
-            event.name,
-            event.instance
-        );
-        self.provider.send_click(&event);
+        match action {
+            // A module backed by the compositor acts on its own rather than forwarding.
+            ActionTarget::Sway(command) => {
+                if button == 1 {
+                    sway::run_command(&command);
+                }
+            }
+            ActionTarget::I3Bar { name, instance } => {
+                let event = ClickEvent {
+                    name: name.as_deref(),
+                    instance: instance.as_deref(),
+                    button,
+                    x: x as i32,
+                    y: y as i32,
+                    relative_x: (x as f32 - mx) as i32,
+                    relative_y: (y as f32 - my) as i32,
+                    width: mw as i32,
+                    height: mh as i32,
+                };
+                log::debug!(
+                    "click button {button} on block {:?} instance {:?}",
+                    event.name,
+                    event.instance
+                );
+                self.provider.send_click(&event);
+            }
+        }
     }
 }
 

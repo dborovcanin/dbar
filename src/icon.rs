@@ -80,8 +80,9 @@ impl Icon {
 }
 
 /// Which step of a graded icon a percentage falls in.
-pub fn level_of(percent: u8) -> usize {
-    (percent as usize * LEVELS / 100).min(LEVELS - 1)
+pub fn level_of(percent: f64) -> usize {
+    let fraction = (percent / 100.0).clamp(0.0, 1.0);
+    ((fraction * LEVELS as f64) as usize).min(LEVELS - 1)
 }
 
 // ---------------------------------------------------------------------------

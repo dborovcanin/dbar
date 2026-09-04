@@ -1,8 +1,12 @@
-//! i3bar-protocol status provider.
+//! The i3bar-protocol backend.
 //!
 //! The provider owns an `i3status-rs` (or any i3bar-compatible) child process. Its stdout is
 //! read on a helper thread and forwarded to the event loop over a calloop channel, so the main
 //! thread never polls. Click events travel back over the child's stdin.
+//!
+//! The protocol carries rendered text and little else, so this is the one backend where the
+//! text really is the data. What structure can be recovered from it is recovered here, at the
+//! boundary, and everything downstream sees ordinary `StatusItem`s.
 
 use std::borrow::Cow;
 use std::io::{BufRead, BufReader, Write};
@@ -12,11 +16,13 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::color::Color;
 use crate::config;
+use crate::status::{ActionTarget, Fields, State, StatusItem, Unit, Value};
 
 /// One status block as described by the i3bar protocol.
 #[derive(Clone, Debug, Default, Deserialize)]
-pub struct Block {
+pub struct I3BarBlock {
     #[serde(default)]
     pub full_text: String,
     #[serde(default)]
@@ -33,27 +39,15 @@ pub struct Block {
     /// Either `"none"` or `"pango"`; i3status-rs always sends the latter.
     #[serde(default)]
     pub markup: Option<String>,
-    /// The name this block is known by in the dbar config, from `[status] blocks`.
-    ///
-    /// Kept separate from `name`, because click events must carry the name the provider
-    /// gave the block or it cannot route them back.
-    #[serde(skip)]
-    pub alias: Option<String>,
 }
 
-impl Block {
-    /// The name a config selects this block by: its alias if it has one, else whatever
-    /// the provider called it.
-    pub fn selector(&self) -> Option<&str> {
-        self.alias.as_deref().or(self.name.as_deref())
-    }
-
+impl I3BarBlock {
     /// The text to actually draw.
     ///
     /// Providers that set `markup = "pango"` may wrap text in span tags and escape it as XML.
     /// V0 has no rich text, so tags are dropped and entities decoded; without this the bar
     /// would literally show `&#39;` and `<span ...>`.
-    pub fn display_text(&self) -> Cow<'_, str> {
+    fn display_text(&self) -> Cow<'_, str> {
         if self.markup.as_deref() != Some("pango") {
             return Cow::Borrowed(&self.full_text);
         }
@@ -62,6 +56,68 @@ impl Block {
         }
         Cow::Owned(strip_pango(&self.full_text))
     }
+}
+
+/// Turn one provider update into status items.
+///
+/// `names` are the names the config gave the provider's blocks, by position, because the
+/// protocol gives them none worth selecting on - i3status-rs numbers them. Positions are
+/// only trustworthy once the provider has emitted every block it is going to: until then
+/// the list is short and every name after a missing block would land on the wrong one, so
+/// the blocks keep whatever the provider called them for a moment instead.
+pub fn to_items(blocks: &[I3BarBlock], names: &[String]) -> Vec<StatusItem> {
+    let named = blocks.len() >= names.len();
+    blocks
+        .iter()
+        .enumerate()
+        .map(|(i, block)| {
+            let text = block.display_text().into_owned();
+
+            // The protocol sends text, so the only value that can be recovered is whatever
+            // percentage the text spells out. A native source publishes what it measured.
+            let mut fields = Fields::default();
+            if let Some(p) = percent(&text) {
+                fields.set(
+                    "percent",
+                    Value::Num {
+                        v: p as f64,
+                        unit: Unit::Percent,
+                    },
+                );
+                fields.set_primary("percent");
+            }
+            fields.set("text", Value::Text(text.clone()));
+
+            let id = named
+                .then(|| names.get(i).cloned())
+                .flatten()
+                .or_else(|| block.name.clone());
+
+            StatusItem {
+                id,
+                text,
+                fields,
+                // The protocol has no state scale; the urgent flag is the whole of it.
+                state: if block.urgent {
+                    State::Critical
+                } else {
+                    State::Idle
+                },
+                urgent: block.urgent,
+                foreground: block.color.as_deref().and_then(|c| Color::parse(c).ok()),
+                background: block
+                    .background
+                    .as_deref()
+                    .and_then(|c| Color::parse(c).ok()),
+                // Clicks must carry the name the provider gave the block, not the one the
+                // config chose, or the provider cannot route them back.
+                action: Some(ActionTarget::I3Bar {
+                    name: block.name.clone(),
+                    instance: block.instance.clone(),
+                }),
+            }
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -76,7 +132,7 @@ pub struct Header {
 #[derive(Debug)]
 pub enum StatusEvent {
     Header(Header),
-    Blocks(Vec<Block>),
+    Blocks(Vec<I3BarBlock>),
     /// The child exited or its stdout closed; the string explains why.
     Stopped(String),
 }
@@ -253,7 +309,7 @@ fn read_loop(stdout: std::process::ChildStdout, sender: calloop::channel::Sender
             }
         }
 
-        match serde_json::from_str::<Vec<Block>>(trimmed) {
+        match serde_json::from_str::<Vec<I3BarBlock>>(trimmed) {
             Ok(blocks) => {
                 if sender.send(StatusEvent::Blocks(blocks)).is_err() {
                     return;
@@ -337,7 +393,7 @@ fn decode_entity(entity: &str) -> Option<char> {
 ///
 /// Only `NN%` counts. Values such as "92GB", "23:59" or "3h 5m" carry no percent sign, so
 /// nothing keyed on a percentage fires on a number that means something else.
-pub fn percent(text: &str) -> Option<u8> {
+fn percent(text: &str) -> Option<u8> {
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -354,4 +410,87 @@ pub fn percent(text: &str) -> Option<u8> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn block(name: &str, text: &str) -> I3BarBlock {
+        I3BarBlock {
+            full_text: text.to_string(),
+            name: Some(name.to_string()),
+            ..I3BarBlock::default()
+        }
+    }
+
+    #[test]
+    fn names_are_applied_by_position() {
+        let blocks = [block("0", "a"), block("1", "b")];
+        let names = ["cpu".to_string(), "mem".to_string()];
+        let items = to_items(&blocks, &names);
+        assert_eq!(items[0].id.as_deref(), Some("cpu"));
+        assert_eq!(items[1].id.as_deref(), Some("mem"));
+    }
+
+    #[test]
+    fn names_are_held_back_until_the_counts_agree() {
+        let blocks = [block("0", "a")];
+        let names = ["cpu".to_string(), "mem".to_string()];
+        let items = to_items(&blocks, &names);
+        // Naming a short list would show one block's value under another block's name.
+        assert_eq!(items[0].id.as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn extra_blocks_keep_the_providers_names() {
+        let blocks = [block("0", "a"), block("1", "b")];
+        let names = ["cpu".to_string()];
+        let items = to_items(&blocks, &names);
+        assert_eq!(items[0].id.as_deref(), Some("cpu"));
+        assert_eq!(items[1].id.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn a_percentage_in_the_text_becomes_the_primary_value() {
+        let items = to_items(&[block("bat", " 58% 1:20")], &[]);
+        assert_eq!(items[0].fields.primary().and_then(|v| v.num()), Some(58.0));
+    }
+
+    #[test]
+    fn text_without_a_percent_sign_publishes_no_number() {
+        for text in [" 92GB ", " 23:59 ", " 3h 5m "] {
+            let items = to_items(&[block("x", text)], &[]);
+            assert!(
+                items[0].fields.primary().is_none(),
+                "{text:?} should not read as a percentage"
+            );
+        }
+    }
+
+    #[test]
+    fn urgent_blocks_arrive_urgent_and_critical() {
+        let mut b = block("x", "!");
+        b.urgent = true;
+        let items = to_items(&[b], &[]);
+        assert!(items[0].urgent);
+        assert_eq!(items[0].state, State::Critical);
+    }
+
+    #[test]
+    fn provider_colours_are_parsed_at_the_boundary() {
+        let mut b = block("x", "hi");
+        b.color = Some("#ff0000".to_string());
+        let items = to_items(&[b], &[]);
+        assert_eq!(items[0].foreground, Some(Color::rgba(0xff, 0, 0, 0xff)));
+    }
+
+    #[test]
+    fn pango_markup_is_stripped_before_the_text_becomes_data() {
+        let mut b = block("x", "<span foreground='#f00'>7&#37;</span>");
+        b.markup = Some("pango".to_string());
+        let items = to_items(&[b], &[]);
+        assert_eq!(items[0].text, "7%");
+        assert_eq!(items[0].fields.primary().and_then(|v| v.num()), Some(7.0));
+    }
 }
