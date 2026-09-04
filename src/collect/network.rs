@@ -49,7 +49,26 @@ pub const FIELDS: &[FieldSpec] = &[
         name: "ssid",
         kind: Kind::Text,
     },
+    // How strong the link to the access point is, as a share of the usable range.
+    FieldSpec {
+        name: "signal",
+        kind: Kind::Num(Unit::Percent),
+    },
+    // The same thing as the radio reports it, in dBm, which is what every other wireless
+    // tool prints and what a person comparing two spots on the sofa wants to see.
+    FieldSpec {
+        name: "dbm",
+        kind: Kind::Num(Unit::None),
+    },
 ];
+
+/// The usable range of a wireless signal, in dBm.
+///
+/// Below the floor a link is unusable and above the ceiling there is nothing left to gain,
+/// so the share between them is what "strength" means to a person. These are the numbers
+/// every other tool draws its bars from.
+const FLOOR: f64 = -90.0;
+const CEILING: f64 = -40.0;
 
 const CLASS: &str = "/sys/class/net";
 
@@ -85,7 +104,7 @@ impl Network {
     ///
     /// A cable is never asked: `wireless` is the directory the kernel gives an interface
     /// that has a radio behind it, so its absence is the answer.
-    fn network_on(&mut self, device: &Path) -> Option<String> {
+    fn wireless_on(&mut self, device: &Path) -> Option<&mut crate::collect::nl80211::Wireless> {
         if !device.join("wireless").is_dir() || self.wireless_failed {
             return None;
         }
@@ -93,26 +112,39 @@ impl Network {
             match crate::collect::nl80211::Wireless::open() {
                 Ok(wireless) => self.wireless = Some(wireless),
                 Err(e) => {
-                    log::debug!("no network name to report: {e:#}");
+                    log::debug!("nothing wireless to report: {e:#}");
                     self.wireless_failed = true;
                     return None;
                 }
             }
         }
+        self.wireless.as_mut()
+    }
 
-        let ifindex = super::read_to_string(device.join("ifindex"))
-            .ok()?
-            .trim()
-            .parse()
-            .ok()?;
-        match self.wireless.as_mut()?.network_of(ifindex) {
-            Ok(ssid) => ssid,
+    /// What the wireless stack says about this interface: the network it is on, and how
+    /// well it can hear it.
+    fn wireless_state(&mut self, device: &Path) -> (Option<String>, Option<i8>) {
+        let Some(ifindex) = super::read_to_string(device.join("ifindex"))
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+        else {
+            return (None, None);
+        };
+        let Some(wireless) = self.wireless_on(device) else {
+            return (None, None);
+        };
+
+        let asked = wireless
+            .network_of(ifindex)
+            .and_then(|ssid| Ok((ssid, wireless.strength_of(ifindex)?)));
+        match asked {
+            Ok(answer) => answer,
             Err(e) => {
                 // The socket is dropped rather than kept in a state nothing understands;
                 // the next tick opens a new one.
-                log::debug!("the network name could not be read: {e:#}");
+                log::debug!("the wireless stack could not be read: {e:#}");
                 self.wireless = None;
-                None
+                (None, None)
             }
         }
     }
@@ -136,7 +168,10 @@ impl Collector for Network {
                     // A machine with no hardware interface at all is unusual but not
                     // broken; the module simply has nothing to say.
                     let mut fields = Fields::default();
-                    for name in ["down", "up", "device", "state", "received", "sent", "ssid"] {
+                    for name in [
+                        "down", "up", "device", "state", "received", "sent", "ssid", "signal",
+                        "dbm",
+                    ] {
                         fields.set(name, Value::Absent);
                     }
                     fields.set_primary("down");
@@ -174,10 +209,31 @@ impl Collector for Network {
         );
         fields.set("device", Value::Text(now.device.clone()));
         fields.set("state", Value::Text(now.state.clone()));
+        let (ssid, strength) = self.wireless_state(&device);
         fields.set(
             "ssid",
-            match self.network_on(&device) {
+            match ssid {
                 Some(ssid) => Value::Text(ssid),
+                None => Value::Absent,
+            },
+        );
+        fields.set(
+            "signal",
+            match strength {
+                Some(dbm) => Value::Num {
+                    v: ((dbm as f64 - FLOOR) / (CEILING - FLOOR) * 100.0).clamp(0.0, 100.0),
+                    unit: Unit::Percent,
+                },
+                None => Value::Absent,
+            },
+        );
+        fields.set(
+            "dbm",
+            match strength {
+                Some(dbm) => Value::Num {
+                    v: dbm as f64,
+                    unit: Unit::None,
+                },
                 None => Value::Absent,
             },
         );
@@ -195,7 +251,13 @@ impl Collector for Network {
                 unit: Unit::Bytes,
             },
         );
-        fields.set_primary("down");
+        // What the module is mainly about, which is also what a graded icon reads and what
+        // a threshold keys on without naming a field: on a wireless link, how well it can
+        // hear the network; on a cable, where there is nothing else to say, the rate.
+        fields.set_primary(match strength.is_some() {
+            true => "signal",
+            false => "down",
+        });
 
         Ok(Reading {
             fields,

@@ -19,8 +19,12 @@ const CTRL_ATTR_FAMILY_ID: u16 = 1;
 const CTRL_ATTR_FAMILY_NAME: u16 = 2;
 
 const NL80211_CMD_GET_INTERFACE: u8 = 5;
+const NL80211_CMD_GET_STATION: u8 = 17;
 const NL80211_ATTR_IFINDEX: u16 = 3;
+const NL80211_ATTR_STA_INFO: u16 = 21;
 const NL80211_ATTR_SSID: u16 = 52;
+/// Inside `STA_INFO`: the last signal, in dBm, as a signed byte.
+const NL80211_STA_INFO_SIGNAL: u16 = 7;
 
 const NLMSG_ERROR: u16 = 2;
 const NLMSG_DONE: u16 = 3;
@@ -80,6 +84,33 @@ impl Wireless {
                 && let Some(ssid) = ssid
             {
                 found = Some(ssid);
+            }
+        })?;
+        Ok(found)
+    }
+
+    /// How strong the link to the access point is, in dBm.
+    ///
+    /// The station is the access point this card is talking to; a card that has joined
+    /// nothing has no station and no strength, which is an answer rather than a failure.
+    pub fn strength_of(&mut self, ifindex: u32) -> Result<Option<i8>> {
+        let mut request = Vec::new();
+        request.extend_from_slice(&genl_header(NL80211_CMD_GET_STATION, 0));
+        request.extend_from_slice(&attribute(NL80211_ATTR_IFINDEX, &ifindex.to_ne_bytes()));
+        self.send(self.family, NLM_F_REQUEST | NLM_F_DUMP, &request)?;
+
+        let mut found = None;
+        self.receive(true, |payload| {
+            for (kind, value) in attributes(&payload[GENL_HEADER..]) {
+                if kind != NL80211_ATTR_STA_INFO {
+                    continue;
+                }
+                // The station's details are a run of attributes of their own.
+                for (inner, bytes) in attributes(value) {
+                    if inner == NL80211_STA_INFO_SIGNAL && !bytes.is_empty() {
+                        found = Some(bytes[0] as i8);
+                    }
+                }
             }
         })?;
         Ok(found)
