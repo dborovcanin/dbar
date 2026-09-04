@@ -42,11 +42,8 @@ critical = "#f38ba8"
 [left]
 groups = ["desktop", "window"]
 
-[center]
-groups = ["playing"]
-
 [right]
-groups = ["system", "network", "power", "time"]
+groups = ["playing", "system", "network", "power", "time"]
 
 # ---------------------------------------------------------------------------
 # Styles
@@ -126,8 +123,10 @@ radius = 12
 left = "round"
 right = "round"
 
-# What is playing sits in the middle, where there is room for a title, and only
-# appears when something is playing: a bar with nothing on it draws nothing.
+# What is playing leads the right-hand run, and only appears when something is
+# playing: a bar with nothing on it draws nothing. It sits here rather than in
+# the centre so that folding it down to its icon does not leave the icon
+# stranded in the middle of an empty bar.
 [group.playing]
 modules = ["media"]
 background = "$surface"
