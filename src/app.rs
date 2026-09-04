@@ -62,7 +62,7 @@ pub struct App {
     /// What dbar measures for itself.
     native: Registry,
     /// Modules showing their second wording, by name.
-    alt: std::collections::HashSet<String>,
+    alt: std::collections::HashMap<String, usize>,
     /// Which sources each realtime signal reads again.
     signals: std::collections::HashMap<i32, Vec<Which>>,
     /// Whether a timer is waiting to read collectors. False once every source left is
@@ -154,7 +154,7 @@ impl App {
             config,
             text,
             native: Registry::new(&config_collectors),
-            alt: std::collections::HashSet::new(),
+            alt: std::collections::HashMap::new(),
             signals: config_signals,
             collect_scheduled: true,
             audio: None,
@@ -509,14 +509,13 @@ impl App {
             return;
         };
         let (mx, my, mw, mh) = (module.x, module.y, module.width, module.height);
-        // A module with a second wording claims the left button for swapping between them,
-        // which is the whole point of having one. The other buttons carry on as usual.
+        // A module with further wordings claims the left button for moving through them,
+        // which is the whole point of having them. The other buttons carry on as usual.
         if button == 1
-            && let Some(name) = module.alt.clone()
+            && let Some((name, views)) = module.alt.clone()
         {
-            if !self.alt.remove(&name) {
-                self.alt.insert(name);
-            }
+            let showing = self.alt.entry(name).or_insert(0);
+            *showing = (*showing + 1) % views.max(1);
             self.invalidate();
             return;
         }

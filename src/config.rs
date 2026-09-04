@@ -273,8 +273,9 @@ struct RawModule {
     source: Option<String>,
     /// What the module says, written against the source's fields.
     format: Option<String>,
-    /// A second wording, which a left click swaps to and back.
-    format_alt: Option<String>,
+    /// Further wordings, which a left click moves through and back round. One is written
+    /// as a string; several as a list.
+    format_alt: Option<RawAlt>,
     /// How often to read, for a source dbar measures itself: "2s", "500ms", "1m".
     interval: Option<String>,
     /// Which filesystem a `disk` module is about. Defaults to the root.
@@ -293,6 +294,24 @@ struct RawModule {
     states: HashMap<String, RawState>,
     #[serde(flatten)]
     overrides: RawStyle,
+}
+
+/// `format_alt` is one wording or a list of them, because a module with a single second
+/// wording should not have to be written as a list of one.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawAlt {
+    One(String),
+    Several(Vec<String>),
+}
+
+impl RawAlt {
+    fn written(&self) -> &[String] {
+        match self {
+            RawAlt::One(one) => std::slice::from_ref(one),
+            RawAlt::Several(several) => several,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -506,8 +525,9 @@ pub struct Module {
     pub scroll: Option<f64>,
     /// What the module says, already parsed and checked against the source's fields.
     pub format: Format,
-    /// The wording a left click swaps to, when the config gives one.
-    pub format_alt: Option<Format>,
+    /// The further wordings a left click moves through, in order. Empty when the config
+    /// gives none, and a click then does nothing.
+    pub format_alt: Vec<Format>,
     pub style: Style,
     /// Checked in order; the first match replaces the module's style.
     pub states: Vec<StateRule>,
@@ -1194,13 +1214,26 @@ fn resolve_group(
         let format = resolve_format(&source, raw_module.and_then(|m| m.format.as_deref()))
             .with_context(|| format!("in [module.{module_name}] format"))?;
 
-        let format_alt = match raw_module.and_then(|m| m.format_alt.as_deref()) {
-            Some(written) => Some(
-                resolve_format(&source, Some(written))
-                    .with_context(|| format!("in [module.{module_name}] format_alt"))?,
-            ),
-            None => None,
-        };
+        let mut format_alt = Vec::new();
+        for (index, written) in raw_module
+            .and_then(|m| m.format_alt.as_ref())
+            .map(RawAlt::written)
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            format_alt.push(resolve_format(&source, Some(written)).with_context(|| {
+                match index {
+                    0 => format!("in [module.{module_name}] format_alt"),
+                    // Named by position, since a list of wordings has no other name to
+                    // give the one that will not parse.
+                    _ => format!(
+                        "in [module.{module_name}] format_alt, wording {}",
+                        index + 1
+                    ),
+                }
+            })?);
+        }
 
         modules.push(Module {
             name: module_name.clone(),
@@ -1275,7 +1308,7 @@ fn resolve_group(
                 signal: None,
                 scroll: None,
                 format: resolve_format(&Source::Provider, None)?,
-                format_alt: None,
+                format_alt: Vec::new(),
                 style: fallback,
                 states: Vec::new(),
             }]
@@ -1580,6 +1613,59 @@ format_alt = "$nonesuch"
         let message = format!("{e:#}");
         assert!(message.contains("format_alt"), "{message}");
         assert!(message.contains("nonesuch"), "{message}");
+    }
+
+    #[test]
+    fn a_module_may_have_one_further_wording_or_several() {
+        let config = Config::parse(
+            r#"
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["one", "several"]
+
+[module.one]
+source = "cpu"
+format_alt = " $utilization "
+
+[module.several]
+source = "network"
+format_alt = [" $down ", " $signal ", " $dbm "]
+"#,
+        )
+        .expect("both spellings are allowed");
+        let wordings = |name: &str| {
+            config
+                .modules()
+                .find(|m| m.name == name)
+                .expect("the module is there")
+                .format_alt
+                .len()
+        };
+        assert_eq!(wordings("one"), 1);
+        assert_eq!(wordings("several"), 3);
+    }
+
+    #[test]
+    fn a_wording_that_names_a_field_the_source_lacks_says_which_one() {
+        let broken = Config::parse(
+            r#"
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["net"]
+
+[module.net]
+source = "network"
+format_alt = [" $down ", " $nonsense "]
+"#,
+        )
+        .expect_err("the second wording names nothing");
+        let message = format!("{:#}", broken);
+        assert!(message.contains("wording 2"), "{message}");
+        assert!(message.contains("nonsense"), "{message}");
     }
 
     #[test]

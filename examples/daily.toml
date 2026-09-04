@@ -115,9 +115,9 @@ radius = 12
 left = "round"
 right = "round"
 
-# The processor's three numbers share one island and one icon, because there is
-# no icon for a load average or a temperature and inventing one per module
-# would say they are three unrelated things.
+# The processor's three numbers share one island, divided by hairlines: the load
+# average has no icon of its own, and giving each number one would say they are
+# three unrelated things rather than three views of the same chip.
 [group.system]
 modules = ["cpu", "load", "temperature"]
 background = "$surface"
@@ -240,6 +240,7 @@ interval = "5s"
 format = " $temp.n(d:0) "
 format_alt = " $temp.n(d:0) $label "
 style = "panel"
+icon = "temperature"
 
 [module.temperature.states.warm]
 state = "warning"
@@ -284,8 +285,15 @@ source = "network"
 interval = "2s"
 # The network's name when there is one, falling back to the interface: a cable
 # has no name to give, and neither has a card that has joined nothing.
+#
+# `format_alt` is a list, so a left click goes round three views rather than
+# toggling between two: what it is on, what it is doing, and how well it can
+# hear it. The icon grades on the signal, so it says that much without a click.
 format = " $ssid|$device "
-format_alt = " $down{  $up} "
+format_alt = [
+  " $down{  $up} ",
+  " $signal.n(w:4){  $dbm.n(d:0) dBm} ",
+]
 style = "panel"
 icon = "wifi"
 

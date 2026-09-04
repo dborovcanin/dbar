@@ -427,7 +427,9 @@ icon = "cpu"
 state = "error"
 style = "critical"
 
-# `format_alt` is a second wording a left click swaps to, and back.
+# `format_alt` is what a left click moves on to, and back round to the start.
+# One further wording is written as a string; several as a list, which is how a
+# module carries three views rather than two.
 [module.memory]
 source = "memory"
 interval = "5s"
@@ -487,7 +489,7 @@ style = "warning"
 source = "network"
 interval = "2s"
 format = " $down{  $up} "
-format_alt = " $device $state "
+format_alt = [" $device $state ", " $signal.n(w:4)  $dbm.n(d:0) dBm "]
 style = "plain"
 icon = "wifi"
 
@@ -521,6 +523,9 @@ interval = "5s"
 format = " $temp.n(d:0) "
 format_alt = " $temp.n(d:0) $label ($chip) "
 style = "plain"
+# Graded like the battery and the wifi: five steps, read here from the degrees
+# themselves, since a processor lives inside the first hundred of them.
+icon = "temperature"
 
 [module.temperature.states.warm]
 state = "warning"

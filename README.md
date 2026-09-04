@@ -22,7 +22,8 @@ This is the **V0** milestone from [spec.md](spec.md).
   default. A config that reads nothing from one starts no child process at all
 - module state styling, keyed on a value, on a named field, on how the source
   rates itself, or on hover
-- `format_alt`: a second wording a left click swaps to and back
+- `format_alt`: further wordings a left click moves through and back round —
+  one written as a string, several as a list
 - `scroll = "5%"`: scrolling over a backlight or volume module changes it, and a
   middle click mutes; dbar sets both itself rather than running a helper
 - `signal = N`: read a source again on SIGRTMIN+N
@@ -38,8 +39,7 @@ This is the **V0** milestone from [spec.md](spec.md).
   formatting, `{groups}` that disappear when a field has nothing to report, and
   `$a|$b|'fallback'` chains
 
-Not yet implemented: a media player, Bluetooth, wireless signal strength,
-command modules, multi-monitor. See [dbar-native.md](dbar-native.md)
+Not yet implemented: a media player, Bluetooth, command modules, multi-monitor. See [dbar-native.md](dbar-native.md)
 for where this is going.
 
 ## Build
@@ -166,9 +166,11 @@ left out it defaults to 1.4x the font size, so icons scale with the text.
 Fixed: `cpu`, `memory`, `disk`, `clock`, `ethernet`, `headphones`, `wifi-off`,
 `volume-muted`.
 
-Graded: `battery`, `battery-charging`, `wifi`, `volume`, `brightness`. These
-have five steps and pick one from the value the source published — a battery at
-58% draws a little over half full. A native source publishes what it measured;
+Graded: `battery`, `battery-charging`, `wifi`, `volume`, `brightness`,
+`temperature`. These have five steps and pick one from the value the source
+published — a battery at 58% draws a little over half full, and a thermometer
+reads its degrees as a share of a hundred, which is the range a processor lives
+in. A native source publishes what it measured;
 for a provider module, where rendered text is all there is, the percentage is
 read back out of it, and only an `NN%` pattern counts, so text such as `92GB`,
 `23:59` or `3h 5m` leaves the icon at its lowest step rather than grading on a
@@ -410,7 +412,7 @@ These are read by dbar itself, from `/proc`, `/sys` and PipeWire:
 | `load` | `$one` `$five` `$fifteen` `$percent` |
 | `temperature` | `$temp` `$average` `$label` `$chip` |
 | `disk` | `$percent` `$used` `$total` `$available` `$free` `$path` |
-| `network` | `$down` `$up` `$device` `$state` `$ssid` `$received` `$sent` |
+| `network` | `$down` `$up` `$device` `$state` `$ssid` `$signal` `$dbm` `$received` `$sent` |
 | `time` | `$now` |
 
 Three of them are pointed at something, and take that from a key of their own:

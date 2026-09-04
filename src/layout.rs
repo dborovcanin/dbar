@@ -25,7 +25,7 @@ pub struct Inputs<'a> {
     pub native: &'a Registry,
     pub sway: &'a SwayState,
     /// Modules currently showing their second wording, by name.
-    pub alt: &'a std::collections::HashSet<String>,
+    pub alt: &'a std::collections::HashMap<String, usize>,
 }
 
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
@@ -62,8 +62,8 @@ pub struct PlacedModule {
     pub radius: f32,
     /// What a click here does, if anything.
     pub action: Option<ActionTarget>,
-    /// The module's name, when it has a second wording a click can swap to.
-    pub alt: Option<String>,
+    /// The module's name and how many wordings it has, when a click can move through them.
+    pub alt: Option<(String, usize)>,
 }
 
 /// A transition drawn in the gap between two neighbouring modules.
@@ -184,9 +184,18 @@ fn truncate(text: &str, budget: f32, measure: &mut dyn Measure) -> String {
 ///
 /// A module with a second wording keeps both parsed; which one is drawn is the only thing
 /// a click changes, so nothing has to be re-read or re-collected to swap them.
-fn wording<'g>(module: &'g ModuleCfg, alt: &std::collections::HashSet<String>) -> &'g Format {
-    match module.format_alt.as_ref() {
-        Some(second) if alt.contains(&module.name) => second,
+/// Which of a module's wordings is showing.
+///
+/// Zero is what it says by default, and a click moves on to the next: a module with two
+/// further wordings goes round three views rather than toggling between two.
+fn wording<'g>(
+    module: &'g ModuleCfg,
+    alt: &std::collections::HashMap<String, usize>,
+) -> &'g Format {
+    match alt.get(&module.name) {
+        Some(&showing) if showing > 0 => {
+            module.format_alt.get(showing - 1).unwrap_or(&module.format)
+        }
         _ => &module.format,
     }
 }
@@ -207,7 +216,7 @@ struct SizedModule {
     foreground: Color,
     background: Color,
     action: Option<ActionTarget>,
-    alt: Option<String>,
+    alt: Option<(String, usize)>,
 }
 
 /// Colour used for messages dbar generates itself, matching the i3bar convention.
@@ -445,7 +454,9 @@ fn size_group(
             foreground: foreground.unwrap_or(style.foreground),
             background: background.unwrap_or(style.background),
             action,
-            alt: module.format_alt.is_some().then(|| module.name.clone()),
+            // How many views this module has in all, so a click knows where it wraps.
+            alt: (!module.format_alt.is_empty())
+                .then(|| (module.name.clone(), module.format_alt.len() + 1)),
         });
     }
     if modules.is_empty() {
@@ -802,7 +813,7 @@ mod tests {
         config: &str,
         items: &[StatusItem],
         native: Registry,
-        alt: &std::collections::HashSet<String>,
+        alt: &std::collections::HashMap<String, usize>,
     ) -> Frame {
         let cfg = Config::parse(config).expect("test config parses");
         let inputs = Inputs {
@@ -1065,7 +1076,11 @@ format_alt = "$percent"
 padding = 0
 "##;
         let frame = frame_of(config, &[item("cpu", "a"), item("mem", "b")]);
-        assert_eq!(frame.groups[0].modules[0].alt.as_deref(), Some("cpu"));
+        assert_eq!(
+            frame.groups[0].modules[0].alt,
+            Some(("cpu".to_string(), 2)),
+            "one further wording is two views to go round"
+        );
         assert_eq!(frame.groups[0].modules[1].alt, None);
     }
 
@@ -1083,7 +1098,7 @@ padding = 0
 format = "short"
 format_alt = "the long way round"
 "##;
-        let showing = std::collections::HashSet::from(["cpu".to_string()]);
+        let showing = std::collections::HashMap::from([("cpu".to_string(), 1)]);
         let plain = frame_of(config, &[item("cpu", "x")]);
         assert_eq!(plain.groups[0].modules[0].text, "short");
 
@@ -1094,6 +1109,44 @@ format_alt = "the long way round"
             &showing,
         );
         assert_eq!(swapped.groups[0].modules[0].text, "the long way round");
+    }
+
+    #[test]
+    fn a_module_can_have_several_further_wordings_and_goes_round_them() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+padding = 0
+format = "first"
+format_alt = ["second", "third"]
+"##;
+        let views = |showing: usize| {
+            frame_showing(
+                config,
+                &[item("cpu", "x")],
+                Registry::new(&Default::default()),
+                &std::collections::HashMap::from([("cpu".to_string(), showing)]),
+            )
+            .groups[0]
+                .modules[0]
+                .text
+                .clone()
+        };
+        assert_eq!(views(0), "first");
+        assert_eq!(views(1), "second");
+        assert_eq!(views(2), "third");
+
+        let frame = frame_of(config, &[item("cpu", "x")]);
+        assert_eq!(
+            frame.groups[0].modules[0].alt,
+            Some(("cpu".to_string(), 3)),
+            "three views, so a click wraps after the third"
+        );
     }
 
     #[test]
