@@ -204,9 +204,6 @@ fn wording<'g>(
     }
 }
 
-/// Space between an icon and the text beside it, as a fraction of the icon size.
-const ICON_GAP: f32 = 0.4;
-
 struct SizedModule {
     width: f32,
     text_width: f32,
@@ -355,7 +352,11 @@ fn size_group(
     inputs: &Inputs<'_>,
     height: f32,
     text: &mut dyn Measure,
+    budget: f32,
 ) -> Option<SizedGroup> {
+    // What is left for the modules once the group's own padding is paid for. A run with
+    // nothing else beside it gets infinity, and nothing below has to think about it.
+    let mut left = budget - group.padding * 2.0;
     let mut modules = Vec::new();
     for candidate in collect(group, inputs) {
         let Candidate {
@@ -437,15 +438,21 @@ fn size_group(
             };
             (icon, level)
         });
+        // The icon and the space after it, which is what the text starts behind.
         let icon_advance = match icon {
-            Some(_) if style.icon_size > 0.0 => style.icon_size * (1.0 + ICON_GAP),
+            Some(_) if style.icon_size > 0.0 => style.icon_size + style.gap(),
             _ => 0.0,
         };
-        // A module that would outgrow max_width loses text rather than pushing its
-        // neighbours aside: a window title has no length limit of its own.
+        // A module that would outgrow max_width, or the room its run has left, loses text
+        // rather than pushing its neighbours aside: a window title has no length limit of
+        // its own, and a bar can run out of width whatever the config says.
         let fixed = icon_advance + style.padding * 2.0;
-        let content = if style.max_width > 0.0 {
-            truncate(&content, style.max_width - fixed, text)
+        let cap = match style.max_width > 0.0 {
+            true => style.max_width.min(left),
+            false => left,
+        };
+        let content = if cap.is_finite() {
+            truncate(&content, cap - fixed, text)
         } else {
             content
         };
@@ -455,6 +462,12 @@ fn size_group(
 
         let text_width = text.measure(&content);
         let width = (text_width + fixed).max(style.min_width);
+        // A module with nothing left to draw in is left out entirely, rather than drawn
+        // over whatever the run was making room for.
+        if width > left {
+            continue;
+        }
+        left -= width + group.spacing;
         modules.push(SizedModule {
             width,
             text_width,
@@ -679,18 +692,6 @@ pub fn compute(
     let gap = cfg.bar.gap;
     let mut frame = Frame::default();
 
-    // Size every position first; placement needs the totals for center and right.
-    let sized: Vec<Vec<SizedGroup>> = cfg
-        .positions
-        .iter()
-        .map(|groups| {
-            groups
-                .iter()
-                .filter_map(|g| size_group(g, inputs, height, text))
-                .collect()
-        })
-        .collect();
-
     let run_width = |groups: &Vec<SizedGroup>| -> f32 {
         if groups.is_empty() {
             return 0.0;
@@ -698,14 +699,39 @@ pub fn compute(
         groups.iter().map(|g| g.width).sum::<f32>() + gap * (groups.len() - 1) as f32
     };
 
+    // Sized in the order they get to keep their width: the right run says what it needs,
+    // the left run takes what is left, and the centre lives in the gap between them. A run
+    // that runs out of room truncates the module it is in the middle of and drops the rest,
+    // rather than drawing over its neighbour.
+    let size_run = |groups: &[GroupCfg], budget: f32, text: &mut dyn Measure| -> Vec<SizedGroup> {
+        let mut left = budget;
+        let mut out = Vec::new();
+        for group in groups {
+            let Some(sized) = size_group(group, inputs, height, text, left) else {
+                continue;
+            };
+            left -= sized.width + gap;
+            out.push(sized);
+        }
+        out
+    };
+
+    let right = size_run(&cfg.positions[2], width, text);
+    let right_width = run_width(&right);
+    let left = size_run(
+        &cfg.positions[0],
+        (width - right_width - gap).max(0.0),
+        text,
+    );
+    let left_width = run_width(&left);
+    let between = (width - right_width - left_width - gap * 2.0).max(0.0);
+    let centre = size_run(&cfg.positions[1], between, text);
+    let centre_width = run_width(&centre);
+    let sized = [left, centre, right];
+
     // The centre run is centred on the bar, but pushed aside rather than allowed to sit on
     // top of its neighbours: a wide right-hand run would otherwise overlap a centred clock
     // long before the bar is actually full.
-    let (left_width, centre_width, right_width) = (
-        run_width(&sized[0]),
-        run_width(&sized[1]),
-        run_width(&sized[2]),
-    );
     let right_start = (width - right_width).max(0.0);
     let centre_lower = if left_width > 0.0 {
         left_width + gap
@@ -1172,6 +1198,120 @@ format_alt = ["second", "third"]
             frame.groups[0].modules[0].alt,
             Some(("cpu".to_string(), 3)),
             "three views, so a click wraps after the third"
+        );
+    }
+
+    /// The width of a one-module bar built from these style keys, with the stub measurer
+    /// making every character one unit wide.
+    fn width_of(keys: &str) -> f32 {
+        let config = format!(
+            r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+padding = 0
+spacing = 0
+
+[module.cpu]
+{keys}
+"##
+        );
+        let frame = frame_of(&config, &[item("cpu", "abc")]);
+        frame.groups[0].modules[0].width
+    }
+
+    #[test]
+    fn padding_is_added_on_both_sides_and_nowhere_else() {
+        // Three characters, no icon: the module is the text plus a padding each side.
+        assert_eq!(width_of("padding = 0"), 3.0);
+        assert_eq!(width_of("padding = 5"), 13.0);
+        assert_eq!(width_of("padding = 5.5"), 14.0);
+    }
+
+    #[test]
+    fn the_gap_between_an_icon_and_its_text_is_the_configured_one() {
+        let keys = |gap: &str| format!("padding = 0\nicon = \"cpu\"\nicon_size = 10\n{gap}");
+        // Icon, gap, then the text.
+        assert_eq!(width_of(&keys("icon_gap = 0")), 13.0);
+        assert_eq!(width_of(&keys("icon_gap = 4")), 17.0);
+        // Without one, the gap is a quarter of the icon.
+        assert_eq!(width_of(&keys("")), 15.5);
+    }
+
+    #[test]
+    fn a_bigger_icon_keeps_its_breathing_room_without_being_told() {
+        let width =
+            |size: f32| width_of(&format!("padding = 0\nicon = \"cpu\"\nicon_size = {size}"));
+        // Twice the icon is twice the gap, so the proportions hold as the bar grows.
+        assert_eq!(width(10.0) - 3.0, 12.5);
+        assert_eq!(width(20.0) - 3.0, 25.0);
+    }
+
+    #[test]
+    fn a_full_bar_truncates_rather_than_drawing_over_itself() {
+        // The stub measurer makes every character a unit wide, and the bar is 200 of them.
+        let config = r##"
+[left]
+groups = ["l"]
+
+[center]
+groups = ["c"]
+
+[right]
+groups = ["r"]
+
+[group.l]
+modules = ["title"]
+padding = 0
+
+[group.c]
+modules = ["media"]
+padding = 0
+
+[group.r]
+modules = ["clock"]
+padding = 0
+
+[module.title]
+padding = 0
+
+[module.media]
+padding = 0
+
+[module.clock]
+padding = 0
+"##;
+        let long = "x".repeat(150);
+        let frame = frame_of(
+            config,
+            &[
+                item("title", &long),
+                item("media", &long),
+                item("clock", "12:00"),
+            ],
+        );
+
+        let mut edges: Vec<(f32, f32)> = frame
+            .groups
+            .iter()
+            .flat_map(|g| g.modules.iter())
+            .map(|m| (m.x, m.x + m.width))
+            .collect();
+        edges.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("finite"));
+        for pair in edges.windows(2) {
+            assert!(
+                pair[0].1 <= pair[1].0,
+                "modules overlap: {:?} then {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        let last = edges.last().expect("something was drawn");
+        assert!(
+            last.1 <= 200.0,
+            "the bar draws past its own width: {last:?}"
         );
     }
 

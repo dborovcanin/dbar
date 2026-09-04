@@ -93,6 +93,7 @@ radius = 0               # default: 0
 min_width = 0            # default: 0
 icon = "none"            # default: none
 icon_size = 20           # default: 1.4x the font size
+icon_gap = 5             # default: a quarter of the icon size
 
 # Filled transitions need neighbouring modules to contrast, so these alternate.
 [style.cool]

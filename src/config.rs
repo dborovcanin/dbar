@@ -205,6 +205,8 @@ struct RawStyle {
     max_width: Option<f32>,
     icon: Option<String>,
     icon_size: Option<f32>,
+    /// Space between an icon and the text beside it. Defaults to a share of the icon.
+    icon_gap: Option<f32>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -668,7 +670,21 @@ pub struct Style {
     pub icon: Option<Icon>,
     /// Icon edge length in logical pixels, independent of the font size.
     pub icon_size: f32,
+    /// Space between the icon and the text, in logical pixels. Absent means a share of
+    /// the icon size, so a bigger icon keeps its breathing room without being told.
+    pub icon_gap: Option<f32>,
 }
+
+impl Style {
+    /// The space between an icon and the text beside it.
+    pub fn gap(&self) -> f32 {
+        self.icon_gap.unwrap_or(self.icon_size * ICON_GAP_RATIO)
+    }
+}
+
+/// Space between an icon and its text, as a share of the icon size, when nothing says
+/// otherwise.
+const ICON_GAP_RATIO: f32 = 0.25;
 
 /// Icon edge length as a multiple of the font size, when `[bar] icon_size` is absent.
 ///
@@ -694,6 +710,7 @@ impl Default for Style {
             max_width: 0.0,
             icon: None,
             icon_size: 14.0,
+            icon_gap: None,
         }
     }
 }
@@ -727,6 +744,9 @@ impl Style {
         }
         if let Some(v) = over.icon_size {
             self.icon_size = v.max(0.0);
+        }
+        if let Some(v) = over.icon_gap {
+            self.icon_gap = Some(v.max(0.0));
         }
         Ok(self)
     }

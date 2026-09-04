@@ -167,6 +167,10 @@ icon_size = 18          # overrides both
 named style overrides it, and a module overrides that. With `[bar] icon_size`
 left out it defaults to 1.4x the font size, so icons scale with the text.
 
+`icon_gap` is the space between an icon and its text, in logical pixels. Left
+out, it is a quarter of the icon size, so a bigger icon keeps its breathing room
+without being told; set it to tighten a busy bar.
+
 Fixed: `cpu`, `memory`, `disk`, `clock`, `ethernet`, `headphones`, `wifi-off`,
 `volume-muted`, `play`, `pause`.
 
