@@ -189,6 +189,9 @@ pub enum ActionTarget {
 pub enum Control {
     Brightness,
     Volume,
+    /// A player: the buttons mean play, pause and skip rather than more or less of
+    /// something, so the step a scroll carries is not used.
+    Media,
 }
 
 /// One thing the bar can show, independent of where it came from.

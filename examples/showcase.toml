@@ -278,7 +278,7 @@ radius = 12
 # hairline divides rather than transitioning between two regions, so it takes
 # the separator colour itself and suits modules with no background of their own.
 [group.media]
-modules = ["wifi", "volume", "brightness"]
+modules = ["media", "wifi", "volume", "brightness"]
 background = "$surface"
 radius = 12
 padding = 0
@@ -390,6 +390,7 @@ max_width = 320
 #   battery           $percent $status $supply $power $time $health $threshold
 #   backlight         $brightness $device
 #   audio             $volume $muted $device
+#   media             $title $artist $album $status $player
 #   time              $now
 #   provider          $text $percent
 #   sway:window       $title
@@ -464,6 +465,26 @@ signal = 8
 format = " $brightness.n(w:4) "
 style = "plain"
 icon = "brightness"
+
+# `controls = true` makes a module the remote as well as the display: on a media
+# module a left click plays and pauses, and the wheel moves between tracks. It is
+# the counterpart of `scroll` for something operated by buttons rather than by a
+# step, and setting both is an error.
+#
+# Which player is chosen is not a setting: the one that is playing wins, and a
+# paused one only speaks when nothing else does.
+[module.media]
+source = "media"
+controls = true
+format = " {$artist  }$title "
+format_alt = [" $album ", " $player "]
+style = "plain"
+max_width = 280
+
+[module.media.states.paused]
+field = "status"
+equals = "paused"
+foreground = "$subtext"
 
 # A disk module is pointed at a filesystem; without `path` it is the root. The
 # percentage leaves out the reserve only root may write into, so a disk with no

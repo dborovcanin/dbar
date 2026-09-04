@@ -280,14 +280,11 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         values: reading.fields.clone(),
                         foreground: None,
                         background: None,
-                        // A module the config lets be scrolled says what a notch is worth;
-                        // one that does not is drawn exactly as before.
-                        action: module.scroll.and_then(|step| {
-                            Some(ActionTarget::Control {
-                                what: crate::config::control_of(&module.source)?,
-                                step,
-                            })
-                        }),
+                        // A module the config lets be operated carries what its buttons
+                        // do; one that does not is drawn exactly as before.
+                        action: module
+                            .control
+                            .map(|(what, step)| ActionTarget::Control { what, step }),
                     });
                 }
             }

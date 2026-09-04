@@ -70,6 +70,8 @@ pub struct App {
     collect_scheduled: bool,
     /// The way into the PipeWire thread, when a module can change the volume.
     audio: Option<crate::collect::audio::Commands>,
+    /// The way into the media thread, when a module can operate a player.
+    media: Option<crate::collect::media::Commands>,
     /// Whether a failed control has already been reported, so a scroll logs once.
     control_warned: bool,
     /// Workspaces and the focused window, when a compositor is talking to us.
@@ -158,6 +160,7 @@ impl App {
             signals: config_signals,
             collect_scheduled: true,
             audio: None,
+            media: None,
             control_warned: false,
             provider,
             items: Vec::new(),
@@ -304,6 +307,11 @@ impl App {
             _ => 0.0,
         };
         match (what, button) {
+            // A player has buttons rather than a range: the left one plays and pauses,
+            // and the wheel moves between tracks the way it moves through a playlist.
+            (Control::Media, 1) => self.tell_media(crate::collect::media::Command::PlayPause),
+            (Control::Media, 4) => self.tell_media(crate::collect::media::Command::Next),
+            (Control::Media, 5) => self.tell_media(crate::collect::media::Command::Previous),
             (Control::Volume, 2) => self.tell_audio(crate::collect::audio::Command::ToggleMute),
             (Control::Volume, 4 | 5) => {
                 self.tell_audio(crate::collect::audio::Command::Volume(delta))
@@ -336,9 +344,27 @@ impl App {
         }
     }
 
+    fn tell_media(&self, command: crate::collect::media::Command) {
+        match &self.media {
+            Some(commands) => commands.send(command),
+            None => log::debug!("no player to tell: the media module is not running"),
+        }
+    }
+
     /// Where to send what a click on a volume module asks for.
     pub fn set_audio(&mut self, commands: crate::collect::audio::Commands) {
         self.audio = Some(commands);
+    }
+
+    /// Where to send what a click on a media module asks for.
+    pub fn set_media(&mut self, commands: crate::collect::media::Commands) {
+        self.media = Some(commands);
+    }
+
+    /// Take what the session bus says is playing.
+    pub fn on_media(&mut self, reading: crate::collect::Reading) {
+        self.native.push(&Which::Media, reading);
+        self.invalidate();
     }
 
     /// Take a reading a source pushed of its own accord, like the volume from PipeWire.

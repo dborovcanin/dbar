@@ -38,6 +38,9 @@ critical = "#f38ba8"
 [left]
 groups = ["desktop", "window"]
 
+[center]
+groups = ["playing"]
+
 [right]
 groups = ["system", "storage", "power", "time"]
 
@@ -112,6 +115,17 @@ background = "$surface"
 radius = 12
 
 [group.window.edges]
+left = "round"
+right = "round"
+
+# What is playing sits in the middle, where there is room for a title, and only
+# appears when something is playing: a bar with nothing on it draws nothing.
+[group.playing]
+modules = ["media"]
+background = "$surface"
+radius = 12
+
+[group.playing.edges]
 left = "round"
 right = "round"
 
@@ -197,6 +211,22 @@ style = "pill"
 urgent = true
 style = "critical"
 radius = 12
+
+# `controls = true` makes the module the remote as well as the display: a left
+# click plays and pauses, and the wheel moves between tracks. dbar asks the
+# player over the session bus and draws what the player then reports, so what is
+# on the bar is what actually happened.
+[module.media]
+source = "media"
+controls = true
+format = " {$artist  }$title "
+style = "panel"
+max_width = 320
+
+[module.media.states.paused]
+field = "status"
+equals = "paused"
+foreground = "$subtext"
 
 [module.title]
 source = "sway:window"

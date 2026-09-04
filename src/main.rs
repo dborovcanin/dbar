@@ -4,6 +4,7 @@ mod app;
 mod collect;
 mod color;
 mod config;
+mod dbus;
 mod format;
 mod icon;
 mod layout;
@@ -159,6 +160,25 @@ fn main() -> Result<()> {
                 }
             })
             .map_err(|e| anyhow::anyhow!("inserting the audio source: {e}"))?;
+    }
+
+    // What is playing arrives from the session bus, on a thread of its own for the same
+    // reason: a bus connection blocks, and the bar must not.
+    if config_collectors.contains_key(&crate::collect::Which::Media) {
+        let (media_tx, media_rx) = calloop::channel::channel();
+        match crate::collect::media::spawn(media_tx) {
+            Ok(commands) => {
+                app.set_media(commands);
+                handle
+                    .insert_source(media_rx, |event, _, app: &mut App| {
+                        if let calloop::channel::Event::Msg(reading) = event {
+                            app.on_media(reading);
+                        }
+                    })
+                    .map_err(|e| anyhow::anyhow!("inserting the media source: {e}"))?;
+            }
+            Err(e) => log::warn!("what is playing is unavailable: {e:#}"),
+        }
     }
 
     // Sources the kernel reports changes on are read when they change and never in

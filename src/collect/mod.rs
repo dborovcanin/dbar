@@ -15,6 +15,7 @@ pub mod battery;
 pub mod cpu;
 pub mod disk;
 pub mod load;
+pub mod media;
 pub mod memory;
 pub mod network;
 pub mod nl80211;
@@ -37,6 +38,7 @@ use crate::status::{FieldSpec, Fields, State};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Which {
     Audio,
+    Media,
     Cpu,
     Memory,
     Battery,
@@ -53,6 +55,7 @@ impl Which {
     pub fn name(&self) -> &'static str {
         match self {
             Which::Audio => "audio",
+            Which::Media => "media",
             Which::Cpu => "cpu",
             Which::Memory => "memory",
             Which::Battery => "battery",
@@ -79,6 +82,7 @@ impl Which {
     pub fn fields(&self) -> &'static [FieldSpec] {
         match self {
             Which::Audio => audio::FIELDS,
+            Which::Media => media::FIELDS,
             Which::Cpu => cpu::FIELDS,
             Which::Memory => memory::FIELDS,
             Which::Battery => battery::FIELDS,
@@ -113,6 +117,7 @@ impl Which {
     pub fn default_format(&self) -> &'static str {
         match self {
             Which::Audio => " $volume ",
+            Which::Media => " $title{  $artist} ",
             Which::Cpu => " $utilization ",
             Which::Memory => " $percent ",
             Which::Battery => " $percent ",
@@ -128,8 +133,8 @@ impl Which {
     /// How often to read, when the config does not say.
     pub fn default_interval(&self) -> Duration {
         match self {
-            // Never used: PipeWire says when the volume moves, so nothing asks it.
-            Which::Audio => Duration::from_secs(60),
+            // Never used: both of these arrive when they change rather than being read.
+            Which::Audio | Which::Media => Duration::from_secs(60),
             Which::Cpu | Which::Memory | Which::Load | Which::Network(_) => Duration::from_secs(2),
             Which::Temperature(_) => Duration::from_secs(5),
             // A disk fills slowly, and reading it can wake a spinning one.
@@ -155,12 +160,12 @@ impl Which {
     /// A pushed source is never on the timer and has no collector to call: what it knows
     /// comes from a thread that is told, and the registry only holds the last of it.
     pub fn pushed(&self) -> bool {
-        matches!(self, Which::Audio)
+        matches!(self, Which::Audio | Which::Media)
     }
 
     fn open(&self) -> Box<dyn Collector> {
         match self {
-            Which::Audio => Box::new(Pushed),
+            Which::Audio | Which::Media => Box::new(Pushed),
             Which::Cpu => Box::new(cpu::Cpu::new()),
             Which::Memory => Box::new(memory::Memory),
             Which::Battery => Box::new(battery::Battery::new()),

@@ -289,6 +289,9 @@ struct RawModule {
     /// What one scroll notch over this module is worth: "5%". Only for the sources dbar
     /// can change as well as read.
     scroll: Option<String>,
+    /// Whether clicks on this module operate what it is showing. Only for a player, whose
+    /// buttons are play, pause and skip rather than a step in either direction.
+    controls: Option<bool>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
     #[serde(default)]
     states: HashMap<String, RawState>,
@@ -521,8 +524,8 @@ pub struct Module {
     pub interval: Option<Duration>,
     /// The offset from SIGRTMIN that reads this module's source again.
     pub signal: Option<i32>,
-    /// How much one scroll notch changes what this module shows, in percentage points.
-    pub scroll: Option<f64>,
+    /// What a click or a scroll here operates, and by how much where that means anything.
+    pub control: Option<(Control, f64)>,
     /// What the module says, already parsed and checked against the source's fields.
     pub format: Format,
     /// The further wordings a left click moves through, in order. Empty when the config
@@ -988,6 +991,7 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         "sway:window" => Source::SwayWindow,
         "sway:workspaces" => Source::SwayWorkspaces,
         "audio" => Source::Native(Which::Audio),
+        "media" => Source::Native(Which::Media),
         "cpu" => Source::Native(Which::Cpu),
         "memory" => Source::Native(Which::Memory),
         "battery" => Source::Native(Which::Battery),
@@ -1205,11 +1209,28 @@ fn resolve_group(
             ),
             None => None,
         };
-        if scroll.is_some() && control_of(&source).is_none() {
-            bail!(
-                "module {module_name:?} asks to be scrolled, but dbar can only change what                  it can also set: a backlight or the volume"
-            );
-        }
+        let controls = raw_module.and_then(|m| m.controls).unwrap_or(false);
+        let control = match (scroll, controls) {
+            (Some(_), true) => bail!(
+                "module {module_name:?} sets both scroll and controls; a player is operated \
+                 by its buttons, and a step means nothing to it"
+            ),
+            (Some(step), false) => match control_of(&source) {
+                Some(what) => Some((what, step)),
+                None => bail!(
+                    "module {module_name:?} asks to be scrolled, but dbar can only change \
+                     what it can also set: a backlight or the volume"
+                ),
+            },
+            (None, true) => match source {
+                Source::Native(Which::Media) => Some((Control::Media, 0.0)),
+                _ => bail!(
+                    "module {module_name:?} asks for controls, which only a media module \
+                     has; a backlight or the volume takes scroll instead"
+                ),
+            },
+            (None, false) => None,
+        };
 
         let format = resolve_format(&source, raw_module.and_then(|m| m.format.as_deref()))
             .with_context(|| format!("in [module.{module_name}] format"))?;
@@ -1240,7 +1261,7 @@ fn resolve_group(
             source,
             interval,
             signal,
-            scroll,
+            control,
             format,
             format_alt,
             style,
@@ -1306,7 +1327,7 @@ fn resolve_group(
                 source: Source::Provider,
                 interval: None,
                 signal: None,
-                scroll: None,
+                control: None,
                 format: resolve_format(&Source::Provider, None)?,
                 format_alt: Vec::new(),
                 style: fallback,
@@ -1702,7 +1723,7 @@ scroll = "5%"
             .modules()
             .find(|m| m.name == "light")
             .expect("the module is there");
-        assert_eq!(module.scroll, Some(5.0));
+        assert_eq!(module.control, Some((Control::Brightness, 5.0)));
     }
 
     #[test]

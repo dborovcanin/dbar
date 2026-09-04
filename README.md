@@ -26,6 +26,8 @@ This is the **V0** milestone from [spec.md](spec.md).
   one written as a string, several as a list
 - `scroll = "5%"`: scrolling over a backlight or volume module changes it, and a
   middle click mutes; dbar sets both itself rather than running a helper
+- `controls = true` on a media module: a left click plays and pauses, and the
+  wheel moves between tracks, over MPRIS on the session bus
 - `signal = N`: read a source again on SIGRTMIN+N
 - `left` / `center` / `right` positions holding groups of modules
 - rounded group and module backgrounds
@@ -39,7 +41,7 @@ This is the **V0** milestone from [spec.md](spec.md).
   formatting, `{groups}` that disappear when a field has nothing to report, and
   `$a|$b|'fallback'` chains
 
-Not yet implemented: a media player, Bluetooth, command modules, multi-monitor. See [dbar-native.md](dbar-native.md)
+Not yet implemented: Bluetooth, command modules, multi-monitor. See [dbar-native.md](dbar-native.md)
 for where this is going.
 
 ## Build
@@ -400,7 +402,8 @@ source = "cpu"
 interval = "2s"       # how often dbar reads it; a unit is required
 ```
 
-These are read by dbar itself, from `/proc`, `/sys` and PipeWire:
+These are read by dbar itself, from `/proc`, `/sys`, PipeWire and the session
+bus:
 
 | source | fields |
 |---|---|
@@ -409,6 +412,7 @@ These are read by dbar itself, from `/proc`, `/sys` and PipeWire:
 | `battery` | `$percent` `$status` `$supply` `$power` `$time` `$health` `$threshold` |
 | `backlight` | `$brightness` `$device` |
 | `audio` | `$volume` `$muted` `$device` |
+| `media` | `$title` `$artist` `$album` `$status` `$player` |
 | `load` | `$one` `$five` `$fifteen` `$percent` |
 | `temperature` | `$temp` `$average` `$label` `$chip` |
 | `disk` | `$percent` `$used` `$total` `$available` `$free` `$path` |
@@ -467,7 +471,7 @@ module names no source at all.
 
 ### The i3bar provider
 
-For what dbar cannot read yet — a media player, Bluetooth, the weather — point
+For what dbar cannot read yet — Bluetooth, the weather, a mail count — point
 `[i3bar]` at a provider with its own configuration:
 
 ```toml
