@@ -125,6 +125,17 @@ impl Source {
     }
 }
 
+/// The kind a command module says one of its fields will hold.
+fn field_kind(name: &str) -> Result<crate::status::Kind> {
+    use crate::status::{Kind, Unit};
+    match name {
+        "number" => Ok(Kind::Num(Unit::None)),
+        "percent" => Ok(Kind::Num(Unit::Percent)),
+        "text" => Ok(Kind::Text),
+        other => bail!("{other:?} is not a field kind; use number, percent or text"),
+    }
+}
+
 /// Where a separator takes its colour from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SeparatorColor {
@@ -316,6 +327,12 @@ struct RawModule {
     /// A layout named here is what `$short` says; anything else is abbreviated.
     #[serde(default)]
     layouts: BTreeMap<String, String>,
+    /// A command module's argv. Executed directly: dbar never inserts a shell.
+    #[serde(default)]
+    command: Vec<String>,
+    /// What that command publishes, and what kind each is: `number`, `percent` or `text`.
+    #[serde(default)]
+    fields: BTreeMap<String, String>,
     /// Read this module's source again on SIGRTMIN+N.
     signal: Option<i32>,
     /// What one scroll notch over this module is worth: "5%". Only for the sources dbar
@@ -1096,6 +1113,33 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         "sway:workspaces" => Source::SwayWorkspaces,
         "sway:language" => Source::SwayLanguage(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
         "sway:mode" => Source::SwayMode,
+        "command" => {
+            let argv = raw.map(|m| m.command.clone()).unwrap_or_default();
+            if argv.is_empty() {
+                bail!(
+                    "module {module_name:?} reads from a command but names none; \
+                     add `command = [\"program\", \"argument\"]`"
+                );
+            }
+            let declared = raw.map(|m| &m.fields).filter(|f| !f.is_empty());
+            let fields = match declared {
+                None => crate::collect::command::PLAIN,
+                Some(declared) => {
+                    let mut specs = Vec::with_capacity(declared.len());
+                    for (name, kind) in declared {
+                        specs.push(FieldSpec {
+                            // The config is read once, so a name that outlives it is a
+                            // handful of bytes rather than a leak that grows.
+                            name: Box::leak(name.clone().into_boxed_str()),
+                            kind: field_kind(kind)
+                                .with_context(|| format!("in [module.{module_name}.fields]"))?,
+                        });
+                    }
+                    Box::leak(specs.into_boxed_slice())
+                }
+            };
+            Source::Native(Which::Command(crate::collect::CommandSpec { argv, fields }))
+        }
         "audio" => Source::Native(Which::Audio),
         "media" => Source::Native(Which::Media),
         "cpu" => Source::Native(Which::Cpu),
@@ -1129,6 +1173,16 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
             "network",
         ),
         ("chip", raw.is_some_and(|m| m.chip.is_some()), "temperature"),
+        (
+            "command",
+            raw.is_some_and(|m| !m.command.is_empty()),
+            "command",
+        ),
+        (
+            "fields",
+            raw.is_some_and(|m| !m.fields.is_empty()),
+            "command",
+        ),
         (
             "layouts",
             raw.is_some_and(|m| !m.layouts.is_empty()),

@@ -332,8 +332,12 @@ overlap = 1
 # Every key a [style.*] takes is also valid directly on a module, plus:
 #
 #   style      name of a [style.*] to start from        default: built-in defaults
-#   source     "provider" | "sway:window" | "sway:mode" |
-#              "sway:workspaces" | "sway:language"      default: "provider"
+#   source     "provider" | "command" | "sway:window" |
+#              "sway:mode" | "sway:workspaces" |
+#              "sway:language"                          default: "provider"
+#   command    argv of a command module, run directly
+#   fields     what that command publishes: number, percent
+#              or text, keyed by field name
 #   layouts    what a sway:language module calls each
 #              layout, keyed by xkb's name for it
 #
@@ -417,6 +421,32 @@ style = "cool"
 # A window title has no length limit of its own, so it is capped here rather
 # than allowed to push the clock aside. What does not fit is cut with an
 # ellipsis.
+# A program of your own, started once and read a line at a time. This one needs
+# nothing installed - it is a shell loop - but the point is that the command is
+# yours, and dbar's side of it is a source like any other: it publishes fields, a
+# format decides the wording, and state rules apply.
+#
+# A line with no `=` is the whole of what it said, and lands in $text.
+[module.uptime]
+source = "command"
+command = ["sh", "-c", "while :; do uptime -p; sleep 60; done"]
+format = "$text"
+
+# Declaring fields is what lets a format be checked at startup, and what makes
+# `above` compare a number rather than search a string. The command prints
+# tab-separated pairs: `queued=3\tbranch=main`.
+[module.queue]
+source = "command"
+command = ["sh", "-c", "while :; do printf 'queued=%s\\tbranch=main\\n' $((RANDOM % 9)); sleep 5; done"]
+fields = { queued = "number", branch = "text" }
+format = "{$branch }{· $queued queued}"
+
+# `queued` is the first number the command publishes, so an unqualified bound
+# compares against it.
+[module.queue.states.backing_up]
+above = 5
+style = "warning"
+
 # The compositor's binding mode. Nothing is drawn while it is `default`, so the
 # module is on the bar exactly while a mode is being held.
 [module.mode]
@@ -443,6 +473,7 @@ max_width = 320
 #   sway:workspaces   $name
 #   sway:language     $layout $short $index
 #   sway:mode         $mode
+#   command           $text, or whatever `fields` declares
 #
 # The first four are read by dbar itself and take an `interval`, which needs a
 # unit. The rest arrive from elsewhere, and how often is not dbar's business.

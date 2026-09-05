@@ -391,6 +391,12 @@ impl App {
         self.invalidate();
     }
 
+    /// Take a reading a command of your own pushed, routed to the module that runs it.
+    pub fn on_command(&mut self, which: &Which, reading: crate::collect::Reading) {
+        self.native.push(which, reading);
+        self.invalidate();
+    }
+
     /// Take the sources a watcher covers off the timer.
     pub fn on_watching(&mut self, covered: &[Which]) {
         for which in covered {

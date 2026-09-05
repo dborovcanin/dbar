@@ -33,8 +33,8 @@ This is the **V0** milestone from [spec.md](spec.md), and it is licensed under
   module's own keys. There is no selector engine and nothing to invalidate.
 - **No embedded interpreter.** No Lua, no JavaScript, no expression language in
   the config. Scripting belongs here as a *source* rather than a language: a
-  module can run a command and take what it prints, which is the whole
-  extension mechanism.
+  module [runs a command and takes what it prints](#commands), started once and
+  read a line at a time, which is the whole extension mechanism.
 - **No widget tree.** Groups hold modules and runs hold groups. That is the
   entire layout model, and it is why a redraw is measured in microseconds.
 
@@ -620,6 +620,7 @@ bus:
 | `disk` | `$percent` `$used` `$total` `$available` `$free` `$path` |
 | `network` | `$down` `$up` `$device` `$state` `$ssid` `$signal` `$dbm` `$received` `$sent` |
 | `time` | `$now` |
+| `command` | `$text`, or whatever the module declares |
 | `sway:window` | `$title` |
 | `sway:workspaces` | `$name` |
 | `sway:language` | `$layout` `$short` `$index` |
@@ -675,6 +676,64 @@ portable even between two Linux machines.
 compositor.
 Everything else comes from an external i3bar-protocol provider, which is the default when a
 module names no source at all.
+
+### Commands
+
+For anything dbar has no collector for, a module can run a program of your own
+and take what it prints. This is the whole extension mechanism, and it is
+deliberately a *source* rather than a language: there is no interpreter in dbar
+and nothing to learn beyond printing a line.
+
+```toml
+[module.updates]
+source = "command"
+# argv, executed directly. dbar never inserts a shell - ask for one if you
+# want one: ["sh", "-c", "..."]
+command = ["my-update-watcher"]
+format = "$text"
+```
+
+The command is **started once and read a line at a time**, not re-run on a
+timer. A line printed is a redraw; silence costs nothing at all, the same as
+the volume and media modules. That matters: spawning a process takes about a
+millisecond, where a whole redraw takes under a hundred microseconds, so a
+command re-run every second would be the most expensive thing on the bar.
+
+A line with no `=` in it is the whole of what the command said, and lands in
+`$text`. To publish real values instead, say what they are:
+
+```toml
+[module.builds]
+source = "command"
+command = ["watch-builds"]
+fields = { pending = "number", branch = "text", disk = "percent" }
+format = "{$branch }{$pending queued}"
+
+[module.builds.states.busy]
+above = 5              # compares against `pending`, the first number published
+style = "warning"
+```
+
+and print tab-separated pairs:
+
+```
+branch=main	pending=3
+branch=main	pending=0	disk=87%
+```
+
+A value parses as the kind its module declared, a percentage may carry its `%`,
+and an empty value means the field has nothing to report right now - so
+`{groups}` around it collapse. Fields are declared because dbar cannot know what
+somebody else's program prints, and declaring them is what lets a format naming
+`$pendign` be a startup error rather than a blank space.
+
+One key is read rather than drawn: `state=good|warning|critical|error` is how
+the command rates what it is reporting, and it is what `state = "warning"` rules
+match on.
+
+If the command exits, dbar reports an error and starts it again, waiting a
+second and then doubling up to a minute, so a typo in the name costs nothing.
+Commands are killed when the bar is, so a restart does not leave them behind.
 
 ### The i3bar provider
 

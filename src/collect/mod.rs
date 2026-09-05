@@ -12,6 +12,7 @@
 pub mod audio;
 pub mod backlight;
 pub mod battery;
+pub mod command;
 pub mod cpu;
 pub mod disk;
 pub mod load;
@@ -35,6 +36,33 @@ use crate::status::{FieldSpec, Fields, State};
 /// Two of these carry what they are pointed at, because "the disk" and "the network" are
 /// not single things. That also makes them the registry's key, so two modules watching the
 /// same path share one reading while two watching different paths do not.
+/// A command module: what to run, and what it says it will publish.
+///
+/// Two modules naming the same command share one process, so only the argv decides
+/// identity - the declared fields are for checking the config, not for telling one
+/// command from another.
+#[derive(Clone, Debug)]
+pub struct CommandSpec {
+    pub argv: Vec<String>,
+    /// Declared in the config, because dbar cannot know what somebody else's program
+    /// prints. Leaked once while the config is read, which happens exactly once.
+    pub fields: &'static [FieldSpec],
+}
+
+impl PartialEq for CommandSpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.argv == other.argv
+    }
+}
+
+impl Eq for CommandSpec {}
+
+impl std::hash::Hash for CommandSpec {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.argv.hash(state);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Which {
     Audio,
@@ -48,6 +76,8 @@ pub enum Which {
     Disk(String),
     Network(Option<String>),
     Time,
+    /// A program of your own, streaming a line per reading.
+    Command(CommandSpec),
 }
 
 impl Which {
@@ -65,6 +95,7 @@ impl Which {
             Which::Disk(_) => "disk",
             Which::Network(_) => "network",
             Which::Time => "time",
+            Which::Command(_) => "command",
         }
     }
 
@@ -92,6 +123,7 @@ impl Which {
             Which::Disk(_) => disk::FIELDS,
             Which::Network(_) => network::FIELDS,
             Which::Time => time::FIELDS,
+            Which::Command(spec) => spec.fields,
         }
     }
 
@@ -127,6 +159,8 @@ impl Which {
             Which::Disk(_) => " $available ",
             Which::Network(_) => " $down  $up ",
             Which::Time => " $now.time(f:'%a %d %b %H:%M') ",
+            // A command that declares no fields has said one thing, and this is it.
+            Which::Command(_) => " $text ",
         }
     }
 
@@ -144,6 +178,8 @@ impl Which {
             // A backlight only changes when something changes it.
             Which::Backlight => Duration::from_secs(5),
             Which::Time => Duration::from_secs(60),
+            // Never read on the timer: the command pushes when it has something to say.
+            Which::Command(_) => Duration::from_secs(60),
         }
     }
 
@@ -160,12 +196,12 @@ impl Which {
     /// A pushed source is never on the timer and has no collector to call: what it knows
     /// comes from a thread that is told, and the registry only holds the last of it.
     pub fn pushed(&self) -> bool {
-        matches!(self, Which::Audio | Which::Media)
+        matches!(self, Which::Audio | Which::Media | Which::Command(_))
     }
 
     fn open(&self) -> Box<dyn Collector> {
         match self {
-            Which::Audio | Which::Media => Box::new(Pushed),
+            Which::Audio | Which::Media | Which::Command(_) => Box::new(Pushed),
             Which::Cpu => Box::new(cpu::Cpu::new()),
             Which::Memory => Box::new(memory::Memory),
             Which::Battery => Box::new(battery::Battery::new()),

@@ -219,6 +219,27 @@ fn main() -> Result<()> {
 
     // The compositor is optional: without it the workspace and window modules simply have
     // nothing to show, and the rest of the bar is unaffected.
+    // A command module runs a program of your own once and reads a line per reading, so it
+    // costs a thread and no wake-ups rather than a process per tick.
+    for which in config_collectors.keys() {
+        let crate::collect::Which::Command(spec) = which else {
+            continue;
+        };
+        let (tx, rx) = calloop::channel::channel();
+        if let Err(e) = crate::collect::command::spawn(spec.argv.clone(), spec.fields, tx) {
+            log::error!("{e:#}");
+            continue;
+        }
+        let which = which.clone();
+        handle
+            .insert_source(rx, move |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(reading) = event {
+                    app.on_command(&which, reading);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("inserting a command source: {e}"))?;
+    }
+
     let (sway_tx, sway_rx) = calloop::channel::channel();
     match crate::sway::spawn(sway_tx, watching) {
         Ok(()) => {
