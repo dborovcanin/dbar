@@ -57,6 +57,15 @@ pub struct Temperature {
     class: PathBuf,
     /// The chip named in the config, or nothing to look for the processor.
     wanted: Option<String>,
+    /// The chip chosen on the first read, kept so that later reads touch one directory
+    /// instead of the whole class.
+    ///
+    /// Choosing means reading every chip's name, and several of those chips answer slowly:
+    /// a drive's sensor is an NVMe admin command and an embedded controller's is an ACPI
+    /// transaction, so the scan costs milliseconds and wakes hardware whose reading is then
+    /// thrown away. Which chip is the processor does not change while dbar runs, so it is
+    /// settled once. The name is kept alongside to notice a chip that has gone away.
+    chosen: Option<(PathBuf, String)>,
 }
 
 impl Temperature {
@@ -64,13 +73,29 @@ impl Temperature {
         Temperature {
             class: PathBuf::from(CLASS),
             wanted,
+            chosen: None,
         }
+    }
+
+    /// The directory to read, choosing one if this is the first read or the last one left.
+    fn chip_dir(&mut self) -> Option<&Path> {
+        // A cached chip still answering to the name it was chosen under needs no search.
+        let still_there = match &self.chosen {
+            Some((path, name)) => {
+                super::read_to_string(path.join("name")).is_ok_and(|read| read.trim() == name)
+            }
+            None => false,
+        };
+        if !still_there {
+            self.chosen = Some(pick(&self.class, self.wanted.as_deref())?);
+        }
+        self.chosen.as_ref().map(|(path, _)| path.as_path())
     }
 }
 
 impl Collector for Temperature {
     fn read(&mut self) -> Result<Reading> {
-        let Some(chip) = pick(&self.class, self.wanted.as_deref()) else {
+        let Some(chip) = self.chip_dir().and_then(Chip::read) else {
             // Naming a chip that is not there is a mistake worth reporting; finding no
             // processor sensor at all is a machine dbar cannot read, and it says so.
             match &self.wanted {
@@ -138,10 +163,25 @@ impl Chip {
             .trim()
             .to_string();
 
+        // The kernel numbers sensors from one and leaves gaps, so which ones exist is read
+        // from the directory rather than guessed at by opening a fixed range of names.
+        let mut indices: Vec<u32> = std::fs::read_dir(path)
+            .ok()?
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name();
+                let name = name.to_str()?;
+                name.strip_prefix("temp")?
+                    .strip_suffix("_input")?
+                    .parse()
+                    .ok()
+            })
+            .collect();
+        // Sorted so the label a reading is reported under does not depend on directory order.
+        indices.sort_unstable();
+
         let mut sensors = Vec::new();
-        // The kernel numbers sensors from one and leaves gaps, so the count is not known
-        // up front; stop after a run of misses rather than guessing a limit.
-        for i in 1..=32 {
+        for i in indices {
             let Ok(raw) = super::read_to_string(path.join(format!("temp{i}_input"))) else {
                 continue;
             };
@@ -176,7 +216,10 @@ impl Chip {
 }
 
 /// The chip to read: the one named, or the processor's own.
-fn pick(class: &Path, wanted: Option<&str>) -> Option<Chip> {
+///
+/// Only each chip's name is read here. Its sensors are what cost time to fetch, and the
+/// chips that are not going to be chosen should not be paying for them.
+fn pick(class: &Path, wanted: Option<&str>) -> Option<(PathBuf, String)> {
     let Ok(entries) = std::fs::read_dir(class) else {
         return None;
     };
@@ -184,17 +227,27 @@ fn pick(class: &Path, wanted: Option<&str>) -> Option<Chip> {
     // hwmon numbering is not stable across boots, but sorting at least makes one run
     // repeatable.
     paths.sort();
-    let chips: Vec<Chip> = paths.iter().filter_map(|p| Chip::read(p)).collect();
+    let named: Vec<(PathBuf, String)> = paths
+        .into_iter()
+        .filter_map(|path| {
+            let name = super::read_to_string(path.join("name")).ok()?;
+            Some((path, name.trim().to_string()))
+        })
+        .collect();
 
-    if let Some(name) = wanted {
-        return chips.into_iter().find(|c| c.name == name);
+    if let Some(wanted) = wanted {
+        return named.into_iter().find(|(_, name)| name == wanted);
     }
     // Most specific driver first, so a machine with both k10temp and a generic acpitz
-    // reads the processor rather than the case.
+    // reads the processor rather than the case. A driver that is present but reports
+    // nothing is passed over, which needs its sensors, so this is the one place they are
+    // read before a chip is settled on.
     CPU_CHIPS.iter().find_map(|driver| {
-        chips
+        named
             .iter()
-            .find(|c| c.name == *driver && !c.sensors.is_empty())
+            .find(|(path, name)| {
+                name == driver && Chip::read(path).is_some_and(|c| !c.sensors.is_empty())
+            })
             .cloned()
     })
 }
@@ -202,6 +255,20 @@ fn pick(class: &Path, wanted: Option<&str>) -> Option<Chip> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The driver a reading came from, which is how these tests tell chips apart.
+    fn chip_of(reading: &Reading) -> String {
+        match reading.fields.get("chip") {
+            Some(Value::Text(name)) => name.clone(),
+            other => panic!("the chip field is {other:?}"),
+        }
+    }
+
+    /// Choose a chip and read it, which is what a collector does across two steps.
+    fn chip(class: &Path, wanted: Option<&str>) -> Option<Chip> {
+        let (path, _) = pick(class, wanted)?;
+        Chip::read(&path)
+    }
 
     /// Build a `/sys/class/hwmon`-shaped directory.
     fn class(name: &str, chips: &[(&str, &[(&str, &str)])]) -> PathBuf {
@@ -232,7 +299,7 @@ mod tests {
                 ("amdgpu", &[("temp1_input", "44000")]),
             ],
         );
-        let chip = pick(&root, None).expect("a processor sensor is present");
+        let chip = chip(&root, None).expect("a processor sensor is present");
         assert_eq!(chip.name, "k10temp");
         assert_eq!(chip.hottest().unwrap().degrees, 46.625);
         assert_eq!(chip.hottest().unwrap().label.as_deref(), Some("Tctl"));
@@ -247,8 +314,8 @@ mod tests {
                 ("amdgpu", &[("temp1_input", "44000")]),
             ],
         );
-        assert_eq!(pick(&root, Some("amdgpu")).unwrap().name, "amdgpu");
-        assert!(pick(&root, Some("nonesuch")).is_none());
+        assert_eq!(chip(&root, Some("amdgpu")).unwrap().name, "amdgpu");
+        assert!(chip(&root, Some("nonesuch")).is_none());
     }
 
     #[test]
@@ -268,7 +335,7 @@ mod tests {
                 ],
             )],
         );
-        let chip = pick(&root, Some("thinkpad")).expect("the chip is present");
+        let chip = chip(&root, Some("thinkpad")).expect("the chip is present");
         assert_eq!(chip.sensors.len(), 1, "only the wired-up sensor counts");
         assert_eq!(chip.hottest().unwrap().degrees, 46.0);
         // An unfitted sensor reading zero must not drag the average down.
@@ -289,7 +356,7 @@ mod tests {
                 ],
             )],
         );
-        let chip = pick(&root, Some("k10temp")).expect("the chip is present");
+        let chip = chip(&root, Some("k10temp")).expect("the chip is present");
         assert_eq!(chip.hottest().unwrap().degrees, 60.0);
         assert_eq!(chip.hottest().unwrap().label.as_deref(), Some("Tccd1"));
         assert_eq!(chip.average(), 50.0);
@@ -301,6 +368,7 @@ mod tests {
         let mut collector = Temperature {
             class: root.clone(),
             wanted: None,
+            chosen: None,
         };
         let e = collector
             .read()
@@ -310,6 +378,7 @@ mod tests {
         let mut named = Temperature {
             class: root,
             wanted: Some("nonesuch".to_string()),
+            chosen: None,
         };
         let e = named
             .read()
@@ -318,11 +387,83 @@ mod tests {
     }
 
     #[test]
+    fn the_chip_is_settled_once_rather_than_hunted_for_every_tick() {
+        // Reading a chip is what costs time - a drive answers with an NVMe command and an
+        // embedded controller with an ACPI transaction - so the search must not happen
+        // again on every tick. A more specific driver appearing after the first read is
+        // what would move the module if it did.
+        let root = class("settled", &[("coretemp", &[("temp1_input", "50000")])]);
+        let mut collector = Temperature {
+            class: root.clone(),
+            wanted: None,
+            chosen: None,
+        };
+        assert_eq!(chip_of(&collector.read().expect("reads")), "coretemp");
+
+        let later = root.join("hwmon9");
+        std::fs::create_dir_all(&later).expect("the fixture directory is writable");
+        std::fs::write(later.join("name"), "k10temp\n").expect("writable");
+        std::fs::write(later.join("temp1_input"), "60000\n").expect("writable");
+
+        assert_eq!(
+            chip_of(&collector.read().expect("reads")),
+            "coretemp",
+            "the chip was chosen again instead of being remembered"
+        );
+    }
+
+    #[test]
+    fn a_chip_that_goes_away_is_looked_for_again() {
+        let root = class(
+            "vanished",
+            &[
+                ("k10temp", &[("temp1_input", "46000")]),
+                ("coretemp", &[("temp1_input", "50000")]),
+            ],
+        );
+        let mut collector = Temperature {
+            class: root.clone(),
+            wanted: None,
+            chosen: None,
+        };
+        assert_eq!(chip_of(&collector.read().expect("reads")), "k10temp");
+
+        std::fs::remove_dir_all(root.join("hwmon0")).expect("the fixture is removable");
+        assert_eq!(
+            chip_of(&collector.read().expect("reads")),
+            "coretemp",
+            "a chip that is no longer there must not be held on to"
+        );
+    }
+
+    #[test]
+    fn a_sensor_is_found_wherever_the_kernel_numbered_it() {
+        // The numbering is the driver's business and leaves gaps; nothing here may assume
+        // sensors are packed into a low range.
+        let root = class(
+            "numbering",
+            &[(
+                "k10temp",
+                &[
+                    ("temp1_input", "40000"),
+                    ("temp47_input", "71000"),
+                    ("temp47_label", "Tccd8"),
+                ],
+            )],
+        );
+        let chip = chip(&root, Some("k10temp")).expect("the chip is present");
+        assert_eq!(chip.sensors.len(), 2);
+        assert_eq!(chip.hottest().unwrap().degrees, 71.0);
+        assert_eq!(chip.hottest().unwrap().label.as_deref(), Some("Tccd8"));
+    }
+
+    #[test]
     fn how_hot_is_worth_alarming_about() {
         let root = class("hot", &[("k10temp", &[("temp1_input", "95000")])]);
         let mut collector = Temperature {
             class: root,
             wanted: None,
+            chosen: None,
         };
         assert_eq!(collector.read().expect("reads").state, State::Critical);
     }
