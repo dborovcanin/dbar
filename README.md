@@ -4,7 +4,50 @@ A small, event-driven Wayland status bar for Sway/SwayFX. It renders with
 `tiny-skia` on a `wlr-layer-shell` surface and reads what it shows itself, from
 `/proc`, `/sys` and PipeWire. Any i3bar-compatible provider can supply the rest.
 
+![dbar running examples/advanced.toml](docs/advanced.png)
+
+*[examples/advanced.toml](examples/advanced.toml): Gruvbox islands with curved
+transitions between the modules inside each one.*
+
+There is no polling loop and no animation tick: the bar redraws when something
+it shows has changed and sleeps otherwise, and one shared timer serves every
+collector that is on an interval, so adding a module adds no wake-up. On the
+machine this was written on it holds about 9 MB of memory, and drawing the bar
+above at 1920 wide takes around 95 microseconds.
+
+Nothing else has to be installed. The collectors are dbar's own, so a config
+that names no external provider starts no child process at all.
+
 This is the **V0** milestone from [spec.md](spec.md).
+
+## Quick start
+
+```sh
+git clone https://github.com/dborovcanin/dbar && cd dbar
+make prod                                          # optimized build
+./target/release/dbar -c examples/advanced.toml    # try one of the example bars
+make install                                       # keep it: ~/.local/bin
+```
+
+You need Sway or SwayFX (anything with `wlr-layer-shell`) and a Rust
+toolchain. PipeWire and D-Bus are used if a config asks for the volume or the
+media module, and ignored if it does not.
+
+Once you like one, keep it as your own and let Sway start it:
+
+```sh
+mkdir -p ~/.config/dbar
+cp examples/advanced.toml ~/.config/dbar/config.toml
+```
+
+```sh
+# in ~/.config/sway/config, replacing the bar { ... } block
+exec_always pkill -x dbar; dbar
+```
+
+`dbar` with no arguments reads `~/.config/dbar/config.toml`, and falls back to
+a built-in default if there is none. `make install` takes `PREFIX=` if
+`~/.local/bin` is not where you want it.
 
 ## What works
 
@@ -64,18 +107,13 @@ dbar -c path/to.toml    # explicit config
 dbar --print-config     # writes the built-in default config to stdout
 ```
 
-`dbar` needs a status provider on `PATH` - `i3status-rs` by default. It writes
-that provider's own configuration itself, so there is nothing else to install:
+Everything the built-in default shows is read by dbar itself, so there is
+nothing to install alongside it. An external provider is only started when a
+module asks for one - see [the i3bar provider](#the-i3bar-provider).
 
 ```sh
 mkdir -p ~/.config/dbar
-dbar --print-config > ~/.config/dbar/config.toml
-```
-
-Then in your Sway config, replace the `bar { ... }` block with:
-
-```
-exec_always pkill -x dbar; dbar
+dbar --print-config > ~/.config/dbar/config.toml   # start from the annotated default
 ```
 
 ## Configuration

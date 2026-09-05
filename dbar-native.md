@@ -448,24 +448,22 @@ GPU backend:
 
    `App` holds `Box<dyn Backend>`; the shm/tiny-skia backend is the first impl.
 
-2. **Icons hand out `tiny_skia::Path`.** `IconArt::Paths(Vec<IconPath>)` bakes the
-   CPU rasterizer into the icon library. Change icons to emit a neutral path
-   description:
+2. ~~**Icons hand out `tiny_skia::Path`.**~~ Done: `icon.rs` emits `PathCmd`
+   commands in the unit square and the backend converts. Separator and edge
+   geometry in `render.rs` is still built as `tiny_skia` paths, but it is built
+   *inside* the backend rather than handed to it, so it moves with the backend
+   rather than blocking one.
 
-   ```rust
-   pub enum PathCmd { MoveTo(P), LineTo(P), CubicTo(P, P, P), Close }
-   pub struct IconPath { pub cmds: Vec<PathCmd>, pub ink: Ink }
-   ```
+Text is isolated for both halves now: `Measure` for layout, and `DrawText` for
+drawing, which hands back a rasterised run - where it sits relative to the
+origin, and either coverage to tint or premultiplied pixels for a glyph that
+carries its own colour. The backend places and colours it. A GPU backend uploads
+those same bytes to an atlas.
 
-   Each backend converts. Same for separator and edge geometry in `render.rs`,
-   which should build neutral paths and let the backend rasterize.
-
-Text is already isolated behind `Measure` for layout; a GPU backend reuses
-cosmic-text with a glyph atlas rather than its software rasterizer. Note that it
-is not isolated for *drawing*: `TextRenderer::draw` places glyphs at its own
-scale and ignores the transform the rest of `render.rs` goes through, so
-anything that moves the drawing target has to move the text by hand. A backend
-trait should close that gap rather than inherit it.
+With that and the icons, `tiny_skia` appears in `render.rs` and nowhere else.
+What remains of item 1 is the presentation call itself, which is two functions
+wide: `render::render_to_buffer` and `App::draw`. A `Backend` trait is worth
+shaping against a second backend rather than inventing against one.
 
 A group with an `opacity` is drawn opaque onto a spare pixmap and composited
 once, which is the only way a filled separator and a translucent island can
