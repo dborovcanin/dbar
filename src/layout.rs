@@ -348,6 +348,26 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     });
                 }
             }
+            Source::SwayMode => {
+                // Only while the compositor is in a mode worth mentioning: the default one
+                // is what a keyboard does anyway, so the module disappears rather than
+                // saying so, the way i3 and sway's own bars do.
+                if let Some(mode) = &inputs.sway.mode
+                    && mode != crate::sway::DEFAULT_MODE
+                {
+                    let mut fields = Fields::default();
+                    fields.set("mode", Value::Text(mode.clone()));
+                    out.push(Candidate {
+                        module,
+                        text: wording(module, inputs.alt).render(&fields),
+                        flags: StateFlags::default(),
+                        values: fields,
+                        foreground: None,
+                        background: None,
+                        action: None,
+                    });
+                }
+            }
             Source::SwayWorkspaces => {
                 for workspace in &inputs.sway.workspaces {
                     let mut fields = Fields::default();
@@ -975,6 +995,49 @@ padding = 0
             index: 1,
         });
         assert_eq!(render(&sway).as_deref(), Some(" SE "));
+    }
+
+    /// The mode indicator is on the bar exactly while a mode is held. `default` is what a
+    /// keyboard does anyway, so it is drawn as nothing at all rather than as the word.
+    #[test]
+    fn a_binding_mode_is_shown_only_while_one_is_held() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["mode"]
+
+[module.mode]
+source = "sway:mode"
+padding = 0
+"##;
+        let cfg = Config::parse(config).expect("test config parses");
+        let mut sway = SwayState::default();
+        let render = |sway: &SwayState| {
+            let inputs = Inputs {
+                items: &[],
+                native: &Registry::new(&Default::default()),
+                sway,
+                alt: &Default::default(),
+                collapsed: &Default::default(),
+            };
+            let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
+            frame.groups.first().map(|g| g.modules[0].text.clone())
+        };
+
+        // Before the compositor has answered, and while it is in the default mode, the
+        // module draws nothing and takes the group with it.
+        assert_eq!(render(&sway), None);
+        sway.mode = Some(crate::sway::DEFAULT_MODE.to_string());
+        assert_eq!(render(&sway), None);
+
+        sway.mode = Some("resize".to_string());
+        assert_eq!(render(&sway).as_deref(), Some(" resize "));
+
+        // And it goes away again when the mode is left.
+        sway.mode = Some(crate::sway::DEFAULT_MODE.to_string());
+        assert_eq!(render(&sway), None);
     }
 
     #[test]

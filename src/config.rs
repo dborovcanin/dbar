@@ -92,6 +92,8 @@ pub enum Source {
     SwayWorkspaces,
     /// The active keyboard layout, with the short forms the module gives its layouts.
     SwayLanguage(BTreeMap<String, String>),
+    /// The binding mode the compositor is in.
+    SwayMode,
 }
 
 impl Source {
@@ -103,6 +105,7 @@ impl Source {
             Source::SwayWindow => crate::sway::WINDOW_FIELDS,
             Source::SwayWorkspaces => crate::sway::WORKSPACE_FIELDS,
             Source::SwayLanguage(_) => crate::sway::LANGUAGE_FIELDS,
+            Source::SwayMode => crate::sway::MODE_FIELDS,
         }
     }
 
@@ -117,6 +120,7 @@ impl Source {
             Source::SwayWindow => "$title",
             Source::SwayWorkspaces => "$name",
             Source::SwayLanguage(_) => " $short ",
+            Source::SwayMode => " $mode ",
         }
     }
 }
@@ -883,6 +887,11 @@ impl Config {
             .any(|m| matches!(m.source, Source::SwayLanguage(_)))
     }
 
+    /// Whether anything on the bar draws the compositor's binding mode.
+    pub fn needs_mode(&self) -> bool {
+        self.modules().any(|m| m.source == Source::SwayMode)
+    }
+
     /// Whether anything in this config comes from an external status provider.
     ///
     /// Nothing does on a native configuration, and then there is no child process to run.
@@ -1067,6 +1076,7 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         "sway:window" => Source::SwayWindow,
         "sway:workspaces" => Source::SwayWorkspaces,
         "sway:language" => Source::SwayLanguage(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
+        "sway:mode" => Source::SwayMode,
         "audio" => Source::Native(Which::Audio),
         "media" => Source::Native(Which::Media),
         "cpu" => Source::Native(Which::Cpu),

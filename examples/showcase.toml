@@ -332,7 +332,7 @@ overlap = 1
 # Every key a [style.*] takes is also valid directly on a module, plus:
 #
 #   style      name of a [style.*] to start from        default: built-in defaults
-#   source     "provider" | "sway:window" |
+#   source     "provider" | "sway:window" | "sway:mode" |
 #              "sway:workspaces" | "sway:language"      default: "provider"
 #   layouts    what a sway:language module calls each
 #              layout, keyed by xkb's name for it
@@ -414,6 +414,12 @@ style = "cool"
 # A window title has no length limit of its own, so it is capped here rather
 # than allowed to push the clock aside. What does not fit is cut with an
 # ellipsis.
+# The compositor's binding mode. Nothing is drawn while it is `default`, so the
+# module is on the bar exactly while a mode is being held.
+[module.mode]
+source = "sway:mode"
+format = " $mode "
+
 [module.title]
 source = "sway:window"
 style = "plain"
@@ -433,6 +439,7 @@ max_width = 320
 #   sway:window       $title
 #   sway:workspaces   $name
 #   sway:language     $layout $short $index
+#   sway:mode         $mode
 #
 # The first four are read by dbar itself and take an `interval`, which needs a
 # unit. The rest arrive from elsewhere, and how often is not dbar's business.

@@ -20,10 +20,19 @@ const GET_WORKSPACES: u32 = 1;
 const SUBSCRIBE: u32 = 2;
 const GET_TREE: u32 = 4;
 const GET_INPUTS: u32 = 100;
+const GET_BINDING_STATE: u32 = 12;
 
 /// An input event, as the protocol numbers it: the high bit marks a message as an event
 /// rather than a reply to something asked.
 const EVENT_INPUT: u32 = 0x8000_0015;
+/// A binding-mode event, numbered the same way.
+const EVENT_MODE: u32 = 0x8000_0002;
+
+/// The mode a compositor is in when no binding mode is held.
+///
+/// Sway names it this itself, and a bar has nothing to say about it: the point of a mode
+/// indicator is that it appears when the keyboard means something unusual.
+pub const DEFAULT_MODE: &str = "default";
 
 /// What the focused-window module can offer a format.
 pub const WINDOW_FIELDS: &[FieldSpec] = &[FieldSpec {
@@ -34,6 +43,12 @@ pub const WINDOW_FIELDS: &[FieldSpec] = &[FieldSpec {
 /// What one workspace can offer a format.
 pub const WORKSPACE_FIELDS: &[FieldSpec] = &[FieldSpec {
     name: "name",
+    kind: Kind::Text,
+}];
+
+/// What the binding-mode module can offer a format.
+pub const MODE_FIELDS: &[FieldSpec] = &[FieldSpec {
+    name: "mode",
     kind: Kind::Text,
 }];
 
@@ -83,6 +98,8 @@ pub struct SwayState {
     pub window: Option<String>,
     /// The layout of the keyboard last switched, or nothing while no module asks for one.
     pub layout: Option<Layout>,
+    /// The binding mode the compositor is in, which is `default` unless one is held.
+    pub mode: Option<String>,
 }
 
 #[derive(Debug)]
@@ -246,6 +263,28 @@ pub fn abbreviate(name: &str) -> String {
     }
 }
 
+/// The binding mode named by a `mode` event.
+fn mode_change(body: &[u8]) -> Option<String> {
+    #[derive(Deserialize)]
+    struct Event {
+        change: String,
+    }
+    serde_json::from_slice::<Event>(body).ok().map(|e| e.change)
+}
+
+/// The binding mode the compositor is in right now.
+fn read_mode(queries: &mut UnixStream) -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct BindingState {
+        name: String,
+    }
+    send(queries, GET_BINDING_STATE, b"")?;
+    let (_, reply) = recv(queries)?;
+    let state: BindingState =
+        serde_json::from_slice(&reply).context("reading the compositor's binding state")?;
+    Ok(Some(state.name))
+}
+
 /// Run a Sway command on its own connection, since the subscribed one cannot carry it.
 pub fn run_command(command: &str) {
     let result = (|| -> Result<()> {
@@ -265,25 +304,48 @@ pub fn run_command(command: &str) {
 
 /// Subscribe to the compositor and forward its state into the event loop.
 ///
-/// Input devices are only subscribed to and asked about when something on the bar is
-/// going to draw a keyboard layout, so a bar without one pays nothing for the question.
-pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, language: bool) -> Result<()> {
+/// What the bar has asked the compositor for beyond workspaces and windows.
+///
+/// Each of these costs a subscription and a question at startup, so a bar that draws
+/// neither pays for neither.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Watching {
+    pub language: bool,
+    pub mode: bool,
+}
+
+/// Input devices and binding modes are only subscribed to when something on the bar is
+/// going to draw them, so a bar without those modules pays nothing for the questions.
+pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) -> Result<()> {
     // Fail loudly here rather than on the helper thread, so a missing socket is reported
     // at startup instead of silently leaving the modules empty.
     let mut events = connect()?;
     let mut queries = connect()?;
 
-    let subscription: &[u8] = match language {
-        true => br#"["workspace","window","input"]"#,
-        false => br#"["workspace","window"]"#,
-    };
-    send(&mut events, SUBSCRIBE, subscription)?;
+    let mut wanted = vec!["\"workspace\"", "\"window\""];
+    if watching.language {
+        wanted.push("\"input\"");
+    }
+    if watching.mode {
+        wanted.push("\"mode\"");
+    }
+    let subscription = format!("[{}]", wanted.join(","));
+    send(&mut events, SUBSCRIBE, subscription.as_bytes())?;
     let (_, reply) = recv(&mut events)?;
     log::debug!("sway subscribe -> {}", String::from_utf8_lossy(&reply));
 
     let mut state = SwayState::default();
     read_desktop(&mut queries, &mut state)?;
-    if language {
+    if watching.mode {
+        // Sway only reports a mode when it changes, so the one it is already in has to be
+        // asked for. A compositor too old to answer leaves the module empty rather than
+        // stopping the bar.
+        state.mode = read_mode(&mut queries).unwrap_or_else(|e| {
+            log::warn!("the compositor did not report its binding mode: {e:#}");
+            None
+        });
+    }
+    if watching.language {
         // A compositor that will not list its inputs still has workspaces and windows to
         // report, so this is a module that stays empty rather than a reason to give up.
         state.layout = read_layout(&mut queries).unwrap_or_else(|e| {
@@ -299,6 +361,9 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, language: bool) -> Res
             loop {
                 let kind = match recv(&mut events) {
                     Ok((kind, body)) => {
+                        if kind == EVENT_MODE {
+                            state.mode = mode_change(&body);
+                        }
                         if kind == EVENT_INPUT {
                             // Most input events say nothing about the layout, and a redraw
                             // for one would be a wake-up spent on nothing.
@@ -317,6 +382,7 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, language: bool) -> Res
                 // Any workspace or window event can change either half, and the queries are
                 // cheap next to a redraw, so both are re-read rather than patched.
                 if kind != EVENT_INPUT
+                    && kind != EVENT_MODE
                     && let Err(e) = read_desktop(&mut queries, &mut state)
                 {
                     let _ = sender.send(SwayEvent::Stopped(e.to_string()));
@@ -337,6 +403,26 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, language: bool) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mode_event_names_the_mode_it_switched_to() {
+        let body = br#"{"change":"resize","pango_markup":false}"#;
+        assert_eq!(mode_change(body), Some("resize".to_string()));
+    }
+
+    /// Leaving a mode is reported the same way, as a switch back to `default` - which is
+    /// what the bar reads to know the module should disappear again.
+    #[test]
+    fn leaving_a_mode_is_a_switch_to_the_default_one() {
+        let body = br#"{"change":"default","pango_markup":false}"#;
+        assert_eq!(mode_change(body).as_deref(), Some(DEFAULT_MODE));
+    }
+
+    #[test]
+    fn a_mode_event_that_makes_no_sense_names_nothing() {
+        assert_eq!(mode_change(b"{}"), None);
+        assert_eq!(mode_change(b"not json"), None);
+    }
 
     #[test]
     fn a_layout_is_taken_from_the_keyboard_that_was_switched() {

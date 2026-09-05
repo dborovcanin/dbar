@@ -256,6 +256,19 @@ takes the qualifier in brackets where there is one and cuts the name down where
 there is not. `layouts` says what to call a layout instead. With two keyboards
 attached, what is shown follows the one that was switched.
 
+The binding mode comes from there too, and is on the bar only while one is held:
+
+```toml
+[module.mode]
+source = "sway:mode"
+format = " $mode "      # "resize", while that mode is on
+```
+
+`default` is what a keyboard does anyway, so the module draws nothing then and
+the group around it goes with it — the bar grows a segment exactly when the mode
+does. The mode a compositor is already in is asked for at startup, so a bar
+started inside one shows it rather than waiting for the next change.
+
 dbar speaks the compositor's IPC directly, so this costs no dependencies. It is
 optional: without a compositor to talk to, these modules simply show nothing and
 the rest of the bar is unaffected.
@@ -472,6 +485,10 @@ bus:
 | `disk` | `$percent` `$used` `$total` `$available` `$free` `$path` |
 | `network` | `$down` `$up` `$device` `$state` `$ssid` `$signal` `$dbm` `$received` `$sent` |
 | `time` | `$now` |
+| `sway:window` | `$title` |
+| `sway:workspaces` | `$name` |
+| `sway:language` | `$layout` `$short` `$index` |
+| `sway:mode` | `$mode` |
 
 Three of them are pointed at something, and take that from a key of their own:
 
@@ -519,7 +536,8 @@ where the realtime range starts is decided by the C library — the first few ar
 reserved for the threading implementation — so an absolute number is not
 portable even between two Linux machines.
 
-`sway:window`, `sway:workspaces` and `sway:language` come from the compositor.
+`sway:window`, `sway:workspaces`, `sway:language` and `sway:mode` come from the
+compositor.
 Everything else comes from an external i3bar-protocol provider, which is the default when a
 module names no source at all.
 

@@ -47,7 +47,7 @@ warning = "#fabd2f"    # bright yellow
 critical = "#fb4934"   # bright red
 
 [left]
-groups = ["desktop", "window"]
+groups = ["desktop", "mode", "window"]
 
 [right]
 groups = ["playing", "system", "network", "power", "time"]
@@ -150,6 +150,21 @@ padding = 3
 spacing = 3
 
 [group.desktop.edges]
+left = "round"
+right = "round"
+
+# The compositor's binding mode, which is only on the bar while there is one to
+# report. It sits between the workspaces and the window because that is where the
+# eye already is when the keyboard stops doing what it usually does, and it wears
+# the warning colour for the same reason: this is a state you are in and want out
+# of.
+[group.mode]
+modules = ["mode"]
+background = "$warning"
+radius = 12
+# opacity = 0.8
+
+[group.mode.edges]
 left = "round"
 right = "round"
 
@@ -292,6 +307,15 @@ field = "status"
 equals = "paused"
 foreground = "$subtext"
 icon = "play"
+
+# `default` is what a keyboard does anyway, so the module says nothing then and the
+# island goes with it - the bar grows a segment exactly when the mode does.
+[module.mode]
+source = "sway:mode"
+format = " $mode "
+style = "panel"
+foreground = "$background"
+icon = "keyboard"
 
 [module.title]
 source = "sway:window"
