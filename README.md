@@ -55,15 +55,20 @@ make install                                       # keep it: ~/.local/bin
 ### What it needs
 
 A compositor with `wlr-layer-shell` — Sway or SwayFX — and Rust 1.88 or newer.
-The build links PipeWire, and generates bindings for it with `clang`:
+The build links xkbcommon, Wayland and PipeWire, and generates bindings for the
+last of those with `clang`:
 
 ```sh
 # Arch
-sudo pacman -S --needed rust clang libpipewire
+sudo pacman -S --needed rust clang libxkbcommon wayland libpipewire
 
 # Debian / Ubuntu
-sudo apt install rustc cargo clang pkg-config libpipewire-0.3-dev
+sudo apt install rustc cargo clang pkg-config \
+    libxkbcommon-dev libwayland-dev libpipewire-0.3-dev
 ```
+
+On a machine already running Sway most of these are present; `clang` and the
+`-dev` packages usually are not.
 
 PipeWire and D-Bus are only *used* if a config asks for the volume or the media
 module, and are ignored if it does not — but the PipeWire headers are needed to
