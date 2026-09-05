@@ -15,7 +15,7 @@ use crate::icon::{self, IconArt, Ink, PathCmd};
 use std::collections::HashMap;
 
 use crate::layout::{Frame, PlacedGroup, PlacedIcon, PlacedModule, PlacedSeparator};
-use crate::text::TextRenderer;
+use crate::text::{RunPixels, TextRenderer, TextRun};
 
 /// What the renderer needs from a text backend.
 ///
@@ -26,8 +26,12 @@ pub trait DrawText {
     /// Height of one line, in logical pixels.
     fn line_height(&self) -> f32;
 
-    /// Draw `text` with its left edge at `x` and its top at `y`.
-    fn draw(&mut self, pixmap: &mut PixmapMut<'_>, text: &str, x: f32, y: f32, color: Color);
+    /// The rasterised form of `text` at the output scale, or nothing to draw.
+    ///
+    /// The backend places and colours what comes back. Nothing behind this trait knows what
+    /// it is drawing onto, which is what lets the rasteriser be replaced: a GPU backend
+    /// uploads these bytes to an atlas where this one blends them.
+    fn run(&mut self, text: &str) -> Option<&TextRun>;
 }
 
 impl DrawText for TextRenderer {
@@ -35,8 +39,8 @@ impl DrawText for TextRenderer {
         TextRenderer::line_height(self)
     }
 
-    fn draw(&mut self, pixmap: &mut PixmapMut<'_>, text: &str, x: f32, y: f32, color: Color) {
-        TextRenderer::draw(self, pixmap, text, x, y, color)
+    fn run(&mut self, text: &str) -> Option<&TextRun> {
+        TextRenderer::run(self, text)
     }
 }
 
@@ -328,6 +332,81 @@ fn draw_icon_cached(
         color,
         true,
     );
+}
+
+/// Put a string on the pixmap with its left edge at `x` and its top at `y`.
+///
+/// The backend does the placing and the colouring: the text side hands back pixels and
+/// where they sit relative to the origin, and knows nothing about what they land on.
+fn draw_text(
+    pixmap: &mut PixmapMut<'_>,
+    text: &mut dyn DrawText,
+    what: &str,
+    x: f32,
+    y: f32,
+    scale: f32,
+    color: Color,
+) {
+    if color.is_transparent() {
+        return;
+    }
+    let (ox, oy) = ((x * scale).round() as i32, (y * scale).round() as i32);
+    let Some(run) = text.run(what) else {
+        return;
+    };
+    let (rx, ry) = (ox + run.left, oy + run.top);
+    match &run.pixels {
+        // cosmic-text builds a mask glyph's colour as the coverage over the base's rgb and
+        // drops the base's alpha, so an alpha on a text colour has never reached the screen
+        // and is not honoured here either.
+        RunPixels::Coverage(coverage) => blend_coverage(
+            pixmap, coverage, run.width, run.height, rx, ry, color, false,
+        ),
+        RunPixels::Colour(rgba) => blend_rgba(pixmap, rgba, run.width, run.height, rx, ry),
+    }
+}
+
+/// Blend premultiplied RGBA into the pixmap, clipped to the surface.
+///
+/// Only emoji arrive this way: they carry their own colour, so there is nothing to tint.
+fn blend_rgba(
+    pixmap: &mut PixmapMut<'_>,
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    ox: i32,
+    oy: i32,
+) {
+    let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
+    let x0 = ox.max(0);
+    let y0 = oy.max(0);
+    let x1 = (ox + width as i32).min(pw);
+    let y1 = (oy + height as i32).min(ph);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let pixels = pixmap.pixels_mut();
+    for py in y0..y1 {
+        let src = ((py - oy) as usize * width + (x0 - ox) as usize) * 4;
+        let dst = py as usize * pw as usize + x0 as usize;
+        for i in 0..(x1 - x0) as usize {
+            let px = &rgba[src + i * 4..src + i * 4 + 4];
+            let a = u32::from(px[3]);
+            if a == 0 {
+                continue;
+            }
+            let inv = 255 - a;
+            let slot = &mut pixels[dst + i];
+            let under = *slot;
+            let over = |s: u8, d: u8| u32::from(s) + (u32::from(d) * inv + 127) / 255;
+            let na = over(px[3], under.alpha());
+            let nr = over(px[0], under.red()).min(na);
+            let ng = over(px[1], under.green()).min(na);
+            let nb = over(px[2], under.blue()).min(na);
+            *slot = PremultipliedColorU8::from_rgba(nr as u8, ng as u8, nb as u8, na as u8)
+                .unwrap_or(under);
+        }
+    }
 }
 
 /// Blend a coverage buffer into the pixmap in `color`, clipped to the surface.
@@ -757,11 +836,14 @@ fn draw_group(
         }
         // Layout already placed the text; only the vertical centring is ours.
         let ty = module.y + (module.height - tools.line_height) / 2.0;
-        tools.text.draw(
+        let (tx, ty) = (module.text_x + offset.0, ty + offset.1);
+        draw_text(
             pixmap,
+            tools.text,
             &module.text,
-            module.text_x + offset.0,
-            ty + offset.1,
+            tx,
+            ty,
+            scale,
             module.foreground,
         );
     }
@@ -1004,6 +1086,7 @@ mod tests {
         /// The output scale, held by the backend rather than taken from the renderer -
         /// which is exactly why text has to be moved by hand when the target moves.
         scale: f32,
+        run: Option<TextRun>,
     }
 
     const BLOCK: f32 = 8.0;
@@ -1013,13 +1096,23 @@ mod tests {
             BLOCK
         }
 
-        fn draw(&mut self, pixmap: &mut PixmapMut<'_>, text: &str, x: f32, y: f32, color: Color) {
-            let w = text.chars().count() as f32 * BLOCK;
-            // Logical coordinates in, device pixels out, with no reference to the
-            // renderer's transform. The real backend rasterises glyphs the same way.
+        /// A solid block per character, rasterised at the backend's own scale and with no
+        /// reference to the renderer's transform - which is how the real one behaves.
+        fn run(&mut self, text: &str) -> Option<&TextRun> {
+            if text.is_empty() {
+                return None;
+            }
             let s = self.scale;
-            let bounds = (x * s, y * s, w * s, BLOCK * s);
-            fill(pixmap, bounds, 0.0, color, Transform::identity(), None);
+            let width = (text.chars().count() as f32 * BLOCK * s) as usize;
+            let height = (BLOCK * s) as usize;
+            self.run = Some(TextRun {
+                left: 0,
+                top: 0,
+                width,
+                height,
+                pixels: RunPixels::Coverage(vec![0xff; width * height]),
+            });
+            self.run.as_ref()
         }
     }
 
@@ -1270,7 +1363,7 @@ mod tests {
 
     fn shot(frame: &Frame, scale: f32) -> Pixmap {
         let mut pixmap = Pixmap::new((480.0 * scale) as u32, (20.0 * scale) as u32).unwrap();
-        let mut painter = Painter::new(Blocks { scale });
+        let mut painter = Painter::new(Blocks { scale, run: None });
         render(&mut pixmap.as_mut(), &bar(), frame, scale, &mut painter);
         pixmap
     }
