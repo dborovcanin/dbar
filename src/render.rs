@@ -12,7 +12,7 @@ use tiny_skia::{
 use crate::color::Color;
 use crate::config::{Config, Direction, EdgeShape, SeparatorShape};
 use crate::icon::{self, IconArt, Ink};
-use crate::layout::{Frame, PlacedGroup, PlacedIcon, PlacedSeparator};
+use crate::layout::{Frame, PlacedGroup, PlacedIcon, PlacedModule, PlacedSeparator};
 use crate::text::TextRenderer;
 
 /// What the renderer needs from a text backend.
@@ -263,8 +263,37 @@ fn draw_icon(
 }
 
 /// A coverage mask of `path`, used to clip a group's contents to its outline.
-fn clip_mask(pixmap: &PixmapMut<'_>, path: &Path, transform: Transform) -> Option<Mask> {
-    let mut mask = Mask::new(pixmap.width(), pixmap.height())?;
+///
+/// `slot` carries the buffer between frames. tiny-skia requires a mask to be exactly the
+/// size of what it clips, so a slot serves one target - the surface or the layer - and is
+/// rebuilt only when that target changes size. Allocating one per group per redraw is what
+/// this exists to avoid: at two hundred kilobytes a group it was the single most expensive
+/// thing in a frame.
+///
+/// Only `bounds` is cleared before the outline goes down. The rest of the mask keeps the
+/// last group's coverage, which is harmless because nothing is drawn through the mask
+/// outside the group it was built for.
+fn clip_mask<'a>(
+    slot: &'a mut Option<Mask>,
+    width: u32,
+    height: u32,
+    bounds: (u32, u32, u32, u32),
+    path: &Path,
+    transform: Transform,
+) -> Option<&'a Mask> {
+    if !matches!(&slot, Some(m) if m.width() == width && m.height() == height) {
+        *slot = Mask::new(width, height);
+    }
+    let mask = slot.as_mut()?;
+
+    let (bx, by, bw, bh) = bounds;
+    let stride = width as usize;
+    let data = mask.data_mut();
+    for row in by as usize..(by + bh) as usize {
+        let start = row * stride + bx as usize;
+        data[start..start + bw as usize].fill(0);
+    }
+
     mask.fill_path(path, FillRule::Winding, true, transform);
     Some(mask)
 }
@@ -367,7 +396,12 @@ fn render(
 
     // Split up front: drawing an island needs the text backend and the layer at the same
     // time, and they are two independent halves of the painter.
-    let Painter { text, scratch } = painter;
+    let Painter {
+        text,
+        scratch,
+        mask,
+        layer_mask,
+    } = painter;
     let line_height = text.line_height();
     let (pw, ph) = (pixmap.width(), pixmap.height());
 
@@ -385,13 +419,13 @@ fn render(
         // No bounds means the group is opaque, or has nothing to cover. Either way it goes
         // straight down.
         let Some((bx, by, bw, bh)) = bounds else {
-            draw_group(pixmap, group, scale, transform, text, line_height);
+            draw_group(pixmap, group, scale, transform, mask, text, line_height);
             continue;
         };
         let Some(layer) = layer(scratch, bw, bh) else {
             // Nowhere to draw: an island at full strength is a worse bar than one at the
             // asked-for alpha, but it is still a readable one.
-            draw_group(pixmap, group, scale, transform, text, line_height);
+            draw_group(pixmap, group, scale, transform, mask, text, line_height);
             continue;
         };
 
@@ -399,7 +433,15 @@ fn render(
         // be as big as the widest island rather than as big as the bar.
         clear(layer, bw, bh);
         let local = transform.post_translate(-(bx as f32), -(by as f32));
-        draw_group(&mut layer.as_mut(), group, scale, local, text, line_height);
+        draw_group(
+            &mut layer.as_mut(),
+            group,
+            scale,
+            local,
+            layer_mask,
+            text,
+            line_height,
+        );
         composite(pixmap, layer.as_ref(), (bx, by, bw, bh), group.opacity);
     }
 }
@@ -415,6 +457,7 @@ fn draw_group(
     group: &PlacedGroup,
     scale: f32,
     transform: Transform,
+    mask: &mut Option<Mask>,
     text: &mut dyn DrawText,
     line_height: f32,
 ) {
@@ -432,28 +475,35 @@ fn draw_group(
     };
     fill_path(pixmap, &outline, group.background, transform, None);
 
-    // Square module corners and separator overlap would otherwise spill past a
-    // rounded group edge, so clip the group's contents to its own outline.
-    let clip = if rl > 0.0 || rr > 0.0 {
-        clip_mask(pixmap, &outline, transform)
-    } else {
-        None
+    // Square module corners and separator overlap would otherwise spill past a rounded
+    // group edge, so the group's contents are clipped to its own outline. Both halves of
+    // that are worth avoiding: building the mask costs a path fill, and every fill drawn
+    // through one takes a slower blend, which together are a third of a frame.
+    let (pw, ph) = (pixmap.width(), pixmap.height());
+    let clip = match (rl > 0.0 || rr > 0.0) && spills(group) {
+        true => {
+            let bounds = drawn_bounds(group, transform, pw, ph);
+            bounds.and_then(|b| clip_mask(mask, pw, ph, b, &outline, transform))
+        }
+        false => None,
     };
-    let clip = clip.as_ref();
 
     // Separators go down before the modules, so any overlap is covered by them.
     for separator in &group.separators {
         draw_separator(pixmap, separator, scale, transform, clip);
     }
 
-    for module in &group.modules {
+    let count = group.modules.len();
+    for (index, module) in group.modules.iter().enumerate() {
         // Snapped against the same grid as the separators, so the edge a module shares
         // with the gap beside it is one edge rather than two.
         let (mx0, mx1) = (snap(module.x, scale), snap(module.x + module.width, scale));
-        fill(
+        let (ml, mr) = outer_radii(module, group, index, count, rl, rr);
+        fill_edged(
             pixmap,
             (mx0, module.y, mx1 - mx0, module.height),
-            module.radius,
+            ml,
+            mr,
             module.background,
             transform,
             clip,
@@ -470,6 +520,85 @@ fn draw_group(
             ty + offset.1,
             module.foreground,
         );
+    }
+}
+
+/// Whether anything inside `group` could paint past a rounded edge.
+///
+/// Only the outer edges are at risk, and only two things reach them. The first and last
+/// module's background does, and that is handled by giving it the group's own corner radius
+/// rather than a mask - see `outer_radii`. A separator drawn at a group end does too, and
+/// that one cannot be rounded away, so it is the only case left that needs clipping.
+///
+/// Icons and text are not considered. They sit inside their module, and text is not clipped
+/// at all in any case, since the backend places glyphs itself.
+fn spills(group: &PlacedGroup) -> bool {
+    let right = group.x + group.width;
+    group
+        .separators
+        .iter()
+        .any(|s| !s.shape.is_none() && (s.x <= group.x + 0.01 || s.x + s.width >= right - 0.01))
+}
+
+/// The corner radii a module's background is filled with.
+///
+/// A module that reaches a group's rounded corner takes the group's radius there, so its
+/// fill stops exactly where the group's outline does. That replaces a clip mask with the
+/// geometry it would have produced, and produces a cleaner edge than the mask did: coverage
+/// is rasterised once instead of being multiplied by a second antialiased edge.
+///
+/// A module inset by the group's padding does not reach the corner and keeps its own radius.
+fn outer_radii(
+    module: &PlacedModule,
+    group: &PlacedGroup,
+    index: usize,
+    count: usize,
+    left: f32,
+    right: f32,
+) -> (f32, f32) {
+    let full_height = module.height >= group.height - 0.01 && module.y <= group.y + 0.01;
+    if !full_height {
+        return (module.radius, module.radius);
+    }
+    let at_left = index == 0 && module.x <= group.x + 0.01;
+    let at_right = index + 1 == count && module.x + module.width >= group.x + group.width - 0.01;
+    (
+        if at_left {
+            left.max(module.radius)
+        } else {
+            module.radius
+        },
+        if at_right {
+            right.max(module.radius)
+        } else {
+            module.radius
+        },
+    )
+}
+
+/// Where a group lands on the target it is being drawn into, in whole device pixels.
+///
+/// `device_bounds` answers the same question against the surface; this one goes through the
+/// transform, so it is right for a group drawn onto a layer at an offset as well.
+fn drawn_bounds(
+    group: &PlacedGroup,
+    transform: Transform,
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let map = |v: f32, scale: f32, offset: f32| v * scale + offset;
+    let x0 = map(group.x, transform.sx, transform.tx).floor();
+    let y0 = map(group.y, transform.sy, transform.ty).floor();
+    let x1 = map(group.x + group.width, transform.sx, transform.tx).ceil();
+    let y1 = map(group.y + group.height, transform.sy, transform.ty).ceil();
+
+    let x0 = x0.clamp(0.0, width as f32) as u32;
+    let y0 = y0.clamp(0.0, height as f32) as u32;
+    let x1 = x1.clamp(0.0, width as f32) as u32;
+    let y1 = y1.clamp(0.0, height as f32) as u32;
+    match (x1 > x0, y1 > y0) {
+        (true, true) => Some((x0, y0, x1 - x0, y1 - y0)),
+        _ => None,
     }
 }
 
@@ -576,6 +705,11 @@ pub struct Painter<T = TextRenderer> {
     /// buffer serves every such group in a frame, since each is cleared, drawn and put
     /// down before the next is started.
     scratch: Option<Pixmap>,
+    /// Clip masks, kept between frames. One per target, because tiny-skia wants a mask
+    /// exactly the size of what it clips: the surface and the layer are different sizes,
+    /// and a frame can draw groups onto both.
+    mask: Option<Mask>,
+    layer_mask: Option<Mask>,
 }
 
 impl<T: DrawText> Painter<T> {
@@ -583,6 +717,8 @@ impl<T: DrawText> Painter<T> {
         Painter {
             text,
             scratch: None,
+            mask: None,
+            layer_mask: None,
         }
     }
 }
@@ -953,6 +1089,40 @@ mod tests {
                     plain.pixels().len()
                 );
             }
+        }
+    }
+
+    /// A module with a background of its own sits right in the group's rounded corner, and
+    /// must stop where the group's outline does. It gets the group's radius rather than a
+    /// clip mask, so this is what proves the geometry replaced the mask correctly: a square
+    /// corner here would be an opaque pixel out past the curve.
+    #[test]
+    fn a_filled_module_does_not_square_off_a_rounded_group() {
+        for scale in [1.0, 2.0] {
+            let frame = island(1.0);
+            let group = &frame.groups[0];
+            let (gx, gy) = (group.x, group.y);
+            let shot = shot(&frame, scale);
+            let at = |x: f32, y: f32| {
+                let i = (y * scale) as usize * shot.width() as usize + (x * scale) as usize;
+                shot.pixels()[i]
+            };
+
+            // The very corner of the group's bounding box, which the curve cuts away.
+            let corner = at(gx, gy);
+            assert!(
+                corner.alpha() < 40,
+                "scale {scale}: the group's top-left corner is {:#x} opaque, so a module \
+                 painted straight through the rounded edge",
+                corner.alpha()
+            );
+            // Well inside the same module, to be sure it drew at all.
+            let inside = at(gx + 20.0, gy + 10.0);
+            assert_eq!(
+                inside.alpha(),
+                0xff,
+                "scale {scale}: the module itself did not draw"
+            );
         }
     }
 
