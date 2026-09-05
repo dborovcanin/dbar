@@ -2,6 +2,13 @@
 name = "dbar"
 version = "0.1.0"
 edition = "2024"
+# Let-chains and edition 2024; nothing here reaches past them.
+rust-version = "1.88"
+description = "A small, event-driven Wayland status bar for Sway and SwayFX"
+repository = "https://github.com/dborovcanin/dbar"
+readme = "README.md"
+keywords = ["wayland", "sway", "statusbar", "layer-shell", "i3bar"]
+categories = ["command-line-utilities", "gui"]
 
 [dependencies]
 anyhow = "1.0.104"

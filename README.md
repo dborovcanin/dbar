@@ -29,9 +29,22 @@ make prod                                          # optimized build
 make install                                       # keep it: ~/.local/bin
 ```
 
-You need Sway or SwayFX (anything with `wlr-layer-shell`) and a Rust
-toolchain. PipeWire and D-Bus are used if a config asks for the volume or the
-media module, and ignored if it does not.
+### What it needs
+
+A compositor with `wlr-layer-shell` — Sway or SwayFX — and Rust 1.88 or newer.
+The build links PipeWire, and generates bindings for it with `clang`:
+
+```sh
+# Arch
+sudo pacman -S --needed rust clang libpipewire
+
+# Debian / Ubuntu
+sudo apt install rustc cargo clang pkg-config libpipewire-0.3-dev
+```
+
+PipeWire and D-Bus are only *used* if a config asks for the volume or the media
+module, and are ignored if it does not — but the PipeWire headers are needed to
+build either way.
 
 Once you like one, keep it as your own and let Sway start it:
 

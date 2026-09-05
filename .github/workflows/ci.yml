@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A failed build should say so, not fill the log with a backtrace of cargo.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # libspa generates its bindings with clang, and both it and pipewire-sys
+      # are found through pkg-config.
+      - name: Install the libraries the build links
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang pkg-config libpipewire-0.3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      # The suite parses every shipped example, so a config change that breaks
+      # one fails here rather than on somebody's bar.
+      - name: Tests
+        run: cargo test --release
