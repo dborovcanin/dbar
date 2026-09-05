@@ -1,0 +1,287 @@
+# Every module its own pill.
+#
+#   dbar -c examples/pills.toml
+#
+# The other bars group modules into islands and divide them with a separator.
+# This one takes the idea to its end: one module per group, so each floats on
+# its own and the bar's `gap` is the whole of the spacing. Nothing needs a
+# separator, because nothing has a neighbour to be separated from.
+#
+# It costs width - a pill pays for two rounded ends where a shared island pays
+# for two between five modules - and buys legibility on a busy wallpaper, since
+# every reading has its own ground rather than sharing one.
+
+[bar]
+height = 34
+position = "top"
+margin = 6
+# The space between pills. On this bar it is the only spacing there is.
+gap = 8
+font = "sans-serif 17"
+icon_size = 18
+
+[colors]
+# Tokyo Night.
+base = "#1a1b26"
+surface = "#24283b"
+raised = "#292e42"
+text = "#c0caf5"
+subtext = "#565f89"
+blue = "#7aa2f7"
+cyan = "#7dcfff"
+green = "#9ece6a"
+yellow = "#e0af68"
+red = "#f7768e"
+purple = "#bb9af7"
+
+[left]
+groups = ["desktop", "window"]
+
+[right]
+groups = ["cpu", "memory", "temperature", "network", "volume", "brightness", "battery", "time"]
+
+# ---------------------------------------------------------------------------
+# Styles
+#
+# The pills are all one colour and the icons are not, which is what keeps eight
+# of them apart at a glance: you find the battery by its colour before you have
+# read anything.
+# ---------------------------------------------------------------------------
+
+[style.pill]
+foreground = "$text"
+padding = 8
+icon_gap = 4
+
+[style.warning]
+background = "$yellow"
+foreground = "$base"
+padding = 8
+icon_gap = 4
+
+[style.critical]
+background = "$red"
+foreground = "$base"
+padding = 8
+icon_gap = 4
+
+[style.focused]
+background = "$blue"
+foreground = "$base"
+padding = 8
+radius = 14
+
+[style.visible]
+background = "$raised"
+foreground = "$text"
+padding = 8
+radius = 14
+
+[style.dim]
+foreground = "$subtext"
+padding = 8
+
+[style.hovered]
+background = "$raised"
+foreground = "$text"
+
+# ---------------------------------------------------------------------------
+# Groups
+#
+# A radius of half the height is what makes a rectangle a pill: it is clamped to
+# half the shorter side, so anything this large gives fully round ends whatever
+# the bar height is.
+# ---------------------------------------------------------------------------
+
+[group.desktop]
+modules = ["workspaces"]
+background = "$surface"
+radius = 17
+padding = 3
+spacing = 3
+
+[group.window]
+modules = ["title"]
+background = "$surface"
+radius = 17
+
+[group.cpu]
+modules = ["cpu"]
+background = "$surface"
+radius = 17
+
+[group.memory]
+modules = ["memory"]
+background = "$surface"
+radius = 17
+
+[group.temperature]
+modules = ["temperature"]
+background = "$surface"
+radius = 17
+
+[group.network]
+modules = ["network"]
+background = "$surface"
+radius = 17
+
+[group.volume]
+modules = ["volume"]
+background = "$surface"
+radius = 17
+
+[group.brightness]
+modules = ["brightness"]
+background = "$surface"
+radius = 17
+
+[group.battery]
+modules = ["battery"]
+background = "$surface"
+radius = 17
+
+[group.time]
+modules = ["clock"]
+background = "$surface"
+radius = 17
+
+# ---------------------------------------------------------------------------
+# Modules
+# ---------------------------------------------------------------------------
+
+[module.workspaces]
+source = "sway:workspaces"
+style = "dim"
+min_width = 30
+
+[module.workspaces.states.focused]
+focused = true
+style = "focused"
+
+[module.workspaces.states.visible]
+visible = true
+style = "visible"
+
+[module.workspaces.states.urgent]
+urgent = true
+style = "critical"
+radius = 14
+
+[module.title]
+source = "sway:window"
+style = "pill"
+max_width = 360
+
+[module.cpu]
+source = "cpu"
+interval = "2s"
+format = "$utilization.n(d:0)"
+style = "pill"
+icon = "cpu"
+foreground = "$text"
+min_width = 74
+
+[module.cpu.states.busy]
+above = 85
+style = "warning"
+
+[module.memory]
+source = "memory"
+interval = "5s"
+format = "$percent.n(d:0)"
+format_alt = "$used.n(d:1) of $total.n(d:0)"
+style = "pill"
+icon = "memory"
+min_width = 74
+
+[module.memory.states.full]
+above = 90
+style = "warning"
+
+[module.temperature]
+source = "temperature"
+interval = "5s"
+format = "$temp.n(d:0)"
+style = "pill"
+icon = "temperature"
+min_width = 76
+
+[module.temperature.states.hot]
+state = "critical"
+style = "critical"
+
+[module.network]
+source = "network"
+interval = "2s"
+format = "$ssid|$device"
+format_alt = "$down{  $up}"
+style = "pill"
+icon = "wifi"
+
+[module.network.states.offline]
+field = "state"
+equals = "down"
+icon = "wifi-off"
+foreground = "$subtext"
+
+[module.volume]
+source = "audio"
+scroll = "5%"
+format = "$volume.n(d:0)"
+style = "pill"
+icon = "volume"
+min_width = 74
+
+[module.volume.states.headphones_muted]
+fields = { muted = "yes", port = "headphones" }
+foreground = "$subtext"
+icon = "headphones-muted"
+
+[module.volume.states.muted]
+field = "muted"
+equals = "yes"
+foreground = "$subtext"
+icon = "volume-muted"
+
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "headphones"
+
+[module.brightness]
+source = "backlight"
+scroll = "5%"
+format = "$brightness.n(d:0)"
+style = "pill"
+icon = "brightness"
+min_width = 74
+
+[module.battery]
+source = "battery"
+interval = "30s"
+format = "$percent.n(d:0)"
+format_alt = "$percent.n(d:0){  $time.dur(style:short) left}"
+style = "pill"
+icon = "battery"
+min_width = 74
+
+[module.battery.states.plugged]
+field = "supply"
+equals = "mains"
+icon = "battery-charging"
+
+[module.battery.states.warning]
+state = "warning"
+style = "warning"
+
+[module.battery.states.critical]
+state = "critical"
+style = "critical"
+
+[module.clock]
+source = "time"
+interval = "1m"
+format = "$now.time(f:'%H:%M')"
+format_alt = "$now.time(f:'%a %d %b  %H:%M')"
+style = "pill"
+icon = "clock"

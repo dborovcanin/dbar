@@ -1,0 +1,297 @@
+# A light bar, edge to edge.
+#
+#   dbar -c examples/light.toml
+#
+# Every other example here is dark and floats above the wallpaper. This one is
+# the other kind: Solarized Light, no margin, no gap, a single surface running
+# the width of the screen with the modules divided by notches cut out of it.
+#
+# A light bar wants less contrast than a dark one, not more. The two greys are
+# a step apart rather than a jump, and the alarms are the only saturated colour
+# on it - which is the whole point of an alarm.
+
+[bar]
+height = 28
+position = "top"
+# Edge to edge: the bar is the surface, so there is nothing to float above.
+margin = 0
+gap = 0
+font = "sans-serif 16"
+icon_size = 16
+
+[bar.background]
+color = "$paper"
+radius = 0
+
+[colors]
+# Solarized Light, by its author's names for them.
+paper = "#fdf6e3"     # base3
+surface = "#eee8d5"   # base2
+raised = "#e4ddc8"
+line = "#93a1a1"      # base1
+text = "#586e75"      # base01
+subtext = "#839496"   # base0
+blue = "#268bd2"
+cyan = "#2aa198"
+warning = "#b58900"   # yellow
+critical = "#dc322f"  # red
+
+[left]
+groups = ["desktop", "window"]
+
+[right]
+groups = ["system", "power", "time"]
+
+# ---------------------------------------------------------------------------
+# Styles
+# ---------------------------------------------------------------------------
+
+[style.plain]
+foreground = "$text"
+padding = 5
+icon_gap = 3
+
+[style.tile]
+background = "$surface"
+foreground = "$text"
+padding = 5
+icon_gap = 3
+
+[style.tile_alt]
+background = "$raised"
+foreground = "$text"
+padding = 5
+icon_gap = 3
+
+[style.warning]
+background = "$warning"
+foreground = "$paper"
+padding = 5
+icon_gap = 3
+
+[style.critical]
+background = "$critical"
+foreground = "$paper"
+padding = 5
+icon_gap = 3
+
+[style.focused]
+background = "$blue"
+foreground = "$paper"
+padding = 7
+
+[style.visible]
+background = "$surface"
+foreground = "$text"
+padding = 7
+
+[style.dim]
+foreground = "$subtext"
+padding = 7
+
+[style.hovered]
+background = "$raised"
+foreground = "$text"
+
+# ---------------------------------------------------------------------------
+# Groups
+#
+# Square, because a rounded corner on a bar with no margin has nothing to be
+# rounded against - it would cut a notch out of the surface it sits on.
+# ---------------------------------------------------------------------------
+
+[group.desktop]
+modules = ["workspaces"]
+radius = 0
+padding = 0
+spacing = 0
+
+[group.desktop.edges]
+left = "none"
+right = "none"
+
+[group.window]
+modules = ["title"]
+radius = 0
+
+[group.window.edges]
+left = "none"
+right = "none"
+
+[group.system]
+modules = ["cpu", "memory", "temperature", "network"]
+radius = 0
+
+# A notch bites a V out of the trailing edge rather than sloping across it,
+# which divides without the diagonal a slant draws.
+[group.system.separator]
+shape = "notch"
+width = 12
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.system.edges]
+left = "none"
+right = "none"
+
+[group.power]
+modules = ["volume", "brightness", "battery"]
+radius = 0
+
+[group.power.separator]
+shape = "notch"
+width = 12
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.power.edges]
+left = "none"
+right = "none"
+
+[group.time]
+modules = ["clock"]
+background = "$surface"
+radius = 0
+
+[group.time.edges]
+left = "none"
+right = "none"
+
+# ---------------------------------------------------------------------------
+# Modules
+# ---------------------------------------------------------------------------
+
+[module.workspaces]
+source = "sway:workspaces"
+style = "dim"
+min_width = 28
+
+[module.workspaces.states.focused]
+focused = true
+style = "focused"
+
+[module.workspaces.states.visible]
+visible = true
+style = "visible"
+
+[module.workspaces.states.urgent]
+urgent = true
+style = "critical"
+
+[module.title]
+source = "sway:window"
+style = "plain"
+max_width = 420
+
+[module.cpu]
+source = "cpu"
+interval = "2s"
+format = "$utilization.n(d:0)"
+style = "tile"
+icon = "cpu"
+min_width = 64
+
+[module.cpu.states.busy]
+above = 85
+style = "warning"
+
+[module.memory]
+source = "memory"
+interval = "5s"
+format = "$percent.n(d:0)"
+format_alt = "$used.n(d:1) of $total.n(d:0)"
+style = "tile_alt"
+icon = "memory"
+min_width = 64
+
+[module.memory.states.full]
+above = 90
+style = "warning"
+
+[module.temperature]
+source = "temperature"
+interval = "5s"
+format = "$temp.n(d:0)"
+style = "tile"
+icon = "temperature"
+min_width = 66
+
+[module.temperature.states.hot]
+state = "critical"
+style = "critical"
+
+[module.network]
+source = "network"
+interval = "2s"
+format = "$ssid|$device"
+format_alt = "$down{  $up}"
+style = "tile_alt"
+icon = "wifi"
+
+[module.network.states.offline]
+field = "state"
+equals = "down"
+icon = "wifi-off"
+
+[module.volume]
+source = "audio"
+scroll = "5%"
+format = "$volume.n(d:0)"
+style = "tile"
+icon = "volume"
+min_width = 64
+
+[module.volume.states.headphones_muted]
+fields = { muted = "yes", port = "headphones" }
+foreground = "$subtext"
+icon = "headphones-muted"
+
+[module.volume.states.muted]
+field = "muted"
+equals = "yes"
+foreground = "$subtext"
+icon = "volume-muted"
+
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "headphones"
+
+[module.brightness]
+source = "backlight"
+scroll = "5%"
+format = "$brightness.n(d:0)"
+style = "tile_alt"
+icon = "brightness"
+min_width = 64
+
+[module.battery]
+source = "battery"
+interval = "30s"
+format = "$percent.n(d:0)"
+format_alt = "$percent.n(d:0){  $time.dur(style:short) left}"
+style = "tile"
+icon = "battery"
+min_width = 64
+
+[module.battery.states.plugged]
+field = "supply"
+equals = "mains"
+icon = "battery-charging"
+
+[module.battery.states.warning]
+state = "warning"
+style = "warning"
+
+[module.battery.states.critical]
+state = "critical"
+style = "critical"
+
+[module.clock]
+source = "time"
+interval = "1m"
+format = "$now.time(f:'%a %d %b  %H:%M')"
+style = "plain"
+icon = "clock"

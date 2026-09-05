@@ -2,22 +2,30 @@
 #
 #   dbar -c examples/powerline.toml
 #
-# The classic look: an edge-to-edge bar, blocks that run into one another
-# through pointed transitions, and a colour ramp that gets hotter towards the
-# right. Everything here is drawn as geometry, so there is no Nerd Font to
-# install and no glyph that renders a pixel off at some font sizes.
+# The classic shape: an edge-to-edge bar whose blocks run into one another
+# through pointed transitions, and come to a point where the ribbon ends.
+# Everything is drawn as geometry, so there is no Nerd Font to install and no
+# glyph that renders a pixel off at some font sizes.
 #
-# The two things that make it read as one continuous ribbon are `spacing = 0`
-# with `padding = 0` on the group, so nothing shows between blocks, and
-# `color = "previous"`, so each transition is filled with the block behind it.
+# Three things make it read as one continuous ribbon rather than a row of
+# blocks: `padding = 0` and `spacing = 0` on the group, so nothing shows
+# between them; `color = "previous"`, so each transition is filled with the
+# block behind it; and `edges = "none"`, so the ribbon is not rounded off at
+# the ends it is supposed to run out of.
+#
+# The blocks alternate between two greys rather than running through a
+# spectrum. A chevron only reads where the two sides differ, which is all the
+# alternation is for - and it leaves colour free to mean something, which here
+# is the clock, the focused workspace, and a reading that has gone wrong.
 
 [bar]
-height = 30
+height = 32
 position = "top"
 # Edge to edge: no margin, no gap, no rounding anywhere.
 margin = 0
 gap = 0
-font = "sans-serif 10"
+font = "sans-serif 16"
+icon_size = 17
 
 [bar.background]
 color = "$base"
@@ -26,87 +34,14 @@ radius = 0
 [colors]
 base = "#1e1e2e"
 ink = "#11111b"
+# Two steps apart, which is enough for a chevron and not enough to stripe.
+block = "#313244"
+block_alt = "#45475a"
 text = "#cdd6f4"
-step1 = "#585b70"
-step2 = "#89b4fa"
-step3 = "#94e2d5"
-step4 = "#a6e3a1"
-step5 = "#f9e2af"
-step6 = "#f38ba8"
-
-[style.step1]
-background = "$step1"
-foreground = "$text"
-padding = 10
-
-[style.step2]
-background = "$step2"
-foreground = "$ink"
-padding = 10
-
-[style.step3]
-background = "$step3"
-foreground = "$ink"
-padding = 10
-
-[style.step4]
-background = "$step4"
-foreground = "$ink"
-padding = 10
-
-[style.step5]
-background = "$step5"
-foreground = "$ink"
-padding = 10
-
-[style.step6]
-background = "$step6"
-foreground = "$ink"
-padding = 10
-
-[module.workspaces]
-source = "sway:workspaces"
-style = "step1"
-
-[module.workspaces.states.focused]
-focused = true
-style = "step2"
-
-[module.title]
-source = "sway:window"
-style = "step1"
-# A title has no length of its own, so it is capped rather than allowed to push
-# the rest of the bar off the screen.
-max_width = 400
-
-[module.cpu]
-source = "cpu"
-interval = "2s"
-format = " $utilization.n(w:4) "
-style = "step3"
-icon = "cpu"
-
-[module.memory]
-source = "memory"
-interval = "5s"
-format = " $percent.n(w:4) "
-format_alt = " $used.n(d:1) of $total.n(d:0) "
-style = "step4"
-icon = "memory"
-
-[module.backlight]
-source = "backlight"
-signal = 8
-format = " $brightness.n(w:4) "
-style = "step5"
-icon = "brightness"
-
-[module.clock]
-source = "time"
-interval = "1m"
-format = " $now.time(f:'%a %d %b  %H:%M') "
-style = "step6"
-icon = "clock"
+subtext = "#9399b2"
+accent = "#89b4fa"
+warning = "#f9e2af"
+critical = "#f38ba8"
 
 [left]
 groups = ["desktop"]
@@ -114,7 +49,207 @@ groups = ["desktop"]
 [right]
 groups = ["system"]
 
-# The left ribbon points right, away from the screen edge it grows from.
+# ---------------------------------------------------------------------------
+# Styles
+#
+# Padding is small because a ribbon is already generous: every block carries a
+# transition on both sides, so the space between two readings is the chevron
+# plus two paddings, and the chevron is most of it.
+# ---------------------------------------------------------------------------
+
+[style.block]
+background = "$block"
+foreground = "$text"
+padding = 6
+icon_gap = 3
+
+[style.block_alt]
+background = "$block_alt"
+foreground = "$text"
+padding = 6
+icon_gap = 3
+
+[style.accent]
+background = "$accent"
+foreground = "$ink"
+padding = 6
+icon_gap = 3
+
+[style.warning]
+background = "$warning"
+foreground = "$ink"
+padding = 6
+icon_gap = 3
+
+[style.critical]
+background = "$critical"
+foreground = "$ink"
+padding = 6
+icon_gap = 3
+
+# The unfocused workspaces are part of the ribbon too, so they carry its ground
+# rather than sitting on the bare bar: a ribbon that starts halfway along the
+# left run is not a ribbon.
+[style.dim]
+background = "$block"
+foreground = "$subtext"
+padding = 8
+
+[style.hovered]
+background = "$block_alt"
+foreground = "$text"
+
+# ---------------------------------------------------------------------------
+# Modules
+# ---------------------------------------------------------------------------
+
+[module.workspaces]
+source = "sway:workspaces"
+style = "dim"
+min_width = 30
+
+[module.workspaces.states.focused]
+focused = true
+background = "$accent"
+foreground = "$ink"
+
+[module.workspaces.states.visible]
+visible = true
+background = "$block_alt"
+foreground = "$text"
+
+[module.workspaces.states.urgent]
+urgent = true
+background = "$critical"
+foreground = "$ink"
+
+[module.title]
+source = "sway:window"
+style = "block_alt"
+# A title has no length of its own, so it is capped rather than allowed to push
+# the rest of the bar off the screen.
+max_width = 400
+
+[module.cpu]
+source = "cpu"
+interval = "2s"
+format = "$utilization.n(d:0)"
+style = "block_alt"
+icon = "cpu"
+min_width = 68
+
+[module.cpu.states.busy]
+above = 85
+style = "warning"
+
+[module.memory]
+source = "memory"
+interval = "5s"
+format = "$percent.n(d:0)"
+format_alt = "$used.n(d:1) of $total.n(d:0)"
+style = "block"
+icon = "memory"
+min_width = 68
+
+[module.memory.states.full]
+above = 90
+style = "warning"
+
+[module.temperature]
+source = "temperature"
+interval = "5s"
+format = "$temp.n(d:0)"
+style = "block_alt"
+icon = "temperature"
+min_width = 70
+
+[module.temperature.states.hot]
+state = "critical"
+style = "critical"
+
+[module.network]
+source = "network"
+interval = "2s"
+format = "$ssid|$device"
+format_alt = "$down{  $up}"
+style = "block"
+icon = "wifi"
+
+[module.network.states.offline]
+field = "state"
+equals = "down"
+icon = "wifi-off"
+foreground = "$subtext"
+
+[module.volume]
+source = "audio"
+scroll = "5%"
+format = "$volume.n(d:0)"
+style = "block_alt"
+icon = "volume"
+min_width = 68
+
+[module.volume.states.headphones_muted]
+fields = { muted = "yes", port = "headphones" }
+foreground = "$subtext"
+icon = "headphones-muted"
+
+[module.volume.states.muted]
+field = "muted"
+equals = "yes"
+foreground = "$subtext"
+icon = "volume-muted"
+
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "headphones"
+
+[module.backlight]
+source = "backlight"
+format = "$brightness.n(d:0)"
+style = "block"
+icon = "brightness"
+min_width = 68
+
+[module.battery]
+source = "battery"
+interval = "30s"
+format = "$percent.n(d:0)"
+format_alt = "$percent.n(d:0){  $time.dur(style:short) left}"
+style = "block_alt"
+icon = "battery"
+min_width = 68
+
+[module.battery.states.plugged]
+field = "supply"
+equals = "mains"
+icon = "battery-charging"
+
+[module.battery.states.warning]
+state = "warning"
+style = "warning"
+
+[module.battery.states.critical]
+state = "critical"
+style = "critical"
+
+# The one block that is not a step in the alternation, because the time is the
+# one thing on the bar you look for rather than notice.
+[module.clock]
+source = "time"
+interval = "1m"
+format = "$now.time(f:'%a %d %b  %H:%M')"
+style = "accent"
+icon = "clock"
+
+# ---------------------------------------------------------------------------
+# Groups
+#
+# Two ribbons, each pointing away from the screen edge it grows from, so they
+# flow towards the middle rather than both to the right.
+# ---------------------------------------------------------------------------
+
 [group.desktop]
 modules = ["workspaces", "title"]
 padding = 0
@@ -137,16 +272,21 @@ right = "none"
 [group.desktop.ends]
 right = "chevron"
 
-# The right ribbon points left, back towards the middle, so both ribbons flow
-# away from the screen edge they grow from.
-#
 # `direction` mirrors the boundary curve; it does not move the colours, which
 # stay on their own sides. So `color = "previous"` still means "the region on
 # the previous module's side is the previous module's colour", whichever way
-# the point faces. `color = "next"` swaps the two, for a ribbon that reads as
-# flowing backwards.
+# the point faces.
 [group.system]
-modules = ["cpu", "memory", "backlight", "clock"]
+modules = [
+  "cpu",
+  "memory",
+  "temperature",
+  "network",
+  "volume",
+  "backlight",
+  "battery",
+  "clock",
+]
 padding = 0
 spacing = 0
 

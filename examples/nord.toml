@@ -1,0 +1,305 @@
+# A Nord bar with the clock in the middle.
+#
+#   dbar -c examples/nord.toml
+#
+# The three runs are all used here: what you are doing on the left, what the
+# machine is doing on the right, and the time held between them. A centred
+# clock is the one thing a bar can do that a corner widget cannot, and it costs
+# nothing - the centre run is laid out from the middle outwards, so the two ends
+# growing does not move it.
+#
+# Modules inside a group carry their own fill because the transition between
+# them is a filled shape: a slant reads by taking the colour of the module
+# behind it, and there is nothing to take from a module that has no colour.
+
+[bar]
+height = 32
+position = "top"
+margin = 4
+gap = 6
+font = "sans-serif 17"
+icon_size = 18
+
+[colors]
+# Nord, as its author numbered it: four greys, then the frost and aurora hues.
+base = "#2e3440"      # nord0
+surface = "#3b4252"   # nord1
+raised = "#434c5e"    # nord2
+line = "#4c566a"      # nord3
+text = "#e5e9f0"      # nord5
+subtext = "#8892a5"
+frost = "#88c0d0"     # nord8
+deep = "#5e81ac"      # nord10
+warning = "#ebcb8b"   # nord13
+critical = "#bf616a"  # nord11
+
+[left]
+groups = ["desktop", "window"]
+
+[center]
+groups = ["time"]
+
+[right]
+groups = ["system", "network", "power"]
+
+# ---------------------------------------------------------------------------
+# Styles
+#
+# `tile` and `tile_alt` alternate down each group so the slant between two
+# modules has two colours to sit between. `plain` is for the groups that hold
+# one module and take their colour from the group itself.
+# ---------------------------------------------------------------------------
+
+[style.plain]
+foreground = "$text"
+padding = 5
+icon_gap = 3
+
+[style.tile]
+background = "$surface"
+foreground = "$text"
+padding = 5
+icon_gap = 3
+
+[style.tile_alt]
+background = "$raised"
+foreground = "$text"
+padding = 5
+icon_gap = 3
+
+[style.warning]
+background = "$warning"
+foreground = "$base"
+padding = 5
+icon_gap = 3
+
+[style.critical]
+background = "$critical"
+foreground = "$base"
+padding = 5
+icon_gap = 3
+
+[style.focused]
+background = "$frost"
+foreground = "$base"
+padding = 8
+radius = 6
+
+[style.visible]
+background = "$raised"
+foreground = "$text"
+padding = 8
+radius = 6
+
+[style.dim]
+foreground = "$subtext"
+padding = 8
+
+[style.hovered]
+background = "$line"
+foreground = "$text"
+
+# ---------------------------------------------------------------------------
+# Groups
+# ---------------------------------------------------------------------------
+
+[group.desktop]
+modules = ["workspaces"]
+background = "$surface"
+radius = 8
+padding = 2
+spacing = 2
+
+[group.window]
+modules = ["title"]
+background = "$surface"
+radius = 8
+
+# The clock sits alone in the middle, in the one colour nothing else uses.
+[group.time]
+modules = ["clock"]
+background = "$deep"
+radius = 8
+
+[group.system]
+modules = ["cpu", "memory", "temperature"]
+radius = 8
+
+[group.system.separator]
+shape = "slant"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.network]
+modules = ["language", "network"]
+radius = 8
+
+[group.network.separator]
+shape = "slant"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.power]
+modules = ["volume", "brightness", "battery"]
+radius = 8
+
+[group.power.separator]
+shape = "slant"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+# ---------------------------------------------------------------------------
+# Modules
+# ---------------------------------------------------------------------------
+
+[module.workspaces]
+source = "sway:workspaces"
+style = "dim"
+min_width = 30
+
+[module.workspaces.states.focused]
+focused = true
+style = "focused"
+
+[module.workspaces.states.visible]
+visible = true
+style = "visible"
+
+[module.workspaces.states.urgent]
+urgent = true
+style = "critical"
+radius = 6
+
+[module.title]
+source = "sway:window"
+style = "plain"
+max_width = 380
+
+[module.cpu]
+source = "cpu"
+interval = "2s"
+format = "$utilization.n(d:0)"
+style = "tile"
+icon = "cpu"
+min_width = 70
+
+[module.cpu.states.busy]
+above = 85
+style = "warning"
+
+[module.memory]
+source = "memory"
+interval = "5s"
+format = "$percent.n(d:0)"
+format_alt = "$used.n(d:1) of $total.n(d:0)"
+style = "tile_alt"
+icon = "memory"
+min_width = 70
+
+[module.memory.states.full]
+above = 90
+style = "warning"
+
+[module.temperature]
+source = "temperature"
+interval = "5s"
+format = "$temp.n(d:0)"
+style = "tile"
+icon = "temperature"
+min_width = 72
+
+[module.temperature.states.hot]
+state = "critical"
+style = "critical"
+
+[module.language]
+source = "sway:language"
+format = "$short"
+format_alt = "$layout"
+style = "tile"
+icon = "keyboard"
+
+[module.language.layouts]
+"English (US)" = "EN"
+"Serbian (Latin)" = "SR"
+
+[module.network]
+source = "network"
+interval = "2s"
+format = "$ssid|$device"
+format_alt = ["$down{  $up}", "$signal.n(d:0){  $dbm.n(d:0) dBm}"]
+style = "tile_alt"
+icon = "wifi"
+
+[module.network.states.offline]
+field = "state"
+equals = "down"
+icon = "wifi-off"
+
+[module.volume]
+source = "audio"
+scroll = "5%"
+format = "$volume.n(d:0)"
+style = "tile"
+icon = "volume"
+min_width = 70
+
+[module.volume.states.headphones_muted]
+fields = { muted = "yes", port = "headphones" }
+foreground = "$subtext"
+icon = "headphones-muted"
+
+[module.volume.states.muted]
+field = "muted"
+equals = "yes"
+foreground = "$subtext"
+icon = "volume-muted"
+
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "headphones"
+
+[module.brightness]
+source = "backlight"
+scroll = "5%"
+format = "$brightness.n(d:0)"
+style = "tile_alt"
+icon = "brightness"
+min_width = 70
+
+[module.battery]
+source = "battery"
+interval = "30s"
+format = "$percent.n(d:0)"
+format_alt = "$percent.n(d:0){  $time.dur(style:short) left}"
+style = "tile"
+icon = "battery"
+min_width = 70
+
+[module.battery.states.plugged]
+field = "supply"
+equals = "mains"
+icon = "battery-charging"
+
+[module.battery.states.warning]
+state = "warning"
+style = "warning"
+
+[module.battery.states.critical]
+state = "critical"
+style = "critical"
+
+[module.clock]
+source = "time"
+interval = "1m"
+format = "$now.time(f:'%a %d %b  %H:%M')"
+style = "plain"
+foreground = "$text"
+icon = "clock"

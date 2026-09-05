@@ -4,10 +4,11 @@ A small, event-driven Wayland status bar for Sway/SwayFX. It renders with
 `tiny-skia` on a `wlr-layer-shell` surface and reads what it shows itself, from
 `/proc`, `/sys` and PipeWire. Any i3bar-compatible provider can supply the rest.
 
-![dbar running examples/advanced.toml](docs/advanced.png)
+![dbar running examples/advanced.toml](docs/gallery/advanced.png)
 
 *[examples/advanced.toml](examples/advanced.toml): Gruvbox islands with curved
-transitions between the modules inside each one.*
+transitions between the modules inside each one, and what is playing shown only
+while something is.*
 
 There is no polling loop and no animation tick: the bar redraws when something
 it shows has changed and sleeps otherwise, and one shared timer serves every
@@ -20,6 +21,27 @@ that names no external provider starts no child process at all.
 
 This is the **V0** milestone from [spec.md](spec.md), and it is licensed under
 [Apache 2.0](LICENSE).
+
+## What it deliberately does not have
+
+- **No helper processes for status.** The readings come from dbar itself, out
+  of `/proc`, `/sys`, netlink, PipeWire and Sway's own IPC. There is no script
+  on a timer, no `pactl` shelled out to for the volume, no `iw` for the
+  wireless. A config built from native modules starts no child process at all.
+- **No CSS, and no styling language.** Styles are a small cascade of named
+  tables: built-in defaults, then the `[style.*]` a module names, then the
+  module's own keys. There is no selector engine and nothing to invalidate.
+- **No embedded interpreter.** No Lua, no JavaScript, no expression language in
+  the config. Scripting belongs here as a *source* rather than a language: a
+  module can run a command and take what it prints, which is the whole
+  extension mechanism.
+- **No widget tree.** Groups hold modules and runs hold groups. That is the
+  entire layout model, and it is why a redraw is measured in microseconds.
+
+What it does support, because a bar cannot read everything yet, is the i3bar
+protocol: point a module at any i3bar-compatible provider and it appears
+alongside the native ones. That path is permanent, not transitional - but it is
+opt-in, and a bar that does not name one never starts one.
 
 ## Quick start
 
@@ -135,19 +157,64 @@ dbar --print-config > ~/.config/dbar/config.toml   # start from the annotated de
 [examples/config.toml](examples/config.toml) is the annotated default, and is
 also what dbar compiles in and uses when no config file exists.
 
-The rest of `examples/` is a gallery. Each one is a complete bar in a different
+The rest of `examples/` is a gallery. Each is a complete bar in a different
 style, annotated with why it looks the way it does, and each runs with nothing
-else installed:
+else installed. Every screenshot below is that file, unedited:
+
+### [advanced.toml](examples/advanced.toml)
+
+Gruvbox islands, a `curve` between the modules inside each one, and the
+compositor's binding mode appearing between the workspaces and the window only
+while a mode is held.
+
+![advanced.toml](docs/gallery/advanced.png)
+
+### [nord.toml](examples/nord.toml)
+
+Nord, with the clock in the centre run and `slant` transitions. The centre is
+laid out from the middle outwards, so the two ends growing does not move it.
+
+![nord.toml](docs/gallery/nord.png)
+
+### [powerline.toml](examples/powerline.toml)
+
+The classic ribbon, drawn as geometry rather than font glyphs: `chevron`
+transitions, a point at each end, and blocks alternating between two greys so
+colour is left free to mean something.
+
+![powerline.toml](docs/gallery/powerline.png)
+
+### [pills.toml](examples/pills.toml)
+
+Tokyo Night, one module per group, so every reading floats on its own ground.
+No separators at all - nothing has a neighbour to be separated from.
+
+![pills.toml](docs/gallery/pills.png)
+
+### [light.toml](examples/light.toml)
+
+Solarized Light, edge to edge, no margin and square corners, with `notch`
+transitions bitten out of the surface.
+
+![light.toml](docs/gallery/light.png)
+
+### [everforest.toml](examples/everforest.toml)
+
+Everforest along the bottom, `round` transitions, and the window title in the
+centre where the eye finds it without looking.
+
+![everforest.toml](docs/gallery/everforest.png)
+
+### Also in `examples/`
 
 | | |
 |---|---|
 | [daily.toml](examples/daily.toml) | an everyday bar, every module read by dbar itself |
-| [separators.toml](examples/separators.toml) | all seven separator shapes, side by side |
-| [powerline.toml](examples/powerline.toml) | an edge-to-edge ribbon with pointed transitions |
 | [islands.toml](examples/islands.toml) | translucent rounded panels floating over the wallpaper |
 | [minimal.toml](examples/minimal.toml) | text and hairlines, along the bottom of the screen |
 | [states.toml](examples/states.toml) | modules that restyle themselves as values move |
-| [advanced.toml](examples/advanced.toml) | Gruvbox islands, curved transitions, translucent over the wallpaper |
+| [separators.toml](examples/separators.toml) | all seven separator shapes, side by side |
+| [showcase.toml](examples/showcase.toml) | every key dbar understands, as a reference |
 
 ```sh
 dbar -c examples/islands.toml
