@@ -17,7 +17,9 @@ height = 32
 position = "top"
 margin = 4
 gap = 6
-font = "sans-serif 17"
+# Nord is cool and even, so the text is too - Adwaita Sans is near-geometric with
+# open apertures, which holds a centred clock steady at a glance.
+font = "Adwaita Sans 17"
 icon_size = 18
 
 [colors]

@@ -241,6 +241,11 @@ position = "top"      # or "bottom"
 margin = 6            # floats the bar off the screen edge
 gap = 6               # space between groups
 font = "Inter 10"
+fallback = [          # for glyphs `font` lacks; omit and dbar chooses
+  "Symbols Nerd Font",
+  "Noto Color Emoji",
+  "Noto Sans CJK JP",
+]
 
 [bar.background]
 color = "#00000000"   # last two hex digits are alpha
@@ -330,6 +335,25 @@ font = "DejaVuSansM Nerd Font Propo 10"
 A font without those glyphs still works - dbar falls back per glyph - but on a
 system with many Nerd Fonts installed the fallback can source each icon from a
 different face, leaving them mismatched in weight and size.
+
+`[bar] fallback` settles both that and its cost. Finding a glyph the bar's font
+lacks means trying fonts until one has it, and every font tried is read off disk
+and parsed, so on a machine with a few hundred installed one unlucky character -
+a Nerd Font glyph in a workspace name is the ordinary case - can stall the bar
+for tens of milliseconds and leave tens of megabytes of font files mapped for as
+long as it runs. Listing the families worth trying bounds the search and pins
+which face the icons come from:
+
+```toml
+[bar]
+font = "Noto Sans 10"
+fallback = ["Symbols Nerd Font", "Noto Color Emoji", "Noto Sans CJK JP"]
+```
+
+Left out, dbar picks a short set from what is installed - one family each for
+symbols, emoji, CJK and the common scripts. Naming families replaces that choice
+rather than adding to it, and one that is not installed is a startup error rather
+than a row of empty boxes later.
 
 This route leaves the provider choosing which glyph each block gets, and ties
 icon size to the font size. dbar's own icons are independent of both.

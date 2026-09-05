@@ -30,6 +30,12 @@ gap = 3
 # Kept font-agnostic, since this is the built-in default. Icon sizes follow it
 # unless [bar] icon_size says otherwise.
 font = "sans-serif 15"
+# Families for characters `font` has no glyph for - a Nerd Font glyph in a workspace name,
+# a window title in another script, an emoji in a track. Left out, dbar picks a short set
+# from what is installed, which is what keeps the search for a missing glyph from reading
+# every font on the machine. Naming families replaces that choice, and each one has to be
+# installed or dbar says so at startup. Font-agnostic here, so this stays an example:
+# fallback = ["Symbols Nerd Font", "Noto Color Emoji", "Noto Sans CJK JP"]
 icon_size = 20
 exclusive = true       # default: true; reserve the space so windows do not sit under the bar
 

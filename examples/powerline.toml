@@ -24,7 +24,8 @@ position = "top"
 # Edge to edge: no margin, no gap, no rounding anywhere.
 margin = 0
 gap = 0
-font = "sans-serif 16"
+# The Powerline look came off a terminal, and DejaVu is the face it came off.
+font = "DejaVu Sans 16"
 icon_size = 17
 
 [bar.background]

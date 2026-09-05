@@ -18,7 +18,9 @@ position = "top"
 margin = 8
 # Space between one group and the next.
 gap = 10
-font = "sans-serif 10"
+# Rounded panels want rounded letters. Ubuntu's terminals match the shape the bar
+# is made of rather than fighting it.
+font = "Ubuntu 10"
 
 [bar.background]
 # Nothing at all: only the groups below are painted.

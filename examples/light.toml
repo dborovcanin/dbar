@@ -16,7 +16,9 @@ position = "top"
 # Edge to edge: the bar is the surface, so there is nothing to float above.
 margin = 0
 gap = 0
-font = "sans-serif 16"
+# Dark text on a light bar shows every flaw in a face, so this one is neutral and
+# evenly weighted rather than characterful.
+font = "Noto Sans 16"
 icon_size = 16
 
 [bar.background]

@@ -193,6 +193,9 @@ struct RawBar {
     gap: f32,
     #[serde(default = "default_font")]
     font: String,
+    /// Families to draw characters `font` has no glyph for. Empty means dbar chooses.
+    #[serde(default)]
+    fallback: Vec<String>,
     /// Base icon size; defaults to a multiple of the font size.
     icon_size: Option<f32>,
     #[serde(default)]
@@ -449,6 +452,7 @@ impl Default for RawBar {
             margin: 0,
             gap: default_gap(),
             font: default_font(),
+            fallback: Vec::new(),
             icon_size: None,
             background: RawBarBackground::default(),
             exclusive: true,
@@ -487,6 +491,12 @@ pub struct Bar {
     pub gap: f32,
     pub font_family: String,
     pub font_size: f32,
+    /// Families to try for characters the bar's own font cannot draw.
+    ///
+    /// Empty is not "no fallback": it means the config named none and dbar picks a short
+    /// set from what is installed. Naming families here replaces that choice rather than
+    /// adding to it, so a config that lists its own says exactly what the bar may load.
+    pub font_fallback: Vec<String>,
     /// Icon edge length used unless a style or module overrides it.
     pub icon_size: f32,
     pub background: Color,
@@ -950,6 +960,7 @@ impl Config {
             gap: raw.bar.gap,
             font_family,
             font_size,
+            font_fallback: raw.bar.fallback.clone(),
             icon_size: raw
                 .bar
                 .icon_size

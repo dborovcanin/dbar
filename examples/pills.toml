@@ -17,7 +17,9 @@ position = "top"
 margin = 6
 # The space between pills. On this bar it is the only spacing there is.
 gap = 8
-font = "sans-serif 17"
+# One module per pill, so the text is what tells them apart. Roboto's narrow figures
+# keep each pill to its own width instead of stretching it.
+font = "Roboto 17"
 icon_size = 18
 
 [colors]

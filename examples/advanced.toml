@@ -21,7 +21,37 @@ position = "top"
 layer = "bottom"
 margin = 3
 gap = 3
-font = "sans-serif 18"
+font = "Noto Sans 18"
+
+# What to draw a character the bar's own font has no glyph for.
+#
+# A bar shows text it did not write: workspace names carrying Nerd Font glyphs, a window
+# title in Japanese, a track with an emoji in it. When the font above runs out, dbar tries
+# these in order, and the shorter the list the sooner it stops looking.
+#
+# That length is the whole point. Without one, dbar searches every font on the machine and
+# reads each one it tries, so a single Nerd Font glyph in a workspace name can stall the
+# bar for tens of milliseconds and leave tens of megabytes of font files mapped for as long
+# as it runs - on a machine with a wall of patched programming fonts installed, all of them.
+#
+# `Symbols Nerd Font` is the one that matters here: it is the glyphs on their own, so the
+# search finds them in one file instead of wandering through every patched font that also
+# carries them. Everything else covers a script `Noto Sans` does not.
+#
+# Naming them replaces dbar's own choice rather than adding to it, and a family listed here
+# has to be installed - dbar says so at startup rather than drawing empty boxes later.
+# Delete the line and dbar picks a set like this one from whatever it finds.
+fallback = [
+  "Symbols Nerd Font",
+  "Noto Sans Symbols 2",
+  "Noto Color Emoji",
+  "Noto Sans CJK JP",
+  "Noto Sans Arabic",
+  "Noto Sans Hebrew",
+  "Noto Sans Thai",
+  "Noto Sans Devanagari",
+]
+
 icon_size = 20
 
 # ---------------------------------------------------------------------------

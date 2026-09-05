@@ -158,7 +158,7 @@ impl App {
         let height = bar.height;
         let pool =
             SlotPool::new(1920 * height as usize * 4, &shm).context("creating the shm pool")?;
-        let text = TextRenderer::new(&bar.font_family, bar.font_size);
+        let text = TextRenderer::new(&bar.font_family, bar.font_size, &bar.font_fallback)?;
 
         Ok(App {
             registry_state: RegistryState::new(globals),

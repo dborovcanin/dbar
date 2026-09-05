@@ -28,7 +28,9 @@ height = 34
 position = "top"
 margin = 6
 gap = 8
-font = "sans-serif 10"
+# Plain, because the point of this bar is the colours a rule swaps in. A face with
+# opinions of its own would be one more thing changing.
+font = "Noto Sans 10"
 
 [bar.background]
 color = "#00000000"

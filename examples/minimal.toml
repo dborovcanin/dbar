@@ -17,7 +17,9 @@ position = "bottom"
 height = 26
 margin = 0
 gap = 22
-font = "sans-serif 9"
+# Nothing is drawn here except the text, so the text has to survive being small.
+# DejaVu hints well at nine pixels, where a lighter face would go to mush.
+font = "DejaVu Sans 9"
 
 [bar.background]
 # A wash rather than a panel: mostly transparent, just enough to keep text

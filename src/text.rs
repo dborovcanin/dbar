@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use anyhow::{Result, bail};
 use cosmic_text::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, SwashCache};
 
 use crate::layout::Measure;
@@ -130,6 +131,48 @@ const FALLBACK_FAMILIES: &[&str] = &[
     "Inter",
 ];
 
+/// What a bar keeps for characters its own font does not have, when the config names
+/// nothing: one family per job, most likely first.
+///
+/// A status bar draws whatever the compositor and the running programs hand it - a
+/// workspace named with a Nerd Font glyph, a window title in Japanese, a track with an
+/// emoji in it - so the font it was configured with is regularly not enough. The rows below
+/// are the jobs worth covering; dbar keeps the first family of each row that is installed.
+///
+/// The set is deliberately short. Keeping a family costs nothing until a glyph sends the
+/// shaper looking, but a character *no* font can draw is looked for in every family that
+/// is left, and each one tried is a font file read and parsed. On a machine with a wall of
+/// programming fonts installed that is the difference between ten files and four hundred.
+const FALLBACK_ROLES: &[&[&str]] = &[
+    // Powerline and Nerd Font glyphs, which is what workspace names are usually made of.
+    // The dedicated symbol font is worth finding first: every patched programming font
+    // carries the same glyphs, so without it the search wanders through all of them.
+    &["Symbols Nerd Font", "Symbols Nerd Font Mono"],
+    // Latin, Greek and Cyrillic beyond whatever the configured face happens to have.
+    &["Noto Sans", "DejaVu Sans", "Liberation Sans", "FreeSans"],
+    // Arrows, box drawing, dingbats: the punctuation of a window title.
+    &["Noto Sans Symbols 2", "Noto Sans Symbols"],
+    &[
+        "Noto Color Emoji",
+        "Noto Emoji",
+        "Twemoji",
+        "JoyPixels",
+        "OpenMoji",
+    ],
+    // One CJK family covers Chinese, Japanese and Korean; the regional names differ only
+    // in which glyph shapes they prefer.
+    &[
+        "Noto Sans CJK JP",
+        "Noto Sans CJK SC",
+        "Source Han Sans",
+        "WenQuanYi Zen Hei",
+    ],
+    &["Noto Sans Arabic", "Noto Naskh Arabic"],
+    &["Noto Sans Hebrew"],
+    &["Noto Sans Thai"],
+    &["Noto Sans Devanagari"],
+];
+
 /// Names that mean "just give me the default UI font".
 fn is_generic(name: &str) -> bool {
     matches!(
@@ -138,22 +181,28 @@ fn is_generic(name: &str) -> bool {
     )
 }
 
+/// Every family name the font database knows, in database order.
+fn installed(fonts: &FontSystem) -> Vec<String> {
+    fonts
+        .db()
+        .faces()
+        .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
+        .collect()
+}
+
+/// The installed family called `wanted`, whatever case the config spelled it in.
+fn find<'a>(available: &'a [String], wanted: &str) -> Option<&'a String> {
+    available
+        .iter()
+        .find(|name| name.eq_ignore_ascii_case(wanted))
+}
+
 /// Resolve a configured family name to one the font database actually has.
 ///
 /// cosmic-text will not match generic CSS names such as `sans-serif`, and silently renders
 /// nothing when a family is missing, so the name is pinned to a real family up front.
-fn resolve_family(fonts: &mut FontSystem, requested: &str) -> String {
-    let available: Vec<String> = fonts
-        .db()
-        .faces()
-        .flat_map(|face| face.families.iter().map(|(name, _)| name.clone()))
-        .collect();
-    let find = |wanted: &str| {
-        available
-            .iter()
-            .find(|name| name.eq_ignore_ascii_case(wanted))
-            .cloned()
-    };
+fn resolve_family(fonts: &mut FontSystem, requested: &str, available: &[String]) -> String {
+    let find = |wanted: &str| find(available, wanted).cloned();
 
     if !is_generic(requested) {
         if let Some(found) = find(requested) {
@@ -173,12 +222,74 @@ fn resolve_family(fonts: &mut FontSystem, requested: &str) -> String {
     chosen
 }
 
+/// The families worth keeping, given what the config asked for.
+///
+/// A named list is taken as written, because a config that says which fonts to fall back on
+/// means it. Naming one that is not installed is a mistake worth stopping for: the bar would
+/// otherwise start and quietly draw empty boxes wherever that font was needed.
+fn keep_set(available: &[String], primary: &str, configured: &[String]) -> Result<Vec<String>> {
+    let mut keep = vec![primary.to_string()];
+    if configured.is_empty() {
+        keep.extend(
+            FALLBACK_ROLES
+                .iter()
+                .filter_map(|row| row.iter().find_map(|name| find(available, name)).cloned()),
+        );
+        return Ok(keep);
+    }
+    for name in configured {
+        match find(available, name) {
+            Some(found) => keep.push(found.clone()),
+            None => bail!("[bar] fallback names the font family {name:?}, which is not installed"),
+        }
+    }
+    Ok(keep)
+}
+
+/// Drop every family outside `keep` from the font database.
+///
+/// cosmic-text answers a character its primary font lacks by trying the fonts it has, one
+/// after another, and every font it tries is read off disk and parsed. The database it
+/// builds is every font on the machine, so on a system with a few hundred installed, one
+/// unlucky character - a Nerd Font glyph in a workspace name is the ordinary case - reads
+/// all of them, taking tens of milliseconds and leaving tens of megabytes mapped for as
+/// long as the bar runs. Cutting the database to the families that are actually wanted
+/// bounds both.
+fn prune(fonts: &mut FontSystem, keep: &[String]) {
+    let db = fonts.db_mut();
+    let doomed: Vec<_> = db
+        .faces()
+        .filter(|face| {
+            !face
+                .families
+                .iter()
+                .any(|(name, _)| keep.iter().any(|wanted| name.eq_ignore_ascii_case(wanted)))
+        })
+        .map(|face| face.id)
+        .collect();
+    // Everything matched means there is nothing to gain, and nothing matching would leave
+    // no font at all; either way the database is better left as it is.
+    if doomed.is_empty() || doomed.len() == db.len() {
+        return;
+    }
+    for id in doomed {
+        db.remove_face(id);
+    }
+}
+
 impl TextRenderer {
-    pub fn new(family: &str, size: f32) -> TextRenderer {
+    pub fn new(family: &str, size: f32, fallback: &[String]) -> Result<TextRenderer> {
         let mut fonts = FontSystem::new();
-        let family = resolve_family(&mut fonts, family);
-        log::info!("using font family {family:?} at {size}px");
-        TextRenderer {
+        let available = installed(&fonts);
+        let family = resolve_family(&mut fonts, family, &available);
+        let keep = keep_set(&available, &family, fallback)?;
+        prune(&mut fonts, &keep);
+        log::info!(
+            "using font family {family:?} at {size}px, falling back to {:?} ({} faces kept)",
+            &keep[1..],
+            fonts.db().len()
+        );
+        Ok(TextRenderer {
             fonts,
             swash: SwashCache::new(),
             family,
@@ -187,7 +298,7 @@ impl TextRenderer {
             widths: Generations::new(WIDTHS_KEPT),
             runs: Generations::new(SHAPES_KEPT),
             shapes: Generations::new(SHAPES_KEPT),
-        }
+        })
     }
 
     pub fn set_scale(&mut self, scale: f32) {
@@ -375,6 +486,92 @@ mod tests {
 
     fn len<V>(cache: &Generations<V>) -> usize {
         cache.hot.len() + cache.cold.len()
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_bar_that_names_no_fallback_gets_one_family_per_job() {
+        let available = names(&[
+            "Noto Sans",
+            "Symbols Nerd Font",
+            "Noto Sans Symbols 2",
+            "Noto Color Emoji",
+            "Noto Sans CJK JP",
+            // Neither of these has a job in the table, so neither is kept.
+            "JetBrainsMono Nerd Font",
+            "Comic Neue",
+        ]);
+        let keep = keep_set(&available, "Noto Sans", &[]).expect("nothing was named");
+        assert_eq!(keep[0], "Noto Sans", "the bar's own font comes first");
+        assert!(keep.contains(&"Symbols Nerd Font".to_string()));
+        assert!(keep.contains(&"Noto Color Emoji".to_string()));
+        assert!(keep.contains(&"Noto Sans CJK JP".to_string()));
+        assert!(
+            !keep.contains(&"Comic Neue".to_string()),
+            "a family with no job to do is not worth the search it lengthens"
+        );
+    }
+
+    #[test]
+    fn a_job_nothing_installed_can_do_is_left_undone() {
+        // No emoji font and no CJK font: those rows contribute nothing rather than
+        // holding a name the database does not have.
+        let available = names(&["DejaVu Sans", "Noto Sans Symbols"]);
+        let keep = keep_set(&available, "DejaVu Sans", &[]).expect("nothing was named");
+        for name in &keep {
+            assert!(
+                available.iter().any(|have| have == name),
+                "{name:?} is not installed"
+            );
+        }
+        assert!(keep.contains(&"Noto Sans Symbols".to_string()), "{keep:?}");
+    }
+
+    #[test]
+    fn the_second_choice_is_taken_when_the_first_is_not_there() {
+        let available = names(&["Noto Sans", "Symbols Nerd Font Mono", "Source Han Sans"]);
+        let keep = keep_set(&available, "Noto Sans", &[]).expect("nothing was named");
+        assert!(
+            keep.contains(&"Symbols Nerd Font Mono".to_string()),
+            "{keep:?}"
+        );
+        assert!(keep.contains(&"Source Han Sans".to_string()), "{keep:?}");
+    }
+
+    #[test]
+    fn a_named_list_is_taken_as_written_rather_than_added_to() {
+        let available = names(&["Noto Sans", "Noto Color Emoji", "Symbols Nerd Font"]);
+        let keep = keep_set(&available, "Noto Sans", &names(&["Symbols Nerd Font"]))
+            .expect("both families are installed");
+        assert_eq!(keep, names(&["Noto Sans", "Symbols Nerd Font"]));
+        assert!(
+            !keep.contains(&"Noto Color Emoji".to_string()),
+            "a config that lists its fallbacks says which fonts the bar may load"
+        );
+    }
+
+    #[test]
+    fn a_family_is_matched_however_the_config_spelled_it() {
+        let available = names(&["Noto Sans", "Symbols Nerd Font"]);
+        let keep = keep_set(&available, "Noto Sans", &names(&["symbols nerd font"]))
+            .expect("case is not part of a font's name");
+        assert_eq!(
+            keep[1], "Symbols Nerd Font",
+            "the installed spelling is kept"
+        );
+    }
+
+    #[test]
+    fn a_fallback_that_is_not_installed_is_a_startup_error() {
+        let available = names(&["Noto Sans"]);
+        let e = keep_set(&available, "Noto Sans", &names(&["Nonesuch Sans"]))
+            .expect_err("a font that is not there cannot be fallen back on");
+        let message = format!("{e:#}");
+        assert!(message.contains("Nonesuch Sans"), "{message}");
+        assert!(message.contains("fallback"), "{message}");
     }
 
     #[test]

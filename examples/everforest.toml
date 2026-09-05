@@ -16,7 +16,9 @@ height = 30
 position = "bottom"
 margin = 5
 gap = 6
-font = "sans-serif 16"
+# Everforest is a warm, low-contrast palette, and a humanist face sits in it better
+# than a geometric one: the softer letterforms belong to the same idea as the colours.
+font = "Fira Sans 16"
 icon_size = 17
 
 [colors]

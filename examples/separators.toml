@@ -14,7 +14,9 @@ height = 34
 position = "top"
 margin = 6
 gap = 12
-font = "sans-serif 9"
+# Small and plain on purpose: this bar is here to be looked at for its separators,
+# and the text should not be what draws the eye.
+font = "DejaVu Sans 9"
 
 [bar.background]
 color = "#00000000"
