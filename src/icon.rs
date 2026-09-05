@@ -50,6 +50,7 @@ pub enum Icon {
     VolumeMuted,
     WifiOff,
     Headphones,
+    HeadphonesMuted,
     Play,
     Pause,
     Keyboard,
@@ -72,6 +73,7 @@ impl Icon {
             "volume-muted" => Icon::VolumeMuted,
             "wifi-off" => Icon::WifiOff,
             "headphones" => Icon::Headphones,
+            "headphones-muted" => Icon::HeadphonesMuted,
             "play" => Icon::Play,
             "pause" => Icon::Pause,
             "keyboard" | "language" => Icon::Keyboard,
@@ -198,6 +200,14 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
         Icon::Brightness => brightness(&mut out, level),
         Icon::Temperature => temperature(&mut out, level),
         Icon::Headphones => headphones(&mut out),
+        Icon::HeadphonesMuted => {
+            headphones(&mut out);
+            // Struck through the way `wifi-off` is, so the two read as the same kind of
+            // statement: the thing is there, and it is not carrying anything.
+            let mut pb = PathBuilder::new();
+            line(&mut pb, 0.20, 0.22, 0.80, 0.82);
+            finish(pb, Ink::Stroke(0.09), &mut out);
+        }
         Icon::Play => play(&mut out),
         Icon::Pause => pause(&mut out),
         Icon::Keyboard => keyboard(&mut out),

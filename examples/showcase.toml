@@ -340,6 +340,9 @@ overlap = 1
 # and on a [module.*.states.*]:
 #
 #   style      a [style.*] whose keys are applied over the module's
+#   field      the field `above`, `below` and `equals` read
+#   equals     matches when that field reads exactly this word
+#   fields     matches when every field named here reads its word
 #   below      matches under this percentage
 #   above      matches over this percentage
 #   contains   matches this substring of the module's text
@@ -644,6 +647,11 @@ icon = "battery"
 # `equals` compares a field the source published, where `contains` searches the
 # text a format produced. Both say "match on a word", but only this one is
 # reading what was measured, so it is the one a native module uses.
+#
+# `fields` says the same thing about several fields at once, for a state that is
+# a combination rather than a single reading, and beats the rules naming either
+# half - an audio module writes `fields = { muted = "yes", port = "headphones" }`
+# to tell muted headphones from muted speakers.
 [module.battery.states.charging]
 field = "status"
 equals = "charging"

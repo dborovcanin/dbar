@@ -348,6 +348,14 @@ icon = "volume"
 
 # Muted is not a volume of zero - the level is still there, waiting - so the icon
 # says so and the number goes quiet rather than changing.
+# Muted headphones are neither just muted nor just headphones, and a rule that
+# names both readings beats one that names either alone, so this is what wins
+# when they are both true.
+[module.volume.states.headphones_muted]
+fields = { muted = "yes", port = "headphones" }
+foreground = "$subtext"
+icon = "headphones-muted"
+
 [module.volume.states.muted]
 field = "muted"
 equals = "yes"

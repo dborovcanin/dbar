@@ -336,8 +336,19 @@ what it is reporting, `contains` matches the module's own text, `urgent`
 matches the flag the provider sets, `hover` matches the pointer, and `focused`
 and `visible` match a workspace. A rule stating no condition never fires.
 
-Rules are tried in name order and the first one that matches applies, so where
-two could be true at once, the name decides which wins.
+Where two rules could be true at once, the more specific one wins: a rule that
+names more conditions is tried before one that names fewer, and a tighter bound
+before a looser one. Rules that are equally specific are tried in name order.
+
+`field` and `equals` say one thing about one field. A state that is a
+combination of readings says several with `fields`, and beats the rules that
+name either half:
+
+```toml
+[module.volume.states.headphones_muted]
+fields = { muted = "yes", port = "headphones" }
+icon = "headphones-muted"
+```
 
 ```toml
 [module.memory.states.swapping]

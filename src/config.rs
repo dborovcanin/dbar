@@ -366,6 +366,10 @@ struct RawState {
     field: Option<String>,
     /// Matches when the named field reads exactly this, ignoring case.
     equals: Option<String>,
+    /// Matches when every field named here reads exactly what it is paired with, ignoring
+    /// case. `field` and `equals` say one thing about one field; this says several, for the
+    /// states that are a combination rather than a single reading.
+    fields: Option<BTreeMap<String, String>>,
     /// Matches when the block's percentage is under this.
     below: Option<f32>,
     /// Matches when the block's percentage is over this.
@@ -611,6 +615,8 @@ pub struct StateRule {
     pub field: Option<String>,
     /// What the named field has to say, compared without case.
     pub equals: Option<String>,
+    /// Fields that all have to read what they are paired with, compared without case.
+    pub fields: BTreeMap<String, String>,
     /// Substring the module's text must contain.
     pub contains: Option<String>,
     /// Whether that substring is removed from the drawn text once matched.
@@ -664,6 +670,12 @@ impl StateRule {
                 _ => return false,
             }
         }
+        for (name, wanted) in &self.fields {
+            match fields.get(name) {
+                Some(Value::Text(said)) if said.eq_ignore_ascii_case(wanted) => {}
+                _ => return false,
+            }
+        }
         if let Some(limit) = self.below {
             match value {
                 Some(v) if v < limit as f64 => {}
@@ -683,6 +695,7 @@ impl StateRule {
             || self.state.is_some()
             || self.contains.is_some()
             || self.equals.is_some()
+            || !self.fields.is_empty()
             || self.below.is_some()
             || self.above.is_some()
     }
@@ -690,13 +703,19 @@ impl StateRule {
     /// How specific the rule is, for ordering. Urgent first, then the tightest bound; a
     /// rule keyed only on hover carries no bound and so sorts last, leaving a warning or a
     /// critical state visible while the pointer is over it.
-    fn specificity(&self) -> (bool, f32) {
+    fn specificity(&self) -> (std::cmp::Reverse<usize>, f32) {
+        // How many things the rule insists on, so a rule that names two readings beats one
+        // that names either alone: muted headphones are not just headphones, and not just
+        // muted. A rule that insists on nothing categorical still comes last, which is the
+        // order this has always had.
+        let named = usize::from(self.urgent)
+            + usize::from(self.focused)
+            + usize::from(self.state.is_some())
+            + usize::from(self.contains.is_some())
+            + usize::from(self.equals.is_some())
+            + self.fields.len();
         (
-            !(self.urgent
-                || self.focused
-                || self.state.is_some()
-                || self.contains.is_some()
-                || self.equals.is_some()),
+            std::cmp::Reverse(named),
             self.below
                 .unwrap_or(f32::MAX)
                 .min(self.above.map(|a| 100.0 - a).unwrap_or(f32::MAX)),
@@ -1223,6 +1242,25 @@ fn resolve_group(
                         );
                     }
                 }
+                // Every field a combined rule names has to exist and hold a word, for the
+                // same reason: a rule keyed on something the source never publishes, or on
+                // a number compared against a word, could not fire and is a typo.
+                for field in raw_state.fields.iter().flatten().map(|(name, _)| name) {
+                    let known = source.fields().iter().find(|f| f.name == field);
+                    let Some(kind) = known.map(|f| f.kind) else {
+                        bail!(
+                            "[module.{module_name}.states.{state_name}] keys on ${field}, \
+                             which this module's source does not publish"
+                        );
+                    };
+                    if !matches!(kind, crate::status::Kind::Text) {
+                        bail!(
+                            "[module.{module_name}.states.{state_name}] compares ${field} \
+                             against a word, but it is {}",
+                            kind.describe()
+                        );
+                    }
+                }
                 // Matching on text is what a rule has to do when text is all there is. A
                 // native source publishes values, so a rule that reads its wording would
                 // be reading the format's output rather than what was measured.
@@ -1244,6 +1282,7 @@ fn resolve_group(
                     state: rule_state,
                     field: raw_state.field.clone(),
                     equals: raw_state.equals.clone(),
+                    fields: raw_state.fields.clone().unwrap_or_default(),
                     contains: raw_state.contains.clone(),
                     strip: raw_state.strip,
                     below: raw_state.below,
@@ -2034,6 +2073,80 @@ signal = 8
             assert!(message.contains("opacity"), "{message}");
             assert!(message.contains("group.system"), "{message}");
         }
+    }
+
+    /// A state that is a combination of readings has to beat the rules that name either
+    /// half, or muted headphones would show whichever of the two got sorted first.
+    #[test]
+    fn a_rule_naming_two_readings_beats_one_naming_either() {
+        let config = r##"
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["volume"]
+
+[module.volume]
+source = "audio"
+icon = "volume"
+
+[module.volume.states.zz_both]
+fields = { muted = "yes", port = "headphones" }
+icon = "headphones-muted"
+
+[module.volume.states.muted]
+field = "muted"
+equals = "yes"
+icon = "volume-muted"
+
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "headphones"
+"##;
+        let cfg = Config::parse(config).expect("parses");
+        let module = cfg.positions.iter().flatten().next().unwrap().modules[0].clone();
+
+        let says = |muted: &str, port: &str| {
+            let mut fields = crate::status::Fields::default();
+            fields.set("muted", crate::status::Value::Text(muted.to_string()));
+            fields.set("port", crate::status::Value::Text(port.to_string()));
+            module
+                .states
+                .iter()
+                .find(|rule| rule.matches(StateFlags::default(), false, &fields, ""))
+                .and_then(|rule| rule.style.icon)
+        };
+
+        assert_eq!(says("yes", "headphones"), Icon::parse("headphones-muted"));
+        assert_eq!(says("yes", "speaker"), Icon::parse("volume-muted"));
+        assert_eq!(says("no", "headphones"), Icon::parse("headphones"));
+        assert_eq!(
+            says("no", "speaker"),
+            None,
+            "nothing unusual is being reported"
+        );
+    }
+
+    /// A combined rule is checked against the source the same way a single one is.
+    #[test]
+    fn a_combined_rule_cannot_name_a_field_the_source_does_not_publish() {
+        let config = r##"
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["volume"]
+
+[module.volume]
+source = "audio"
+
+[module.volume.states.odd]
+fields = { muted = "yes", jack = "in" }
+"##;
+        let e = Config::parse(config).expect_err("jack is not an audio field");
+        let message = format!("{e:#}");
+        assert!(message.contains("$jack"), "{message}");
     }
 
     #[test]
