@@ -304,6 +304,11 @@ style = "hovered"
 contains = "MUTED"      # a substring of the module's own text
 icon = "volume-muted"
 
+[module.volume.states.port]
+field = "port"          # headphones | speaker | hdmi | bluetooth | line-out
+equals = "headphones"
+icon = "headphones"
+
 [module.battery.states.charging]
 contains = "CHARGING"
 strip = true            # drop the wording once it has been matched
@@ -317,6 +322,9 @@ source rates
 what it is reporting, `contains` matches the module's own text, `urgent`
 matches the flag the provider sets, `hover` matches the pointer, and `focused`
 and `visible` match a workspace. A rule stating no condition never fires.
+
+Rules are tried in name order and the first one that matches applies, so where
+two could be true at once, the name decides which wins.
 
 ```toml
 [module.memory.states.swapping]
@@ -457,7 +465,7 @@ bus:
 | `memory` | `$percent` `$used` `$total` `$available` `$swap_percent` `$swap_used` `$swap_total` |
 | `battery` | `$percent` `$status` `$supply` `$power` `$time` `$health` `$threshold` |
 | `backlight` | `$brightness` `$device` |
-| `audio` | `$volume` `$muted` `$device` |
+| `audio` | `$volume` `$muted` `$device` `$port` |
 | `media` | `$title` `$artist` `$album` `$status` `$player` |
 | `load` | `$one` `$five` `$fifteen` `$percent` |
 | `temperature` | `$temp` `$average` `$label` `$chip` |

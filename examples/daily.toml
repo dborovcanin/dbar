@@ -354,6 +354,13 @@ equals = "yes"
 foreground = "$subtext"
 icon = "volume-muted"
 
+# Which socket the sound is leaving by, so the icon follows the headphones onto
+# your head. Rules are tried in name order, so `muted` above wins over this one.
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "headphones"
+
 # The kernel reports a brightness change, so this is read when it moves and
 # never in between - no interval, and nothing to press after a brightness key.
 [module.brightness]

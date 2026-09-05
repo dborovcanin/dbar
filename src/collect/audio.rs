@@ -43,6 +43,13 @@ pub const FIELDS: &[FieldSpec] = &[
         name: "device",
         kind: Kind::Text,
     },
+    // Which socket the sound is leaving by, as one of a few known words rather than the
+    // card's own wording, so a state rule can match it: `headphones`, `speaker`, `hdmi`,
+    // `bluetooth`, `line-out` or `other`. Plugging headphones in changes this.
+    FieldSpec {
+        name: "port",
+        kind: Kind::Text,
+    },
 ];
 
 /// What the bar can ask PipeWire to do, when a person scrolls or clicks on the volume.
@@ -121,6 +128,27 @@ struct Card {
 struct Route {
     index: i32,
     levels: Levels,
+    /// The card's own name for this route, such as `analog-output-headphones`.
+    name: Option<String>,
+}
+
+/// Which socket a route's own name describes.
+///
+/// Cards name their routes themselves - `analog-output-headphones`, `hdmi-output-0`,
+/// `analog-output-speaker` - and those names vary between drivers. The bar only wants to
+/// know which kind of thing is plugged in, so the name is reduced to one of a few words a
+/// state rule can match. Anything unrecognised keeps `other` rather than guessing.
+fn port_of(name: &str) -> &'static str {
+    let name = name.to_ascii_lowercase();
+    let has = |needle: &str| name.contains(needle);
+    match () {
+        _ if has("headphone") || has("headset") => "headphones",
+        _ if has("speaker") => "speaker",
+        _ if has("hdmi") || has("displayport") => "hdmi",
+        _ if has("bluez") || has("bluetooth") || has("a2dp") || has("sco") => "bluetooth",
+        _ if has("lineout") || has("line-out") => "line-out",
+        _ => "other",
+    }
 }
 
 /// Everything the thread knows, shared between the callbacks PipeWire calls back into.
@@ -131,7 +159,7 @@ struct Sinks {
     cards: HashMap<u32, Card>,
     sender: calloop::channel::Sender<Reading>,
     /// The last reading sent, so an event that changes nothing does not redraw the bar.
-    last: Option<(f64, bool, Option<String>)>,
+    last: Option<(f64, bool, Option<String>, Option<&'static str>)>,
 }
 
 impl Sinks {
@@ -146,6 +174,18 @@ impl Sinks {
         let (card_id, output) = sink.card?;
         let card = self.cards.get(&card_id)?;
         Some((card, card.routes.get(&output)?))
+    }
+
+    /// Which socket the default output is leaving by, when its card says.
+    ///
+    /// A node on a card with no routes - a virtual sink, or a Bluetooth device - has no
+    /// route to ask, so its own name stands in.
+    fn port(&self) -> Option<&'static str> {
+        let sink = self.current()?;
+        match self.route_of(sink) {
+            Some((_, route)) => route.name.as_deref().map(port_of),
+            None => Some(port_of(&sink.name)),
+        }
     }
 
     /// What the default output is playing at, from wherever its volume really lives.
@@ -163,14 +203,18 @@ impl Sinks {
             return;
         };
         let description = self.current().and_then(|sink| sink.description.clone());
-        let current = (levels.volume, levels.muted, description.clone());
+        let port = self.port();
+        // Part of the reading, so plugging headphones in redraws the bar even though the
+        // volume and the mute state have not moved.
+        let current = (levels.volume, levels.muted, description.clone(), port);
         let (volume, muted) = (levels.volume, levels.muted);
         if self.last.as_ref() == Some(&current) {
             return;
         }
         self.last = Some(current);
         log::debug!(
-            "volume {volume:.1}%, muted {muted}, from {}",
+            "volume {volume:.1}%, muted {muted}, port {}, from {}",
+            port.unwrap_or("unknown"),
             match self
                 .current()
                 .map(|sink| (sink.card, self.route_of(sink).map(|(_, r)| r.index)))
@@ -201,6 +245,13 @@ impl Sinks {
             "device",
             match description {
                 Some(description) => Field::Text(description),
+                None => Field::Absent,
+            },
+        );
+        fields.set(
+            "port",
+            match port {
+                Some(port) => Field::Text(port.to_string()),
                 None => Field::Absent,
             },
         );
@@ -489,6 +540,7 @@ fn route_of(param: &Pod) -> Option<(i32, Route)> {
     let mut output = None;
     let mut levels = None;
     let mut outward = false;
+    let mut name = None;
     for property in &object.properties {
         match (property.key, &property.value) {
             (pw::spa::sys::SPA_PARAM_ROUTE_index, Value::Int(v)) => index = Some(*v),
@@ -498,6 +550,9 @@ fn route_of(param: &Pod) -> Option<(i32, Route)> {
             }
             (pw::spa::sys::SPA_PARAM_ROUTE_props, Value::Object(props)) => {
                 levels = levels_in(props);
+            }
+            (pw::spa::sys::SPA_PARAM_ROUTE_name, Value::String(v)) => {
+                name = Some(v.clone());
             }
             _ => {}
         }
@@ -510,6 +565,7 @@ fn route_of(param: &Pod) -> Option<(i32, Route)> {
         Route {
             index: index?,
             levels: levels?,
+            name,
         },
     ))
 }
@@ -683,5 +739,46 @@ mod tests {
         // PipeWire allows amplification past 100%, and clamping it here would report a
         // volume the machine is not playing at.
         assert!(percent(2.0) > 100.0);
+    }
+    use super::port_of;
+
+    /// The names come from real cards: a UCM profile puts the socket in the sink's own
+    /// name, while a card with routes puts it in the route's.
+    #[test]
+    fn a_socket_is_recognised_however_the_card_spells_it() {
+        for (name, want) in [
+            ("analog-output-headphones", "headphones"),
+            ("[Out] Headphones", "headphones"),
+            (
+                "alsa_output.pci-0000_06_00.6.HiFi__Headphones__sink",
+                "headphones",
+            ),
+            ("analog-output-speaker", "speaker"),
+            (
+                "alsa_output.pci-0000_06_00.6.HiFi__Speaker__sink",
+                "speaker",
+            ),
+            ("[Out] Speaker", "speaker"),
+            ("hdmi-output-0", "hdmi"),
+            ("analog-output-lineout", "line-out"),
+            ("bluez_output.AC_12_2F_00_11_22.1", "bluetooth"),
+        ] {
+            assert_eq!(port_of(name), want, "for {name:?}");
+        }
+    }
+
+    /// A headset over Bluetooth is worth calling headphones: what a person wants to see is
+    /// that the sound is on their head, not which radio carried it there.
+    #[test]
+    fn a_bluetooth_headset_counts_as_headphones() {
+        assert_eq!(port_of("bluez_output.XX.headset-head-unit"), "headphones");
+    }
+
+    /// A card nobody has taught us about keeps a word of its own rather than being called
+    /// speakers and quietly showing the wrong icon.
+    #[test]
+    fn an_unknown_socket_is_not_guessed_at() {
+        assert_eq!(port_of("some-vendor-thing"), "other");
+        assert_eq!(port_of(""), "other");
     }
 }

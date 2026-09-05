@@ -426,7 +426,7 @@ max_width = 320
 #   memory            $percent $used $total $available $swap_*
 #   battery           $percent $status $supply $power $time $health $threshold
 #   backlight         $brightness $device
-#   audio             $volume $muted $device
+#   audio             $volume $muted $device $port
 #   media             $title $artist $album $status $player
 #   time              $now
 #   provider          $text $percent

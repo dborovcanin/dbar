@@ -399,11 +399,23 @@ icon = "volume"
 
 # Muted is not a volume of zero - the level is still there, waiting - so the icon
 # says so and the number goes quiet rather than changing.
+#
+# Rules are tried in name order and the first match wins, so this one sorts ahead
+# of `port` below: a muted headset says muted, which is the more useful of the
+# two things to know.
 [module.volume.states.muted]
 field = "muted"
 equals = "yes"
 foreground = "$subtext"
 icon = "volume-muted"
+
+# Which socket the sound is leaving by. PipeWire says so the moment a jack is
+# plugged in, so the icon follows the headphones onto your head without a poll
+# and without a helper.
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "headphones"
 
 # The kernel reports a brightness change, so this is read when it moves and
 # never in between - no interval, and nothing to press after a brightness key.

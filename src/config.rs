@@ -324,7 +324,10 @@ struct RawModule {
     collapsible: Option<bool>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
     #[serde(default)]
-    states: HashMap<String, RawState>,
+    /// Ordered by name, and tried in that order: the first rule that matches is the one
+    /// that applies, so a `HashMap` here would pick a different winner between runs
+    /// whenever two rules can be true at once.
+    states: BTreeMap<String, RawState>,
     #[serde(flatten)]
     overrides: RawStyle,
 }
