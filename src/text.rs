@@ -21,6 +21,12 @@ pub struct TextRenderer {
     scale: f32,
     /// Logical widths, keyed by scale-independent text. Cleared when the scale changes.
     widths: HashMap<String, f32>,
+    /// Shaped buffers, keyed the same way.
+    ///
+    /// Shaping is the expensive half of drawing a string, and a bar draws the same strings
+    /// over and over - most of them every redraw, unchanged. Measuring and drawing share
+    /// this, so a value that layout has already sized costs nothing to put on screen.
+    shapes: HashMap<String, Buffer>,
 }
 
 /// Families to try when the configured one is generic or missing.
@@ -88,13 +94,16 @@ impl TextRenderer {
             size,
             scale: 1.0,
             widths: HashMap::new(),
+            shapes: HashMap::new(),
         }
     }
 
     pub fn set_scale(&mut self, scale: f32) {
         if (scale - self.scale).abs() > f32::EPSILON {
             self.scale = scale;
+            // Both are shaped at the physical size, so neither survives a scale change.
             self.widths.clear();
+            self.shapes.clear();
         }
     }
 
@@ -107,20 +116,23 @@ impl TextRenderer {
         Metrics::new(self.size * self.scale, self.line_height() * self.scale)
     }
 
-    fn shaped(&mut self, text: &str) -> Buffer {
+    /// The shaped form of `text`, shaping it if this is the first time it has been seen.
+    ///
+    /// Returns the font system alongside, because every caller needs both at once and the
+    /// borrow checker will not hand them out separately once one is held.
+    fn shaped(&mut self, text: &str) -> (&mut Buffer, &mut FontSystem) {
         let metrics = self.metrics();
-        // Destructure so the font system and the family string can be borrowed at once.
-        let TextRenderer { fonts, family, .. } = self;
-        let mut buffer = Buffer::new(fonts, metrics);
-        buffer.set_size(None, None);
-        buffer.set_text(
-            text,
-            &Attrs::new().family(Family::Name(family)),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(fonts, false);
-        buffer
+        // Destructured so the cache, the font system and the family can be borrowed at once.
+        let TextRenderer {
+            fonts,
+            family,
+            shapes,
+            ..
+        } = self;
+        let buffer = shapes
+            .entry(text.to_string())
+            .or_insert_with(|| shape(fonts, family, metrics, text));
+        (buffer, fonts)
     }
 
     /// Width of `text` in logical pixels.
@@ -128,11 +140,12 @@ impl TextRenderer {
         if let Some(w) = self.widths.get(text) {
             return *w;
         }
-        let buffer = self.shaped(text);
+        let scale = self.scale;
+        let (buffer, _) = self.shaped(text);
         let physical = buffer
             .layout_runs()
             .fold(0.0f32, |acc, run| acc.max(run.line_w));
-        let logical = physical / self.scale;
+        let logical = physical / scale;
         self.widths.insert(text.to_string(), logical);
         logical
     }
@@ -146,13 +159,36 @@ impl TextRenderer {
         let origin_x = (x * scale).round() as i32;
         let origin_y = (y * scale).round() as i32;
 
-        let mut buffer = self.shaped(text);
         let fill = cosmic_text::Color::rgba(color.r, color.g, color.b, color.a);
-        let TextRenderer { fonts, swash, .. } = self;
+        let metrics = self.metrics();
+        let TextRenderer {
+            fonts,
+            family,
+            swash,
+            shapes,
+            ..
+        } = self;
+        let buffer = shapes
+            .entry(text.to_string())
+            .or_insert_with(|| shape(fonts, family, metrics, text));
         buffer.draw(fonts, swash, fill, |gx, gy, w, h, c| {
             blend_rect(pixmap, origin_x + gx, origin_y + gy, w, h, c);
         });
     }
+}
+
+/// Shape one string at `metrics`, laying it out on a single unbounded line.
+fn shape(fonts: &mut FontSystem, family: &str, metrics: Metrics, text: &str) -> Buffer {
+    let mut buffer = Buffer::new(fonts, metrics);
+    buffer.set_size(None, None);
+    buffer.set_text(
+        text,
+        &Attrs::new().family(Family::Name(family)),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(fonts, false);
+    buffer
 }
 
 /// Source-over blend of a solid rect into a premultiplied pixmap, clipped to its bounds.
