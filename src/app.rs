@@ -12,7 +12,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
-        pointer::{PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{AxisScroll, PointerEvent, PointerEventKind, PointerHandler},
     },
     shell::{
         WaylandSurface,
@@ -94,6 +94,12 @@ pub struct App {
 
     /// Pointer position in surface coordinates, while it is over the bar.
     pointer_at: Option<(f32, f32)>,
+    /// Scrolling not yet worth a step, in steps.
+    ///
+    /// A wheel notch and a finger on a touchpad both arrive as a stream of small amounts,
+    /// and acting on each one turns a flick of the wrist into thirty adjustments. What is
+    /// left over is carried to the next event so slow scrolling still gets there.
+    scrolled: f64,
     configured: bool,
     dirty: bool,
     frame_pending: bool,
@@ -184,6 +190,7 @@ impl App {
             height,
             scale: 1,
             pointer_at: None,
+            scrolled: 0.0,
             configured: false,
             dirty: true,
             frame_pending: false,
@@ -751,15 +758,13 @@ impl PointerHandler for App {
                 PointerEventKind::Leave { .. } => self.set_pointer(None),
                 PointerEventKind::Press { button, .. } => self.on_click(x, y, button),
                 PointerEventKind::Axis { vertical, .. } => {
+                    let steps = steps_of(&vertical, &mut self.scrolled);
                     // i3bar encodes scroll as buttons 4 (up) and 5 (down).
-                    let button = if vertical.absolute < 0.0 || vertical.discrete < 0 {
-                        Some(4)
-                    } else if vertical.absolute > 0.0 || vertical.discrete > 0 {
-                        Some(5)
-                    } else {
-                        None
+                    let button = match steps.is_negative() {
+                        true => 4,
+                        false => 5,
                     };
-                    if let Some(button) = button {
+                    for _ in 0..steps.unsigned_abs() {
                         self.dispatch_click(x, y, button);
                     }
                 }
@@ -802,5 +807,126 @@ fn i3bar_button(code: u32) -> Option<u32> {
         BTN_MIDDLE => Some(2),
         BTN_RIGHT => Some(3),
         _ => None,
+    }
+}
+
+/// How many whole steps a scroll event is worth, carrying the remainder in `carried`.
+///
+/// The three ways a compositor can describe scrolling all reduce to steps, because a step
+/// is what the bar acts on. `value120` is what a modern one sends and counts 120 to a
+/// notch, however finely the wheel itself reports; `discrete` is the older whole-notch
+/// form; and a touchpad has neither, so its pixels are divided by how far a finger should
+/// travel for one step.
+///
+/// Acting on every event instead is what made a flick of the wrist thirty adjustments: a
+/// high-resolution wheel sends eight events to the notch and a touchpad sends a stream of
+/// fractions. What does not reach a whole step is carried, so slow scrolling still arrives,
+/// and it is dropped when the direction changes so a scroll back does not start part-way.
+fn steps_of(axis: &AxisScroll, carried: &mut f64) -> i32 {
+    /// What `value120` counts to one notch.
+    const WHEEL_NOTCH: f64 = 120.0;
+    /// How far a finger travels for one step, in the pixels a touchpad reports.
+    const TOUCHPAD_STEP: f64 = 15.0;
+
+    let moved = if axis.value120 != 0 {
+        f64::from(axis.value120) / WHEEL_NOTCH
+    } else if axis.discrete != 0 {
+        f64::from(axis.discrete)
+    } else {
+        axis.absolute / TOUCHPAD_STEP
+    };
+
+    if axis.stop || moved == 0.0 {
+        *carried = 0.0;
+        return 0;
+    }
+    if *carried != 0.0 && carried.is_sign_negative() != moved.is_sign_negative() {
+        *carried = 0.0;
+    }
+
+    *carried += moved;
+    let whole = carried.trunc();
+    *carried -= whole;
+    whole as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wheel(value120: i32) -> AxisScroll {
+        AxisScroll {
+            value120,
+            ..AxisScroll::default()
+        }
+    }
+
+    fn finger(pixels: f64) -> AxisScroll {
+        AxisScroll {
+            absolute: pixels,
+            ..AxisScroll::default()
+        }
+    }
+
+    /// One notch is one step, however many events the wheel takes to report it. A
+    /// high-resolution wheel sends eighths of a notch, and eight of those are one step
+    /// rather than eight.
+    #[test]
+    fn a_wheel_notch_is_one_step_however_finely_it_arrives() {
+        let mut carried = 0.0;
+        assert_eq!(steps_of(&wheel(120), &mut carried), 1);
+
+        let mut carried = 0.0;
+        let stepped: i32 = (0..8).map(|_| steps_of(&wheel(15), &mut carried)).sum();
+        assert_eq!(stepped, 1, "eight eighths of a notch made {stepped} steps");
+    }
+
+    /// A touchpad reports pixels and no notches at all, which is what used to turn a
+    /// two-finger drag into an adjustment per frame.
+    #[test]
+    fn a_finger_has_to_travel_before_anything_moves() {
+        let mut carried = 0.0;
+        for _ in 0..4 {
+            assert_eq!(steps_of(&finger(3.0), &mut carried), 0, "moved too early");
+        }
+        assert_eq!(steps_of(&finger(3.0), &mut carried), 1);
+    }
+
+    /// Scrolling the other way starts from nothing, so a nudge back does not land on a
+    /// step that the previous direction had almost paid for.
+    #[test]
+    fn turning_around_drops_what_was_carried() {
+        let mut carried = 0.0;
+        // Three quarters of a notch up: not a step yet, but carried.
+        assert_eq!(steps_of(&wheel(90), &mut carried), 0);
+        // A full notch down is a full step down. Had the upward remainder still been
+        // there it would have paid for three quarters of this one, and nothing would
+        // have moved.
+        assert_eq!(steps_of(&wheel(-120), &mut carried), -1);
+    }
+
+    /// A fast scroll is still every step it asked for, rather than one.
+    #[test]
+    fn a_flick_is_worth_every_step_in_it() {
+        let mut carried = 0.0;
+        assert_eq!(steps_of(&wheel(600), &mut carried), 5);
+    }
+
+    /// The end of a kinetic scroll leaves nothing behind to leak into the next one.
+    #[test]
+    fn the_end_of_a_scroll_clears_what_was_carried() {
+        let mut carried = 0.0;
+        assert_eq!(steps_of(&finger(10.0), &mut carried), 0);
+        let stop = AxisScroll {
+            stop: true,
+            ..AxisScroll::default()
+        };
+        assert_eq!(steps_of(&stop, &mut carried), 0);
+        assert_eq!(carried, 0.0);
+        assert_eq!(
+            steps_of(&finger(10.0), &mut carried),
+            0,
+            "carried across a stop"
+        );
     }
 }
