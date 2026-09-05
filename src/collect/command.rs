@@ -1,11 +1,23 @@
 //! A module whose readings come from a program of your own.
 //!
-//! This is dbar's extension mechanism, and it is deliberately not a language. The command
-//! is spawned once and its standard output is read a line at a time, so a script that has
-//! something to say says it and the bar redraws; a script with nothing to say costs
-//! nothing at all. That is the same deal the volume and the media modules get, and it is
-//! why this is a streaming source rather than a program re-run on a timer: spawning a
-//! process costs about a millisecond, which is a dozen redraws.
+//! This is dbar's extension mechanism, and it is deliberately not a language. There are
+//! two kinds of program worth writing against a bar, and `interval` is how a module says
+//! which it has.
+//!
+//! Without one, the command streams: it is spawned once and its standard output is read a
+//! line at a time, so a script that has something to say says it and the bar redraws, and
+//! a script with nothing to say costs nothing at all. That is the same deal the volume and
+//! the media modules get, and it is the cheapest arrangement there is - no process is
+//! started to find out that nothing changed.
+//!
+//! With one, the command answers: it is run to completion, what it printed becomes the
+//! reading, and it is run again when the interval comes round. `interval = "once"` runs it
+//! at startup and never again, for something that cannot change while the bar is up. This
+//! costs a process each time, which is why it is not the default, but it is what almost
+//! every script anybody already has is shaped like.
+//!
+//! Either way the running happens on this module's own thread and readings arrive on a
+//! channel, so a script that takes a second to answer delays nothing but itself.
 //!
 //! Nothing here inserts a shell. The command is argv and is executed directly, so a
 //! pipeline is something you ask for - `["sh", "-c", "..."]` - rather than something dbar
@@ -35,11 +47,23 @@ pub const PLAIN: &[FieldSpec] = &[FieldSpec {
     kind: Kind::Text,
 }];
 
-/// Start `argv`, and send a reading for every line it prints.
+/// How often a command module's program is run, and what running it means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Run {
+    /// Spawned once and left running: a reading for every line it prints.
+    Stream,
+    /// Run to completion this often, taking what it printed as the reading.
+    Every(Duration),
+    /// Run to completion at startup and never again.
+    Once,
+}
+
+/// Start `argv` and send readings from it, the way `run` says to.
 ///
 /// The channel closes when the bar is shutting down, which is what stops the thread.
 pub fn spawn(
     argv: Vec<String>,
+    run: Run,
     declared: &'static [FieldSpec],
     sender: calloop::channel::Sender<Reading>,
 ) -> Result<()> {
@@ -51,25 +75,100 @@ pub fn spawn(
 
     std::thread::Builder::new()
         .name(format!("cmd:{name}"))
-        .spawn(move || {
-            let mut wait = FIRST_WAIT;
-            loop {
-                match run_once(&name, &rest, declared, &sender) {
-                    // The command ended of its own accord, having said whatever it said.
-                    Ok(()) => log::debug!("{name} ended; starting it again in {wait:?}"),
-                    Err(e) => {
-                        log::warn!("{name}: {e:#}");
-                        if sender.send(failed(&e)).is_err() {
-                            return;
-                        }
+        .spawn(move || match run {
+            Run::Stream => stream_forever(&name, &rest, declared, &sender),
+            Run::Once => {
+                // One answer, and the thread is done: there is nothing left to wait for.
+                // A failure is reported the same as any other and not retried, because
+                // "once" is what the config asked for.
+                let _ = sender.send(answer(&name, &rest, declared));
+            }
+            Run::Every(period) => {
+                loop {
+                    if sender.send(answer(&name, &rest, declared)).is_err() {
+                        return;
                     }
+                    // A command that fails is tried again at its own interval rather than
+                    // backed off: a scheduled reading that needs the network is expected
+                    // to miss one now and then, and the module says so meanwhile.
+                    std::thread::sleep(period);
                 }
-                std::thread::sleep(wait);
-                wait = (wait * 2).min(LONGEST_WAIT);
             }
         })
         .with_context(|| format!("spawning the thread for {argv:?}"))?;
     Ok(())
+}
+
+/// Keep a streaming command running, restarting it when it stops.
+fn stream_forever(
+    name: &str,
+    rest: &[String],
+    declared: &'static [FieldSpec],
+    sender: &calloop::channel::Sender<Reading>,
+) {
+    let mut wait = FIRST_WAIT;
+    loop {
+        match run_once(name, rest, declared, sender) {
+            // The command ended of its own accord, having said whatever it said.
+            Ok(()) => log::debug!("{name} ended; starting it again in {wait:?}"),
+            Err(e) => {
+                log::warn!("{name}: {e:#}");
+                if sender.send(failed(&e)).is_err() {
+                    return;
+                }
+            }
+        }
+        std::thread::sleep(wait);
+        wait = (wait * 2).min(LONGEST_WAIT);
+    }
+}
+
+/// Run the command to completion and turn what it printed into one reading.
+///
+/// The last non-empty line is the answer. A script that prints one line means that line;
+/// one that prints several has said several things and the most recent is what a bar
+/// should be showing. Anything a script wants kept out of this goes to standard error,
+/// which is left alone and lands in dbar's log.
+fn answer(name: &str, rest: &[String], declared: &'static [FieldSpec]) -> Reading {
+    match run_to_end(name, rest) {
+        Ok(output) => {
+            match last_word(&output) {
+                Some(line) => reading_of(line, declared),
+                // It ran, it worked, and it had nothing to say. An empty reading is the
+                // honest answer, and a module whose format needs a field it did not get
+                // draws nothing rather than something wrong.
+                None => Reading {
+                    fields: Fields::default(),
+                    state: State::Idle,
+                },
+            }
+        }
+        Err(e) => {
+            log::warn!("{name}: {e:#}");
+            failed(&e)
+        }
+    }
+}
+
+/// The line of a command's output that is its answer: the last one with anything on it.
+fn last_word(output: &str) -> Option<&str> {
+    output.lines().rev().find(|line| !line.trim().is_empty())
+}
+
+/// Run the command until it exits, and hand back what it wrote to standard output.
+fn run_to_end(program: &str, args: &[String]) -> Result<String> {
+    let mut child = configured(program, args)
+        .spawn()
+        .with_context(|| format!("spawning {program}"))?;
+    let mut stdout = child.stdout.take().context("stdout was piped")?;
+    let mut output = String::new();
+    let read = std::io::Read::read_to_string(&mut stdout, &mut output);
+    let status = child.wait().context("waiting for the command")?;
+    read.with_context(|| format!("reading from {program}"))?;
+    if !status.success() {
+        anyhow::bail!("{program} exited with {status}");
+    }
+    Ok(output)
 }
 
 /// Run the command until it stops, sending a reading per line.
@@ -79,6 +178,31 @@ fn run_once(
     declared: &'static [FieldSpec],
     sender: &calloop::channel::Sender<Reading>,
 ) -> Result<()> {
+    let mut child = configured(program, args)
+        .spawn()
+        .with_context(|| format!("spawning {program}"))?;
+
+    let stdout = child.stdout.take().context("stdout was piped")?;
+    for line in BufReader::new(stdout).lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(e) => {
+                reap(&mut child);
+                return Err(e).context("reading a line");
+            }
+        };
+        if sender.send(reading_of(&line, declared)).is_err() {
+            // The bar has gone; take the command with it.
+            reap(&mut child);
+            return Ok(());
+        }
+    }
+    reap(&mut child);
+    Ok(())
+}
+
+/// A command set up the way both ways of running one need it.
+fn configured(program: &str, args: &[String]) -> Command {
     let mut command = Command::new(program);
     command
         .args(args)
@@ -102,28 +226,7 @@ fn run_once(
             Ok(())
         });
     }
-
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("spawning {program}"))?;
-
-    let stdout = child.stdout.take().context("stdout was piped")?;
-    for line in BufReader::new(stdout).lines() {
-        let line = match line {
-            Ok(line) => line,
-            Err(e) => {
-                reap(&mut child);
-                return Err(e).context("reading a line");
-            }
-        };
-        if sender.send(reading_of(&line, declared)).is_err() {
-            // The bar has gone; take the command with it.
-            reap(&mut child);
-            return Ok(());
-        }
-    }
-    reap(&mut child);
-    Ok(())
+    command
 }
 
 /// Stop waiting on a command that has closed its output.
@@ -238,6 +341,25 @@ fn state_of(word: &str) -> Option<State> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_scripts_answer_is_the_last_line_with_anything_on_it() {
+        assert_eq!(last_word("42\n"), Some("42"));
+        // Trailing blank lines are how a shell script ends, not something it said.
+        assert_eq!(last_word("42\n\n\n"), Some("42"));
+        // A script that says several things has most recently said the last of them.
+        assert_eq!(last_word("starting\nworking\ndone\n"), Some("done"));
+        assert_eq!(
+            last_word("only line, no newline"),
+            Some("only line, no newline")
+        );
+    }
+
+    #[test]
+    fn a_script_that_printed_nothing_has_nothing_to_say() {
+        assert_eq!(last_word(""), None);
+        assert_eq!(last_word("\n \n\t\n"), None);
+    }
     use super::*;
 
     /// What a module in a config would declare for these tests.

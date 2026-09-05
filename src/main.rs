@@ -226,7 +226,8 @@ fn main() -> Result<()> {
             continue;
         };
         let (tx, rx) = calloop::channel::channel();
-        if let Err(e) = crate::collect::command::spawn(spec.argv.clone(), spec.fields, tx) {
+        if let Err(e) = crate::collect::command::spawn(spec.argv.clone(), spec.run, spec.fields, tx)
+        {
             log::error!("{e:#}");
             continue;
         }

@@ -960,6 +960,25 @@ impl Palette {
     }
 }
 
+/// How a command module's `interval` is read.
+///
+/// Absent means the command streams, which is the arrangement that costs nothing while
+/// nothing is happening. A period means run it that often, and `"once"` means run it at
+/// startup and never again.
+fn parse_run(written: Option<&str>, module: &str) -> Result<crate::collect::command::Run> {
+    use crate::collect::command::Run;
+    let Some(written) = written else {
+        return Ok(Run::Stream);
+    };
+    if written.trim().eq_ignore_ascii_case("once") {
+        return Ok(Run::Once);
+    }
+    let period = parse_duration(written).with_context(|| {
+        format!("in [module.{module}] interval, which takes a period or \"once\"")
+    })?;
+    Ok(Run::Every(period))
+}
+
 /// Turn `on_click` as written into argvs, rejecting a button given nothing to run.
 ///
 /// An empty list is a mistake rather than a way of saying "do nothing": the key was
@@ -1311,7 +1330,12 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
                     Box::leak(specs.into_boxed_slice())
                 }
             };
-            Source::Native(Which::Command(crate::collect::CommandSpec { argv, fields }))
+            let run = parse_run(raw.and_then(|m| m.interval.as_deref()), module_name)?;
+            Source::Native(Which::Command(crate::collect::CommandSpec {
+                argv,
+                run,
+                fields,
+            }))
         }
         "audio" => Source::Native(Which::Audio),
         "media" => Source::Native(Which::Media),
@@ -1525,15 +1549,21 @@ fn resolve_group(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let interval = match raw_module.and_then(|m| m.interval.as_deref()) {
-            Some(written) => Some(
-                parse_duration(written)
-                    .with_context(|| format!("in [module.{module_name}] interval"))?,
-            ),
-            // Only dbar's own collectors are on a schedule dbar controls.
-            None => match &source {
-                Source::Native(which) => Some(which.default_interval()),
-                _ => None,
+        let interval = match &source {
+            // A command module's interval says how its program is run rather than when
+            // dbar reads it - the reading arrives from the command's own thread - and it
+            // was taken apart along with the source, above.
+            Source::Native(Which::Command(_)) => None,
+            _ => match raw_module.and_then(|m| m.interval.as_deref()) {
+                Some(written) => Some(
+                    parse_duration(written)
+                        .with_context(|| format!("in [module.{module_name}] interval"))?,
+                ),
+                // Only dbar's own collectors are on a schedule dbar controls.
+                None => match &source {
+                    Source::Native(which) => Some(which.default_interval()),
+                    _ => None,
+                },
             },
         };
         if interval.is_some() && !matches!(source, Source::Native(_)) {
@@ -1779,6 +1809,84 @@ modules = ["m"]
 {body}
 "#
         )
+    }
+
+    /// How a command module's program is run, given what its `interval` says.
+    fn run_of(interval: &str) -> crate::collect::command::Run {
+        let body = match interval.is_empty() {
+            true => "source = \"command\"\ncommand = [\"true\"]".to_string(),
+            false => {
+                format!("source = \"command\"\ncommand = [\"true\"]\ninterval = \"{interval}\"")
+            }
+        };
+        let cfg = Config::parse(&one_module(&body)).expect("a command module");
+        match &cfg.modules().next().unwrap().source {
+            Source::Native(Which::Command(spec)) => spec.run,
+            other => panic!("source is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_command_with_no_interval_streams() {
+        use crate::collect::command::Run;
+        // The cheapest arrangement, and so the one you get by saying nothing: no process
+        // is started to find out that nothing changed.
+        assert_eq!(run_of(""), Run::Stream);
+    }
+
+    #[test]
+    fn an_interval_runs_the_command_again_that_often() {
+        use crate::collect::command::Run;
+        assert_eq!(run_of("30s"), Run::Every(Duration::from_secs(30)));
+        assert_eq!(run_of("2m"), Run::Every(Duration::from_secs(120)));
+    }
+
+    #[test]
+    fn once_runs_it_at_startup_and_never_again() {
+        use crate::collect::command::Run;
+        assert_eq!(run_of("once"), Run::Once);
+        assert_eq!(run_of("ONCE"), Run::Once, "case is not the point");
+    }
+
+    #[test]
+    fn an_interval_that_would_never_stop_running_is_refused() {
+        // A command run every no-time forks as fast as the machine can. Durations are
+        // already required to be positive, which covers it.
+        let e = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"true\"]\ninterval = \"0s\"",
+        ))
+        .expect_err("a zero interval never stops running");
+        assert!(format!("{e:#}").contains("positive"), "{e:#}");
+    }
+
+    #[test]
+    fn an_interval_that_is_neither_a_period_nor_once_says_so() {
+        let e = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"true\"]\ninterval = \"sometimes\"",
+        ))
+        .expect_err("that is not a schedule");
+        let message = format!("{e:#}");
+        assert!(message.contains("once"), "{message}");
+    }
+
+    #[test]
+    fn the_same_program_on_two_schedules_is_two_programs() {
+        // Identity is the argv and how it is run: two modules that want the same script
+        // at different rates want two of it, and sharing one would give one of them the
+        // other's schedule.
+        use crate::collect::command::Run;
+        let a = crate::collect::CommandSpec {
+            argv: vec!["s".to_string()],
+            run: Run::Every(Duration::from_secs(1)),
+            fields: crate::collect::command::PLAIN,
+        };
+        let b = crate::collect::CommandSpec {
+            run: Run::Every(Duration::from_secs(60)),
+            ..a.clone()
+        };
+        let same = a.clone();
+        assert_ne!(a, b);
+        assert_eq!(a, same);
     }
 
     #[test]

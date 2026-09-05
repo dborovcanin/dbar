@@ -38,12 +38,15 @@ use crate::status::{FieldSpec, Fields, State};
 /// same path share one reading while two watching different paths do not.
 /// A command module: what to run, and what it says it will publish.
 ///
-/// Two modules naming the same command share one process, so only the argv decides
-/// identity - the declared fields are for checking the config, not for telling one
-/// command from another.
+/// Two modules naming the same command the same way share one process, so the argv and
+/// how it is run decide identity - the declared fields are for checking the config, not
+/// for telling one command from another. Two modules that want the same program on
+/// different schedules want two of it, and get two.
 #[derive(Clone, Debug)]
 pub struct CommandSpec {
     pub argv: Vec<String>,
+    /// Whether the command streams, answers on an interval, or answers once.
+    pub run: command::Run,
     /// Declared in the config, because dbar cannot know what somebody else's program
     /// prints. Leaked once while the config is read, which happens exactly once.
     pub fields: &'static [FieldSpec],
@@ -51,7 +54,7 @@ pub struct CommandSpec {
 
 impl PartialEq for CommandSpec {
     fn eq(&self, other: &Self) -> bool {
-        self.argv == other.argv
+        self.argv == other.argv && self.run == other.run
     }
 }
 
@@ -60,6 +63,7 @@ impl Eq for CommandSpec {}
 impl std::hash::Hash for CommandSpec {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.argv.hash(state);
+        self.run.hash(state);
     }
 }
 

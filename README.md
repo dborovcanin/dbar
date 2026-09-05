@@ -33,8 +33,8 @@ This is the **V0** milestone from [spec.md](spec.md), and it is licensed under
   module's own keys. There is no selector engine and nothing to invalidate.
 - **No embedded interpreter.** No Lua, no JavaScript, no expression language in
   the config. Scripting belongs here as a *source* rather than a language: a
-  module [runs a command and takes what it prints](#commands), started once and
-  read a line at a time, which is the whole extension mechanism.
+  module [runs a command and takes what it prints](#commands), on an interval or
+  streaming, which is the whole extension mechanism.
 - **No widget tree.** Groups hold modules and runs hold groups. That is the
   entire layout model, and it is why a redraw is measured in microseconds.
 
@@ -133,7 +133,7 @@ a built-in default if there is none. `make install` takes `PREFIX=` if
   formatting, `{groups}` that disappear when a field has nothing to report, and
   `$a|$b|'fallback'` chains
 
-Not yet implemented: Bluetooth, command modules, multi-monitor. See [dbar-native.md](dbar-native.md)
+Not yet implemented: Bluetooth, multi-monitor. See [dbar-native.md](dbar-native.md)
 for where this is going.
 
 ## Build
@@ -216,14 +216,14 @@ centre where the eye finds it without looking.
 
 ### Also in `examples/`
 
-| | |
-|---|---|
-| [daily.toml](examples/daily.toml) | an everyday bar, every module read by dbar itself |
-| [islands.toml](examples/islands.toml) | translucent rounded panels floating over the wallpaper |
-| [minimal.toml](examples/minimal.toml) | text and hairlines, along the bottom of the screen |
-| [states.toml](examples/states.toml) | modules that restyle themselves as values move |
-| [separators.toml](examples/separators.toml) | all seven separator shapes, side by side |
-| [showcase.toml](examples/showcase.toml) | every key dbar understands, as a reference |
+|                                             |                                                        |
+| ------------------------------------------- | ------------------------------------------------------ |
+| [daily.toml](examples/daily.toml)           | an everyday bar, every module read by dbar itself      |
+| [islands.toml](examples/islands.toml)       | translucent rounded panels floating over the wallpaper |
+| [minimal.toml](examples/minimal.toml)       | text and hairlines, along the bottom of the screen     |
+| [states.toml](examples/states.toml)         | modules that restyle themselves as values move         |
+| [separators.toml](examples/separators.toml) | all seven separator shapes, side by side               |
+| [showcase.toml](examples/showcase.toml)     | every key dbar understands, as a reference             |
 
 ```sh
 dbar -c examples/islands.toml
@@ -632,27 +632,30 @@ source = "cpu"
 interval = "2s"       # how often dbar reads it; a unit is required
 ```
 
+On a `command` module the same key says how the program is run instead — see
+[commands](#commands).
+
 These are read by dbar itself, from `/proc`, `/sys`, PipeWire and the session
 bus:
 
-| source | fields |
-|---|---|
-| `cpu` | `$utilization` |
-| `memory` | `$percent` `$used` `$total` `$available` `$swap_percent` `$swap_used` `$swap_total` |
-| `battery` | `$percent` `$status` `$supply` `$power` `$time` `$health` `$threshold` |
-| `backlight` | `$brightness` `$device` |
-| `audio` | `$volume` `$muted` `$device` `$port` |
-| `media` | `$title` `$artist` `$album` `$status` `$player` |
-| `load` | `$one` `$five` `$fifteen` `$percent` |
-| `temperature` | `$temp` `$average` `$label` `$chip` |
-| `disk` | `$percent` `$used` `$total` `$available` `$free` `$path` |
-| `network` | `$down` `$up` `$device` `$state` `$ssid` `$signal` `$dbm` `$received` `$sent` |
-| `time` | `$now` |
-| `command` | `$text`, or whatever the module declares |
-| `sway:window` | `$title` |
-| `sway:workspaces` | `$name` |
-| `sway:language` | `$layout` `$short` `$index` |
-| `sway:mode` | `$mode` |
+| source            | fields                                                                              |
+| ----------------- | ----------------------------------------------------------------------------------- |
+| `cpu`             | `$utilization`                                                                      |
+| `memory`          | `$percent` `$used` `$total` `$available` `$swap_percent` `$swap_used` `$swap_total` |
+| `battery`         | `$percent` `$status` `$supply` `$power` `$time` `$health` `$threshold`              |
+| `backlight`       | `$brightness` `$device`                                                             |
+| `audio`           | `$volume` `$muted` `$device` `$port`                                                |
+| `media`           | `$title` `$artist` `$album` `$status` `$player`                                     |
+| `load`            | `$one` `$five` `$fifteen` `$percent`                                                |
+| `temperature`     | `$temp` `$average` `$label` `$chip`                                                 |
+| `disk`            | `$percent` `$used` `$total` `$available` `$free` `$path`                            |
+| `network`         | `$down` `$up` `$device` `$state` `$ssid` `$signal` `$dbm` `$received` `$sent`       |
+| `time`            | `$now`                                                                              |
+| `command`         | `$text`, or whatever the module declares                                            |
+| `sway:window`     | `$title`                                                                            |
+| `sway:workspaces` | `$name`                                                                             |
+| `sway:language`   | `$layout` `$short` `$index`                                                         |
+| `sway:mode`       | `$mode`                                                                             |
 
 Three of them are pointed at something, and take that from a key of their own:
 
@@ -721,11 +724,41 @@ command = ["my-update-watcher"]
 format = "$text"
 ```
 
-The command is **started once and read a line at a time**, not re-run on a
-timer. A line printed is a redraw; silence costs nothing at all, the same as
-the volume and media modules. That matters: spawning a process takes about a
-millisecond, where a whole redraw takes under a hundred microseconds, so a
-command re-run every second would be the most expensive thing on the bar.
+`interval` says how the program is run, and there are three answers.
+
+| `interval` | what happens                                                                |
+| ---------- | --------------------------------------------------------------------------- |
+| *omitted*  | **streams**: started once and read a line at a time, for as long as it runs |
+| `"30s"`    | **runs to completion** every 30s, and what it printed is the reading        |
+| `"once"`   | runs at startup and never again                                             |
+
+Streaming is the default because it is the cheapest thing there is: a line
+printed is a redraw, silence costs nothing at all, and no process is started to
+find out that nothing changed — the same deal the volume and media modules get.
+Spawning a process takes about 0.3 ms where a whole redraw takes under a
+millisecond, so a command re-run every second is a real cost, and one re-run
+every minute is not worth thinking about.
+
+An interval is what almost every script anybody already has is shaped like,
+though, so reach for it and use streaming when the thing being watched can tell
+you rather than being asked. Either way the program runs on its own thread and
+readings arrive on a channel, so a script that takes a second to answer delays
+nothing but itself.
+
+```toml
+[module.kernel]
+source = "command"
+command = ["uname", "-r"]
+interval = "once"
+format = "$text"
+icon = "cpu"           # any module key works here; state rules can swap it
+```
+
+When a command is run to completion, its answer is **the last line with
+anything on it**, so a script that logs before it reports still works — and
+anything it wants kept out of the reading goes to standard error, which lands
+in dbar's log. A non-zero exit is an error the module shows and, on an
+interval, retries when the interval next comes round.
 
 A line with no `=` in it is the whole of what the command said, and lands in
 `$text`. To publish real values instead, say what they are:

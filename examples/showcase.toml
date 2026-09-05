@@ -427,17 +427,35 @@ style = "cool"
 # A window title has no length limit of its own, so it is capped here rather
 # than allowed to push the clock aside. What does not fit is cut with an
 # ellipsis.
-# A program of your own, started once and read a line at a time. This one needs
-# nothing installed - it is a shell loop - but the point is that the command is
-# yours, and dbar's side of it is a source like any other: it publishes fields, a
-# format decides the wording, and state rules apply.
+# A program of your own. The command is yours and dbar's side of it is a source
+# like any other: it publishes fields, a format decides the wording, and state
+# rules apply. Nothing inserts a shell, so a pipeline is something you ask for -
+# `["sh", "-c", "..."]` - rather than something dbar decides to give you.
+#
+# `interval` says how the program is run. A period runs it that often and takes
+# what it printed, which is the shape almost every script already has.
 #
 # A line with no `=` is the whole of what it said, and lands in $text.
 [module.uptime]
 source = "command"
-command = ["sh", "-c", "while :; do uptime -p; sleep 60; done"]
+command = ["uptime", "-p"]
+interval = "1m"
 format = "$text"
 
+# `interval = "once"` runs it at startup and never again, for something that
+# cannot change while the bar is up.
+[module.kernel]
+source = "command"
+command = ["uname", "-r"]
+interval = "once"
+format = "$text"
+
+# With no `interval` the command streams instead: it is started once and read a
+# line at a time, so it says something when there is something to say and costs
+# nothing in between. No process is started to find out that nothing changed, so
+# this is the cheapest arrangement - and the one to write a script for when the
+# thing being watched can tell you rather than being asked.
+#
 # Declaring fields is what lets a format be checked at startup, and what makes
 # `above` compare a number rather than search a string. The command prints
 # tab-separated pairs: `queued=3\tbranch=main`.
