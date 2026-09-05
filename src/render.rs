@@ -11,7 +11,7 @@ use tiny_skia::{
 
 use crate::color::Color;
 use crate::config::{Config, Direction, EdgeShape, SeparatorShape};
-use crate::icon::{self, IconArt, Ink};
+use crate::icon::{self, IconArt, Ink, PathCmd};
 use std::collections::HashMap;
 
 use crate::layout::{Frame, PlacedGroup, PlacedIcon, PlacedModule, PlacedSeparator};
@@ -388,6 +388,23 @@ fn blend_coverage(
     }
 }
 
+/// Turn an icon's outline into the rasteriser's own path type.
+///
+/// This is the whole of what the CPU backend has to do with the icon library's geometry,
+/// and it happens on a cache miss rather than per frame.
+fn path_of(cmds: &[PathCmd]) -> Option<Path> {
+    let mut pb = PathBuilder::new();
+    for cmd in cmds {
+        match *cmd {
+            PathCmd::MoveTo(p) => pb.move_to(p.x, p.y),
+            PathCmd::LineTo(p) => pb.line_to(p.x, p.y),
+            PathCmd::CubicTo(a, b, c) => pb.cubic_to(a.x, a.y, b.x, b.y, c.x, c.y),
+            PathCmd::Close => pb.close(),
+        }
+    }
+    pb.finish()
+}
+
 /// Draw an icon on its own, at one size and offset within a pixel, and keep the coverage.
 fn rasterise_icon(what: icon::Icon, level: usize, size: f32, fx: f32, fy: f32) -> Option<IconRun> {
     let width = (size + fx).ceil() as usize + 1;
@@ -436,12 +453,15 @@ fn draw_icon(
     paint.anti_alias = true;
 
     for item in &paths {
+        let Some(path) = path_of(&item.cmds) else {
+            continue;
+        };
         match item.ink {
             Ink::Fill => {
-                pixmap.fill_path(&item.path, &paint, FillRule::Winding, ts, clip);
+                pixmap.fill_path(&path, &paint, FillRule::Winding, ts, clip);
             }
             Ink::FillEvenOdd => {
-                pixmap.fill_path(&item.path, &paint, FillRule::EvenOdd, ts, clip);
+                pixmap.fill_path(&path, &paint, FillRule::EvenOdd, ts, clip);
             }
             Ink::Stroke(width) => {
                 let stroke = Stroke {
@@ -449,7 +469,7 @@ fn draw_icon(
                     line_cap: LineCap::Round,
                     ..Stroke::default()
                 };
-                pixmap.stroke_path(&item.path, &paint, &stroke, ts, clip);
+                pixmap.stroke_path(&path, &paint, &stroke, ts, clip);
             }
         }
     }
