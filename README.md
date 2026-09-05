@@ -106,14 +106,18 @@ a built-in default if there is none. `make install` takes `PREFIX=` if
   default. A config that reads nothing from one starts no child process at all
 - module state styling, keyed on a value, on a named field, on how the source
   rates itself, or on hover
-- `format_alt`: further wordings a left click moves through and back round —
-  one written as a string, several as a list
+- `format_alt`: further wordings a click moves through and back round — one
+  written as a string, several as a list; `alt_button` says which button, and
+  defaults to the left
+- `on_click = { left = [...] }`: hand a button to a program of your own, run
+  directly with no shell. A calendar over the clock, a mixer over the volume —
+  the things a bar should reach rather than grow
 - `scroll = "5%"`: scrolling over a backlight or volume module changes it, and a
   middle click mutes; dbar sets both itself rather than running a helper
 - `controls = true` on a media module: a left click plays and pauses, and the
   wheel moves between tracks, over MPRIS on the session bus
-- `collapsible = true`: a right click folds a module down to its icon, and the
-  next one unfolds it
+- `collapsible = true`: a click folds a module down to its icon, and the next one
+  unfolds it; `collapse_button` says which, and defaults to the right
 - `signal = N`: read a source again on SIGRTMIN+N
 - `left` / `center` / `right` positions holding groups of modules
 - rounded group and module backgrounds

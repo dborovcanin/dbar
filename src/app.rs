@@ -30,7 +30,7 @@ use wayland_client::{
 };
 
 use crate::collect::{Registry, Which, watch};
-use crate::config::{BarLayer, Config, Edge};
+use crate::config::{BarLayer, Button, Config, Edge};
 use crate::layout::{self, Frame, Inputs};
 use crate::render;
 use crate::status::{
@@ -64,6 +64,8 @@ pub struct App {
     native: Registry,
     /// Modules showing their second wording, by name.
     alt: std::collections::HashMap<String, usize>,
+    /// Programs started by a click, kept only until they have been reaped.
+    children: Vec<std::process::Child>,
     /// Modules a right click has folded down to their icon, by name.
     collapsed: std::collections::HashSet<String>,
     /// Which sources each realtime signal reads again.
@@ -173,6 +175,7 @@ impl App {
             painter: render::Painter::new(text),
             native: Registry::new(&config_collectors),
             alt: std::collections::HashMap::new(),
+            children: Vec::new(),
             collapsed: std::collections::HashSet::new(),
             signals: config_signals,
             collect_scheduled: true,
@@ -305,6 +308,7 @@ impl App {
 
     /// Read what is due and redraw, without touching the timer.
     fn collect(&mut self) -> Option<std::time::Instant> {
+        self.reap();
         if self.native.tick() {
             self.invalidate();
         }
@@ -367,6 +371,45 @@ impl App {
             Some(commands) => commands.send(command),
             None => log::debug!("no player to tell: the media module is not running"),
         }
+    }
+
+    /// Run a module's program, and clear away any that have already finished.
+    ///
+    /// The child is detached the moment it starts: a bar must not wait on a calendar the
+    /// user is still reading, and it has nothing to say about what the program printed, so
+    /// the three standard streams go nowhere.
+    ///
+    /// Reaping is done by hand rather than through SIGCHLD, and deliberately. Setting the
+    /// signal to be ignored, or sweeping with `waitpid(-1)`, would take the exit status of
+    /// every child in the process - and the i3bar provider and the `command` sources wait
+    /// on theirs, which would then fail. Holding these handles reaps exactly what a click
+    /// started and leaves the rest alone.
+    fn run(&mut self, argv: &[String]) {
+        self.reap();
+        let Some((program, args)) = argv.split_first() else {
+            return;
+        };
+        let spawned = std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            Ok(child) => {
+                log::debug!("click ran {argv:?} as pid {}", child.id());
+                self.children.push(child);
+            }
+            // A command that is not there is worth saying once per click rather than
+            // taking the bar down: the rest of it still works.
+            Err(e) => log::warn!("running {argv:?}: {e}"),
+        }
+    }
+
+    /// Collect the children that have exited, so a click does not leave a zombie behind.
+    fn reap(&mut self) {
+        self.children
+            .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
     }
 
     /// Where to send what a click on a volume module asks for.
@@ -560,9 +603,22 @@ impl App {
             return;
         };
         let (mx, my, mw, mh) = (module.x, module.y, module.width, module.height);
-        // A module with further wordings claims the left button for moving through them,
-        // which is the whole point of having them. The other buttons carry on as usual.
-        if button == 1
+        // A program of the user's own comes first: it is the one thing on a module that
+        // the config asked for outright, so nothing built in may quietly take the button
+        // out from under it. Two claims on one button never reach here - that is a
+        // startup error - so this only ever runs where nothing else wanted the press.
+        if let Some(argv) = module
+            .on_click
+            .as_ref()
+            .and_then(|actions| button_of(button).and_then(|b| actions.for_button(b)))
+        {
+            let argv = argv.to_vec();
+            self.run(&argv);
+            return;
+        }
+        // A module with further wordings claims a button for moving through them, which is
+        // the whole point of having them. The other buttons carry on as usual.
+        if button == module.alt_button.number()
             && let Some((name, views)) = module.alt.clone()
         {
             let showing = self.alt.entry(name).or_insert(0);
@@ -570,10 +626,10 @@ impl App {
             self.invalidate();
             return;
         }
-        // The right button folds a module down to its icon, and unfolds it. It is the one
-        // gesture that is about the bar rather than about what the module is showing, so
-        // it comes before anything the module itself would do with a click.
-        if button == 3
+        // Folding a module down to its icon, and unfolding it. It is the one gesture that
+        // is about the bar rather than about what the module is showing, so it comes
+        // before anything the module itself would do with a click.
+        if button == module.collapse_button.number()
             && let Some(name) = module.collapsible.clone()
         {
             if !self.collapsed.remove(&name) {
@@ -812,6 +868,19 @@ fn i3bar_button(code: u32) -> Option<u32> {
         BTN_LEFT => Some(1),
         BTN_MIDDLE => Some(2),
         BTN_RIGHT => Some(3),
+        _ => None,
+    }
+}
+
+/// Map the i3bar protocol's numbering back onto the buttons a config can name.
+///
+/// Scroll notches arrive here as 4 and 5 and have no name in the config, because a notch
+/// is a step in a direction rather than a press.
+fn button_of(number: u32) -> Option<Button> {
+    match number {
+        1 => Some(Button::Left),
+        2 => Some(Button::Middle),
+        3 => Some(Button::Right),
         _ => None,
     }
 }

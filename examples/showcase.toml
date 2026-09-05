@@ -499,6 +499,15 @@ interval = "1m"
 format = " $now.time(f:'%a %d %b %H:%M') "
 style = "cool"
 icon = "clock"
+# `on_click` hands a button to a program of your own, keyed by button: `left`,
+# `middle`, `right`. This is how a bar does the thing dbar has no module for - a
+# calendar over the clock, a mixer over the volume - without dbar growing either.
+#
+# The argv is run directly, the way a `command` source is: no shell, so a space in
+# a path is a space in a path and there is nothing to quote. dbar does not wait for
+# it and reads nothing it prints. A button already spoken for by `format_alt`,
+# `controls`, `scroll` or `collapsible` is a startup error, not a silent loss.
+on_click = { left = ["sh", "-c", "notify-send \"$(cal -3)\""] }
 
 [module.cpu]
 source = "cpu"
@@ -562,12 +571,21 @@ icon = "brightness"
 # on the next one. A collapsible module has to have an icon, or there would be
 # nothing left to see or click, and that is a startup error rather than a bar
 # with a hole in it.
+#
+# `alt_button` and `collapse_button` say which button does each of those, and
+# `on_click` gives a button a program of your own - see the clock at the end of
+# this file. Between them, `controls` and `scroll`, a module has three buttons to
+# hand out, and dbar refuses a config that hands one out twice rather than picking
+# a winner and leaving the loser spelled correctly and doing nothing.
 [module.media]
 source = "media"
 controls = true
 collapsible = true
 format = " {$artist  }$title "
 format_alt = [" $album ", " $player "]
+# `controls` gives the left button to play and pause, so the further wordings are moved
+# off it. Leaving both on the left is a startup error rather than a quiet loss of one.
+alt_button = "middle"
 style = "plain"
 max_width = 280
 # A button says what pressing it does, so a playing track wears the pause icon.

@@ -11,6 +11,9 @@ use crate::config::{
 };
 use crate::format::Format;
 use crate::icon::{self, Icon};
+use std::sync::Arc;
+
+use crate::config::{Button, ClickActions};
 use crate::status::{ActionTarget, Fields, StatusItem, Unit, Value};
 use crate::sway::SwayState;
 
@@ -66,8 +69,15 @@ pub struct PlacedModule {
     pub action: Option<ActionTarget>,
     /// The module's name and how many wordings it has, when a click can move through them.
     pub alt: Option<(String, usize)>,
-    /// The module's name, when a right click folds it down to its icon.
+    /// Which button moves through those wordings.
+    pub alt_button: Button,
+    /// The module's name, when a click folds it down to its icon.
     pub collapsible: Option<String>,
+    /// Which button does that folding.
+    pub collapse_button: Button,
+    /// The programs this module's buttons run, shared with the config rather than copied
+    /// into every frame.
+    pub on_click: Option<Arc<ClickActions>>,
 }
 
 /// A transition drawn in the gap between two neighbouring modules.
@@ -223,6 +233,9 @@ struct SizedModule {
     background: Color,
     action: Option<ActionTarget>,
     alt: Option<(String, usize)>,
+    alt_button: Button,
+    collapse_button: Button,
+    on_click: Option<Arc<ClickActions>>,
 }
 
 /// Colour used for messages dbar generates itself, matching the i3bar convention.
@@ -537,7 +550,10 @@ fn size_group(
             // How many views this module has in all, so a click knows where it wraps.
             alt: (!module.format_alt.is_empty())
                 .then(|| (module.name.clone(), module.format_alt.len() + 1)),
+            alt_button: module.alt_button,
             collapsible: module.collapsible.then(|| module.name.clone()),
+            collapse_button: module.collapse_button,
+            on_click: module.on_click.clone(),
         });
     }
     if modules.is_empty() {
@@ -669,7 +685,10 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             radius: paint.radius,
             action: m.action,
             alt: m.alt,
+            alt_button: m.alt_button,
             collapsible: m.collapsible,
+            collapse_button: m.collapse_button,
+            on_click: m.on_click,
         });
         x += m.width;
     }
@@ -843,7 +862,10 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
                 height,
                 icon: None,
                 action: None,
+                alt_button: Button::Left,
                 collapsible: None,
+                collapse_button: Button::Right,
+                on_click: None,
                 text: message.to_string(),
                 text_x: x + padding,
                 foreground: FAULT_COLOR,

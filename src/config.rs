@@ -205,6 +205,18 @@ struct RawBar {
     exclusive: bool,
 }
 
+/// `on_click` as written: a program per button, each an argv.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawClickActions {
+    #[serde(default)]
+    left: Vec<String>,
+    #[serde(default)]
+    middle: Vec<String>,
+    #[serde(default)]
+    right: Vec<String>,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawBarBackground {
@@ -346,6 +358,12 @@ struct RawModule {
     controls: Option<bool>,
     /// Whether a right click folds this module down to its icon, and back.
     collapsible: Option<bool>,
+    /// Which button moves through `format_alt`. Defaults to the left.
+    alt_button: Option<Button>,
+    /// Which button folds the module down to its icon. Defaults to the right.
+    collapse_button: Option<Button>,
+    /// What to run when this module is clicked, by button.
+    on_click: Option<RawClickActions>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
     #[serde(default)]
     /// Ordered by name, and tried in that order: the first rule that matches is the one
@@ -596,6 +614,67 @@ pub struct Edges {
     pub radius: f32,
 }
 
+/// One of the three pointer buttons a module can be given something to do with.
+///
+/// Scrolling is not here: a notch is a step in a direction rather than a press, and what
+/// it does belongs to `scroll` on the sources dbar can operate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Button {
+    Left,
+    Middle,
+    Right,
+}
+
+impl Button {
+    /// The i3bar protocol's number for this button, which is what click dispatch speaks.
+    pub fn number(self) -> u32 {
+        match self {
+            Button::Left => 1,
+            Button::Middle => 2,
+            Button::Right => 3,
+        }
+    }
+
+    /// What to call it in an error, spelled the way the config would.
+    fn name(self) -> &'static str {
+        match self {
+            Button::Left => "left",
+            Button::Middle => "middle",
+            Button::Right => "right",
+        }
+    }
+}
+
+/// The programs a module runs when it is clicked.
+///
+/// dbar covers what a bar is for and no more, so a click that should do something else -
+/// a calendar over the clock, a mixer over the volume - runs a program of the user's own.
+/// The argv is executed directly, exactly as a `command` source is: no shell, so nothing
+/// here has to think about quoting or what a stray space in a path would do.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ClickActions {
+    pub left: Option<Vec<String>>,
+    pub middle: Option<Vec<String>>,
+    pub right: Option<Vec<String>>,
+}
+
+impl ClickActions {
+    pub fn for_button(&self, button: Button) -> Option<&[String]> {
+        match button {
+            Button::Left => self.left.as_deref(),
+            Button::Middle => self.middle.as_deref(),
+            Button::Right => self.right.as_deref(),
+        }
+    }
+
+    fn buttons(&self) -> impl Iterator<Item = Button> + '_ {
+        [Button::Left, Button::Middle, Button::Right]
+            .into_iter()
+            .filter(|b| self.for_button(*b).is_some())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Module {
     pub name: String,
@@ -609,6 +688,16 @@ pub struct Module {
     pub control: Option<(Control, f64)>,
     /// Whether a right click folds this module down to its icon.
     pub collapsible: bool,
+    /// Which button moves through `format_alt`. Meaningless without further wordings.
+    pub alt_button: Button,
+    /// Which button folds the module down to its icon. Meaningless unless `collapsible`.
+    pub collapse_button: Button,
+    /// Programs to run when this module is clicked.
+    ///
+    /// Shared rather than cloned: layout rebuilds every placed module on every redraw, and
+    /// an argv copied per module per frame would be paid for on the one path that runs
+    /// forever.
+    pub on_click: Option<std::sync::Arc<ClickActions>>,
     /// What the module says, already parsed and checked against the source's fields.
     pub format: Format,
     /// The further wordings a left click moves through, in order. Empty when the config
@@ -869,6 +958,79 @@ impl Palette {
             None => Color::parse(spec),
         }
     }
+}
+
+/// Turn `on_click` as written into argvs, rejecting a button given nothing to run.
+///
+/// An empty list is a mistake rather than a way of saying "do nothing": the key was
+/// written, so something was meant by it, and finding out at three in the morning that a
+/// click does nothing is exactly what startup checking is for.
+fn click_actions(raw: &RawClickActions, module: &str) -> Result<ClickActions> {
+    let one = |argv: &Vec<String>, button: Button| -> Result<Option<Vec<String>>> {
+        if argv.is_empty() {
+            return Ok(None);
+        }
+        if argv[0].trim().is_empty() {
+            bail!(
+                "[module.{module}] on_click.{} names no program to run",
+                button.name()
+            );
+        }
+        Ok(Some(argv.clone()))
+    };
+    Ok(ClickActions {
+        left: one(&raw.left, Button::Left)?,
+        middle: one(&raw.middle, Button::Middle)?,
+        right: one(&raw.right, Button::Right)?,
+    })
+}
+
+/// Reject a module where two things want the same button.
+///
+/// A button does one thing. Silently letting the first claimant win would make the loser
+/// a key that is present, spelled correctly and simply ignored, which is the kind of
+/// mistake a config file should not be able to express.
+fn claim_buttons(
+    module: &str,
+    alt_button: Button,
+    has_alt: bool,
+    collapse_button: Button,
+    collapsible: bool,
+    control: Option<Control>,
+    on_click: Option<&ClickActions>,
+) -> Result<()> {
+    let mut claimed: Vec<(Button, String)> = Vec::new();
+    let mut claim = |button: Button, by: String| -> Result<()> {
+        if let Some((_, first)) = claimed.iter().find(|(b, _)| *b == button) {
+            bail!(
+                "[module.{module}] gives the {} button to both {first} and {by}",
+                button.name()
+            );
+        }
+        claimed.push((button, by));
+        Ok(())
+    };
+
+    if has_alt {
+        claim(alt_button, "format_alt".to_string())?;
+    }
+    if collapsible {
+        claim(collapse_button, "collapsible".to_string())?;
+    }
+    // What `controls` and `scroll` bind, for the sources dbar can operate as well as read.
+    // Only the presses are listed: a scroll notch is not a button and collides with
+    // nothing here.
+    match control {
+        Some(Control::Media) => claim(Button::Left, "controls".to_string())?,
+        Some(Control::Volume) => claim(Button::Middle, "scroll".to_string())?,
+        Some(Control::Brightness) | None => {}
+    }
+    if let Some(actions) = on_click {
+        for button in actions.buttons() {
+            claim(button, format!("on_click.{}", button.name()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Split a `"Family Name 12"` font string into family and point size.
@@ -1462,6 +1624,26 @@ fn resolve_group(
             })?);
         }
 
+        let alt_button = raw_module
+            .and_then(|m| m.alt_button)
+            .unwrap_or(Button::Left);
+        let collapse_button = raw_module
+            .and_then(|m| m.collapse_button)
+            .unwrap_or(Button::Right);
+        let on_click = raw_module
+            .and_then(|m| m.on_click.as_ref())
+            .map(|raw| click_actions(raw, module_name))
+            .transpose()?;
+        claim_buttons(
+            module_name,
+            alt_button,
+            !format_alt.is_empty(),
+            collapse_button,
+            collapsible,
+            control.map(|(what, _)| what),
+            on_click.as_ref(),
+        )?;
+
         modules.push(Module {
             name: module_name.clone(),
             source,
@@ -1469,6 +1651,9 @@ fn resolve_group(
             signal,
             control,
             collapsible,
+            alt_button,
+            collapse_button,
+            on_click: on_click.map(std::sync::Arc::new),
             format,
             format_alt,
             style,
@@ -1542,6 +1727,9 @@ fn resolve_group(
                 signal: None,
                 control: None,
                 collapsible: false,
+                alt_button: Button::Left,
+                collapse_button: Button::Right,
+                on_click: None,
                 format: resolve_format(&Source::Provider, None)?,
                 format_alt: Vec::new(),
                 style: fallback,
@@ -1574,6 +1762,121 @@ pub fn default_config_path() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// A config with one module, so a button test says only what it is about.
+    fn one_module(body: &str) -> String {
+        format!(
+            r#"
+[bar]
+height = 30
+
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["m"]
+
+[module.m]
+{body}
+"#
+        )
+    }
+
+    #[test]
+    fn a_click_can_run_a_program_of_your_own() {
+        let cfg = Config::parse(&one_module(
+            "source = \"time\"\non_click = { left = [\"cal\", \"-3\"] }",
+        ))
+        .expect("a clock with something to run");
+        let module = cfg.modules().next().expect("the one module");
+        let actions = module.on_click.as_ref().expect("on_click was written");
+        assert_eq!(
+            actions.for_button(Button::Left),
+            Some(["cal".to_string(), "-3".to_string()].as_slice())
+        );
+        assert_eq!(actions.for_button(Button::Right), None);
+    }
+
+    #[test]
+    fn a_button_given_nothing_to_run_is_a_mistake_worth_stopping_for() {
+        let e = Config::parse(&one_module(
+            "source = \"time\"\non_click = { left = [\"\"] }",
+        ))
+        .expect_err("an empty program name runs nothing");
+        let message = format!("{e:#}");
+        assert!(message.contains("on_click.left"), "{message}");
+        assert!(message.contains("[module.m]"), "{message}");
+    }
+
+    #[test]
+    fn further_wordings_answer_to_the_left_button_unless_told_otherwise() {
+        let cfg = Config::parse(&one_module(
+            "source = \"cpu\"\nformat_alt = \"$utilization\"",
+        ))
+        .expect("a module with a second wording");
+        assert_eq!(cfg.modules().next().unwrap().alt_button, Button::Left);
+
+        let moved = Config::parse(&one_module(
+            "source = \"cpu\"\nformat_alt = \"$utilization\"\nalt_button = \"middle\"",
+        ))
+        .expect("the button is the config's to choose");
+        assert_eq!(moved.modules().next().unwrap().alt_button, Button::Middle);
+    }
+
+    #[test]
+    fn two_things_wanting_one_button_is_a_startup_error() {
+        // The left button cannot both run a program and move through wordings; picking a
+        // winner silently would leave the loser spelled correctly and doing nothing.
+        let e = Config::parse(&one_module(
+            "source = \"cpu\"\nformat_alt = \"$utilization\"\non_click = { left = [\"true\"] }",
+        ))
+        .expect_err("the left button was given away twice");
+        let message = format!("{e:#}");
+        assert!(message.contains("left"), "{message}");
+        assert!(message.contains("format_alt"), "{message}");
+        assert!(message.contains("on_click.left"), "{message}");
+
+        // Moving one of them off it settles the matter.
+        Config::parse(&one_module(
+            "source = \"cpu\"\nformat_alt = \"$utilization\"\nalt_button = \"middle\"\non_click = { left = [\"true\"] }",
+        ))
+        .expect("nothing is claimed twice now");
+    }
+
+    #[test]
+    fn folding_answers_to_the_right_button_unless_told_otherwise() {
+        let cfg = Config::parse(&one_module(
+            "source = \"cpu\"\ncollapsible = true\nicon = \"cpu\"",
+        ))
+        .expect("a module that folds");
+        assert_eq!(cfg.modules().next().unwrap().collapse_button, Button::Right);
+
+        // Moved off the right, which then leaves the right free for something else.
+        let moved = Config::parse(&one_module(
+            "source = \"cpu\"\ncollapsible = true\nicon = \"cpu\"\ncollapse_button = \"middle\"\non_click = { right = [\"true\"] }",
+        ))
+        .expect("nothing is claimed twice");
+        let module = moved.modules().next().unwrap();
+        assert_eq!(module.collapse_button, Button::Middle);
+        assert!(module.on_click.is_some());
+    }
+
+    #[test]
+    fn a_button_a_native_control_already_uses_is_claimed_too() {
+        // `controls` on a player is the left button, and a right click folds any module
+        // down, so neither is free to be given away a second time.
+        let e = Config::parse(&one_module(
+            "source = \"media\"\ncontrols = true\non_click = { left = [\"true\"] }",
+        ))
+        .expect_err("play and pause are already on the left");
+        assert!(format!("{e:#}").contains("controls"), "{e:#}");
+
+        let e = Config::parse(&one_module(
+            "source = \"cpu\"\ncollapsible = true\non_click = { right = [\"true\"] }",
+        ))
+        .expect_err("folding is already on the right");
+        assert!(format!("{e:#}").contains("collapsible"), "{e:#}");
+    }
+
     use super::*;
 
     #[test]
