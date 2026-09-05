@@ -6,6 +6,7 @@ edition = "2024"
 rust-version = "1.88"
 description = "A small, event-driven Wayland status bar for Sway and SwayFX"
 repository = "https://github.com/dborovcanin/dbar"
+license = "Apache-2.0"
 readme = "README.md"
 keywords = ["wayland", "sway", "statusbar", "layer-shell", "i3bar"]
 categories = ["command-line-utilities", "gui"]

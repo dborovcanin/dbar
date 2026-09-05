@@ -18,7 +18,8 @@ above at 1920 wide takes around 95 microseconds.
 Nothing else has to be installed. The collectors are dbar's own, so a config
 that names no external provider starts no child process at all.
 
-This is the **V0** milestone from [spec.md](spec.md).
+This is the **V0** milestone from [spec.md](spec.md), and it is licensed under
+[Apache 2.0](LICENSE).
 
 ## Quick start
 
