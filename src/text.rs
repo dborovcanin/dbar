@@ -20,14 +20,76 @@ pub struct TextRenderer {
     size: f32,
     scale: f32,
     /// Logical widths, keyed by scale-independent text. Cleared when the scale changes.
-    widths: HashMap<String, f32>,
+    widths: Generations<f32>,
     /// Shaped buffers, keyed the same way.
     ///
     /// Shaping is the expensive half of drawing a string, and a bar draws the same strings
     /// over and over - most of them every redraw, unchanged. Measuring and drawing share
     /// this, so a value that layout has already sized costs nothing to put on screen.
-    shapes: HashMap<String, Buffer>,
+    shapes: Generations<Buffer>,
 }
+
+/// A cache that forgets in generations rather than one entry at a time.
+///
+/// A bar sees a slow drip of strings it will never be asked for again: a clock alone leaves
+/// 1440 behind in a day, and every percentage that ticks past adds another. A map that only
+/// grows is a leak, but tracking a use order per entry costs more than these lookups save.
+///
+/// So entries are kept in two generations. Everything goes into the newest; when that fills,
+/// it becomes the older one and a fresh generation starts. A lookup that misses the newest
+/// still finds anything from the one before and promotes it, so strings the bar is actually
+/// using survive indefinitely and the rest fall off a generation at a time.
+struct Generations<V> {
+    hot: HashMap<String, V>,
+    cold: HashMap<String, V>,
+    /// Entries in the newest generation before it is rolled over. Total is at most twice it.
+    limit: usize,
+}
+
+impl<V> Generations<V> {
+    fn new(limit: usize) -> Generations<V> {
+        Generations {
+            hot: HashMap::new(),
+            cold: HashMap::new(),
+            limit: limit.max(1),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&V> {
+        self.hot.get(key)
+    }
+
+    fn get_or_insert(&mut self, key: &str, make: impl FnOnce() -> V) -> &mut V {
+        if !self.hot.contains_key(key) {
+            let value = match self.cold.remove(key) {
+                Some(kept) => kept,
+                None => make(),
+            };
+            if self.hot.len() >= self.limit {
+                std::mem::swap(&mut self.hot, &mut self.cold);
+                self.hot.clear();
+            }
+            self.hot.insert(key.to_string(), value);
+        }
+        self.hot.get_mut(key).expect("just inserted")
+    }
+
+    fn insert(&mut self, key: &str, value: V) {
+        self.get_or_insert(key, || value);
+    }
+
+    fn clear(&mut self) {
+        self.hot.clear();
+        self.cold.clear();
+    }
+}
+
+/// How many distinct strings each cache keeps before rolling a generation.
+///
+/// A bar has a dozen or so live at once; the headroom is for the ones that change every
+/// tick. Shaped buffers cost far more than a width, so fewer of them are kept.
+const WIDTHS_KEPT: usize = 256;
+const SHAPES_KEPT: usize = 64;
 
 /// Families to try when the configured one is generic or missing.
 const FALLBACK_FAMILIES: &[&str] = &[
@@ -93,8 +155,8 @@ impl TextRenderer {
             family,
             size,
             scale: 1.0,
-            widths: HashMap::new(),
-            shapes: HashMap::new(),
+            widths: Generations::new(WIDTHS_KEPT),
+            shapes: Generations::new(SHAPES_KEPT),
         }
     }
 
@@ -129,9 +191,7 @@ impl TextRenderer {
             shapes,
             ..
         } = self;
-        let buffer = shapes
-            .entry(text.to_string())
-            .or_insert_with(|| shape(fonts, family, metrics, text));
+        let buffer = shapes.get_or_insert(text, || shape(fonts, family, metrics, text));
         (buffer, fonts)
     }
 
@@ -146,7 +206,7 @@ impl TextRenderer {
             .layout_runs()
             .fold(0.0f32, |acc, run| acc.max(run.line_w));
         let logical = physical / scale;
-        self.widths.insert(text.to_string(), logical);
+        self.widths.insert(text, logical);
         logical
     }
 
@@ -168,9 +228,7 @@ impl TextRenderer {
             shapes,
             ..
         } = self;
-        let buffer = shapes
-            .entry(text.to_string())
-            .or_insert_with(|| shape(fonts, family, metrics, text));
+        let buffer = shapes.get_or_insert(text, || shape(fonts, family, metrics, text));
         buffer.draw(fonts, swash, fill, |gx, gy, w, h, c| {
             blend_rect(pixmap, origin_x + gx, origin_y + gy, w, h, c);
         });
@@ -232,5 +290,53 @@ fn blend_rect(pixmap: &mut PixmapMut<'_>, x: i32, y: i32, w: u32, h: u32, c: cos
 impl Measure for TextRenderer {
     fn measure(&mut self, text: &str) -> f32 {
         self.measure_text(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn len<V>(cache: &Generations<V>) -> usize {
+        cache.hot.len() + cache.cold.len()
+    }
+
+    #[test]
+    fn a_cache_of_strings_never_seen_again_stays_bounded() {
+        let mut cache = Generations::new(8);
+        for i in 0..1000 {
+            cache.get_or_insert(&format!("{i}%"), || i);
+        }
+        assert!(
+            len(&cache) <= 16,
+            "held {} entries against a limit of 8 per generation",
+            len(&cache)
+        );
+    }
+
+    #[test]
+    fn a_string_still_in_use_survives_the_drip_around_it() {
+        let mut cache = Generations::new(4);
+        cache.get_or_insert("clock", || 1);
+        // Enough churn to roll several generations, asking for the live one each round.
+        for i in 0..200 {
+            cache.get_or_insert(&format!("cpu {i}"), || i);
+            assert_eq!(*cache.get_or_insert("clock", || 0), 1, "at round {i}");
+        }
+        assert_eq!(
+            cache.get("clock"),
+            Some(&1),
+            "fell out of the newest generation"
+        );
+    }
+
+    #[test]
+    fn a_scale_change_drops_everything_shaped_for_the_old_one() {
+        let mut cache = Generations::new(4);
+        cache.insert("a", 1);
+        cache.get_or_insert("b", || 2);
+        cache.clear();
+        assert_eq!(len(&cache), 0);
+        assert_eq!(cache.get("a"), None);
     }
 }
