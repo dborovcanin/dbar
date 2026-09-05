@@ -32,7 +32,7 @@ pub enum IconArt {
     Raster(tiny_skia::Pixmap),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
     Cpu,
     Memory,

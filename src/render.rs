@@ -12,6 +12,8 @@ use tiny_skia::{
 use crate::color::Color;
 use crate::config::{Config, Direction, EdgeShape, SeparatorShape};
 use crate::icon::{self, IconArt, Ink};
+use std::collections::HashMap;
+
 use crate::layout::{Frame, PlacedGroup, PlacedIcon, PlacedModule, PlacedSeparator};
 use crate::text::TextRenderer;
 
@@ -221,6 +223,197 @@ fn draw_separator(
 ///
 /// Icon geometry is authored in a unit square, so a single transform puts it at its placed
 /// position and size. Stroke widths ride along with that scale.
+/// An icon already rasterised, as coverage per pixel.
+///
+/// Icons are vector art, and redrawing the same twelve shapes every frame was more than
+/// half the cost of one. The coverage depends on the size and on where the icon lands
+/// within a pixel, but not on its colour, so one of these serves an icon whatever state
+/// its module is in.
+struct IconRun {
+    width: usize,
+    height: usize,
+    coverage: Vec<u8>,
+}
+
+/// What makes one rasterisation different from another.
+///
+/// The position is part of it, to the bit: an icon half a pixel further along is a
+/// different picture, and rounding it to a whole one would move the art. Positions repeat
+/// exactly between frames while nothing around them changes, which is when the cache is
+/// wanted, and a module whose text has just grown a digit simply rasterises again.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct IconKey {
+    icon: icon::Icon,
+    level: usize,
+    size: u32,
+    offset: (u32, u32),
+}
+
+/// How many rasterised icons to keep. A bar draws a dozen or so; the rest is headroom for
+/// the positions that shift as neighbouring text changes width.
+const ICONS_KEPT: usize = 96;
+
+type IconCache = HashMap<IconKey, IconRun>;
+
+/// What drawing an island needs besides the frame: the text backend and the two caches.
+///
+/// Bundled because they travel together and are borrowed together, and because a target is
+/// either the surface or a layer, which decides which mask comes along.
+struct Tools<'a> {
+    mask: &'a mut Option<Mask>,
+    icons: &'a mut IconCache,
+    text: &'a mut dyn DrawText,
+    line_height: f32,
+}
+
+/// Draw an icon through the cache, rasterising it the first time it is seen at this size
+/// and position.
+fn draw_icon_cached(
+    pixmap: &mut PixmapMut<'_>,
+    placed: &PlacedIcon,
+    color: Color,
+    transform: Transform,
+    clip: Option<&Mask>,
+    cache: &mut IconCache,
+) {
+    if color.is_transparent() || placed.size <= 0.0 {
+        return;
+    }
+    // A clipped icon is rare - only a group with a separator at its end still has a mask -
+    // and blending coverage through one would mean applying the mask by hand, so those go
+    // the direct way.
+    if clip.is_some() {
+        draw_icon(pixmap, placed, color, transform, clip);
+        return;
+    }
+
+    let (dx, dy) = (
+        placed.x * transform.sx + transform.tx,
+        placed.y * transform.sy + transform.ty,
+    );
+    let size = placed.size * transform.sx;
+    let (ox, oy) = (dx.floor(), dy.floor());
+    let (fx, fy) = (dx - ox, dy - oy);
+    if size <= 0.0 || !size.is_finite() || !ox.is_finite() || !oy.is_finite() {
+        return;
+    }
+
+    let key = IconKey {
+        icon: placed.icon,
+        level: placed.level,
+        size: size.to_bits(),
+        offset: (fx.to_bits(), fy.to_bits()),
+    };
+    if !cache.contains_key(&key) {
+        // Bounded the blunt way: icons are few and the set is stable, so the only growth is
+        // positions that have stopped being used.
+        if cache.len() >= ICONS_KEPT {
+            cache.clear();
+        }
+        let Some(run) = rasterise_icon(placed.icon, placed.level, size, fx, fy) else {
+            return;
+        };
+        cache.insert(key, run);
+    }
+    let Some(run) = cache.get(&key) else {
+        return;
+    };
+    blend_coverage(
+        pixmap,
+        &run.coverage,
+        run.width,
+        run.height,
+        ox as i32,
+        oy as i32,
+        color,
+        true,
+    );
+}
+
+/// Blend a coverage buffer into the pixmap in `color`, clipped to the surface.
+///
+/// `honour_alpha` scales the coverage by the colour's own alpha. Icons want that - the
+/// colour they are given is the colour they are drawn in - which is the one way they differ
+/// from text, where the mask path drops it.
+#[allow(clippy::too_many_arguments)]
+fn blend_coverage(
+    pixmap: &mut PixmapMut<'_>,
+    coverage: &[u8],
+    width: usize,
+    height: usize,
+    ox: i32,
+    oy: i32,
+    color: Color,
+    honour_alpha: bool,
+) {
+    let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
+    let x0 = ox.max(0);
+    let y0 = oy.max(0);
+    let x1 = (ox + width as i32).min(pw);
+    let y1 = (oy + height as i32).min(ph);
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+
+    let alpha = match honour_alpha {
+        true => color.a as u32,
+        false => 255,
+    };
+    let pixels = pixmap.pixels_mut();
+    for py in y0..y1 {
+        let src = (py - oy) as usize * width + (x0 - ox) as usize;
+        let dst = py as usize * pw as usize + x0 as usize;
+        for i in 0..(x1 - x0) as usize {
+            let cover = coverage[src + i] as u32;
+            if cover == 0 {
+                continue;
+            }
+            let src_a = (cover * alpha + 127) / 255;
+            if src_a == 0 {
+                continue;
+            }
+            let up = |v: u8| (v as u32 * src_a + 127) / 255;
+            let (sr, sg, sb) = (up(color.r), up(color.g), up(color.b));
+            let inv = 255 - src_a;
+            let slot = &mut pixels[dst + i];
+            let under = *slot;
+            let over = |s: u32, d: u8| s + (d as u32 * inv + 127) / 255;
+            let a = over(src_a, under.alpha());
+            let r = over(sr, under.red()).min(a);
+            let g = over(sg, under.green()).min(a);
+            let b = over(sb, under.blue()).min(a);
+            *slot = PremultipliedColorU8::from_rgba(r as u8, g as u8, b as u8, a as u8)
+                .unwrap_or(under);
+        }
+    }
+}
+
+/// Draw an icon on its own, at one size and offset within a pixel, and keep the coverage.
+fn rasterise_icon(what: icon::Icon, level: usize, size: f32, fx: f32, fy: f32) -> Option<IconRun> {
+    let width = (size + fx).ceil() as usize + 1;
+    let height = (size + fy).ceil() as usize + 1;
+    let mut pixmap = Pixmap::new(width as u32, height as u32)?;
+    let placed = PlacedIcon {
+        icon: what,
+        level,
+        x: fx,
+        y: fy,
+        size,
+    };
+    draw_icon(
+        &mut pixmap.as_mut(),
+        &placed,
+        Color::rgba(0xff, 0xff, 0xff, 0xff),
+        Transform::identity(),
+        None,
+    );
+    Some(IconRun {
+        width,
+        height,
+        coverage: pixmap.pixels().iter().map(|p| p.alpha()).collect(),
+    })
+}
+
 fn draw_icon(
     pixmap: &mut PixmapMut<'_>,
     placed: &PlacedIcon,
@@ -401,6 +594,7 @@ fn render(
         scratch,
         mask,
         layer_mask,
+        icons,
     } = painter;
     let line_height = text.line_height();
     let (pw, ph) = (pixmap.width(), pixmap.height());
@@ -419,13 +613,35 @@ fn render(
         // No bounds means the group is opaque, or has nothing to cover. Either way it goes
         // straight down.
         let Some((bx, by, bw, bh)) = bounds else {
-            draw_group(pixmap, group, scale, transform, mask, text, line_height);
+            draw_group(
+                pixmap,
+                group,
+                scale,
+                transform,
+                &mut Tools {
+                    mask,
+                    icons,
+                    text,
+                    line_height,
+                },
+            );
             continue;
         };
         let Some(layer) = layer(scratch, bw, bh) else {
             // Nowhere to draw: an island at full strength is a worse bar than one at the
             // asked-for alpha, but it is still a readable one.
-            draw_group(pixmap, group, scale, transform, mask, text, line_height);
+            draw_group(
+                pixmap,
+                group,
+                scale,
+                transform,
+                &mut Tools {
+                    mask,
+                    icons,
+                    text,
+                    line_height,
+                },
+            );
             continue;
         };
 
@@ -438,9 +654,12 @@ fn render(
             group,
             scale,
             local,
-            layer_mask,
-            text,
-            line_height,
+            &mut Tools {
+                mask: layer_mask,
+                icons,
+                text,
+                line_height,
+            },
         );
         composite(pixmap, layer.as_ref(), (bx, by, bw, bh), group.opacity);
     }
@@ -457,9 +676,7 @@ fn draw_group(
     group: &PlacedGroup,
     scale: f32,
     transform: Transform,
-    mask: &mut Option<Mask>,
-    text: &mut dyn DrawText,
-    line_height: f32,
+    tools: &mut Tools<'_>,
 ) {
     let offset = match scale > 0.0 {
         true => (transform.tx / scale, transform.ty / scale),
@@ -483,7 +700,7 @@ fn draw_group(
     let clip = match (rl > 0.0 || rr > 0.0) && spills(group) {
         true => {
             let bounds = drawn_bounds(group, transform, pw, ph);
-            bounds.and_then(|b| clip_mask(mask, pw, ph, b, &outline, transform))
+            bounds.and_then(|b| clip_mask(tools.mask, pw, ph, b, &outline, transform))
         }
         false => None,
     };
@@ -509,11 +726,18 @@ fn draw_group(
             clip,
         );
         if let Some(icon) = &module.icon {
-            draw_icon(pixmap, icon, module.foreground, transform, clip);
+            draw_icon_cached(
+                pixmap,
+                icon,
+                module.foreground,
+                transform,
+                clip,
+                tools.icons,
+            );
         }
         // Layout already placed the text; only the vertical centring is ours.
-        let ty = module.y + (module.height - line_height) / 2.0;
-        text.draw(
+        let ty = module.y + (module.height - tools.line_height) / 2.0;
+        tools.text.draw(
             pixmap,
             &module.text,
             module.text_x + offset.0,
@@ -710,6 +934,8 @@ pub struct Painter<T = TextRenderer> {
     /// and a frame can draw groups onto both.
     mask: Option<Mask>,
     layer_mask: Option<Mask>,
+    /// Rasterised icons, kept between frames.
+    icons: IconCache,
 }
 
 impl<T: DrawText> Painter<T> {
@@ -719,6 +945,7 @@ impl<T: DrawText> Painter<T> {
             scratch: None,
             mask: None,
             layer_mask: None,
+            icons: IconCache::new(),
         }
     }
 }
@@ -1123,6 +1350,70 @@ mod tests {
                 0xff,
                 "scale {scale}: the module itself did not draw"
             );
+        }
+    }
+
+    /// A cached icon has to look like the one drawn straight. It is blended by hand rather
+    /// than by tiny-skia, so the two round differently in the last bit; anything more than
+    /// that would be the art moving, which is what this guards against.
+    #[test]
+    fn a_cached_icon_matches_the_one_drawn_straight() {
+        use crate::icon::Icon;
+        for size in [16.0f32, 20.0, 24.5] {
+            for (fx, fy) in [(0.0f32, 0.0f32), (0.5, 0.25), (0.37, 0.81)] {
+                for what in [Icon::Cpu, Icon::Headphones, Icon::Wifi, Icon::Clock] {
+                    let placed = PlacedIcon {
+                        icon: what,
+                        level: 2,
+                        x: 4.0 + fx,
+                        y: 3.0 + fy,
+                        size,
+                    };
+                    let colour = Color::rgba(0xeb, 0xdb, 0xb2, 0xff);
+                    let mut direct = Pixmap::new(64, 64).unwrap();
+                    let mut cached = Pixmap::new(64, 64).unwrap();
+                    draw_icon(
+                        &mut direct.as_mut(),
+                        &placed,
+                        colour,
+                        Transform::identity(),
+                        None,
+                    );
+                    let mut cache = IconCache::new();
+                    draw_icon_cached(
+                        &mut cached.as_mut(),
+                        &placed,
+                        colour,
+                        Transform::identity(),
+                        None,
+                        &mut cache,
+                    );
+                    // Again, onto its own ground, so a hit is checked as well as a miss.
+                    let mut again = Pixmap::new(64, 64).unwrap();
+                    draw_icon_cached(
+                        &mut again.as_mut(),
+                        &placed,
+                        colour,
+                        Transform::identity(),
+                        None,
+                        &mut cache,
+                    );
+                    assert_eq!(cached.data(), again.data(), "a cache hit drew differently");
+
+                    let worst = direct
+                        .data()
+                        .iter()
+                        .zip(cached.data())
+                        .map(|(a, b)| a.abs_diff(*b))
+                        .max()
+                        .unwrap_or(0);
+                    assert!(
+                        worst <= 1,
+                        "{what:?} at size {size}, offset ({fx}, {fy}): a channel differed \
+                         by {worst}, which is more than rounding"
+                    );
+                }
+            }
         }
     }
 
