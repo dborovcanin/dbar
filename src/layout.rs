@@ -577,16 +577,25 @@ fn size_group(
         // The icon and the space after it, which is what the text starts behind. An icon
         // is as tall as `icon_size` and as wide as its own shape asks for, which is the
         // same thing for everything but the battery.
-        let icon_advance = match icon {
+        //
+        // The gap belongs to the text rather than to the icon, so a module with nothing
+        // written on it does not get one. Keeping it would pad the far side of a module
+        // folded down to its icon and leave the icon sitting half a gap off centre, which
+        // is exactly the case the gap was never for.
+        let advance = |content: &str| match icon {
             Some((icon, _)) if style.icon_size > 0.0 => {
-                style.icon_size * icon.width() + style.gap()
+                let gap = match content.is_empty() {
+                    true => 0.0,
+                    false => style.gap(),
+                };
+                style.icon_size * icon.width() + gap
             }
             _ => 0.0,
         };
         // A module that would outgrow max_width, or the room its run has left, loses text
         // rather than pushing its neighbours aside: a window title has no length limit of
         // its own, and a bar can run out of width whatever the config says.
-        let fixed = icon_advance + style.padding * 2.0;
+        let fixed = advance(&content) + style.padding * 2.0;
         let cap = match style.max_width > 0.0 {
             true => style.max_width.min(left),
             false => left,
@@ -596,6 +605,11 @@ fn size_group(
         } else {
             content
         };
+        // Truncating to nothing takes the gap with it, the same as folding does. Measured
+        // again rather than kept, because only the text that survived says whether there
+        // is anything for a gap to separate.
+        let icon_advance = advance(&content);
+        let fixed = icon_advance + style.padding * 2.0;
         // Truncation can take the last of it, which an icon still carries - a spinner
         // included, since a module waiting on its first answer has nothing else.
         if content.is_empty() && style.icon.is_none() && !waiting {
@@ -1840,6 +1854,38 @@ collapsible = true
             folded.groups[0].modules[0].width < open.groups[0].modules[0].width,
             "folding is only worth doing if it takes less room"
         );
+    }
+
+    #[test]
+    fn a_folded_module_is_its_icon_centred_and_nothing_else() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+padding = 6
+icon = "cpu"
+icon_size = 12
+collapsible = true
+"##;
+        let folded = frame_folded(
+            config,
+            &[item("cpu", "50%")],
+            Registry::new(&Default::default()),
+            &Default::default(),
+            &std::collections::HashSet::from(["cpu".to_string()]),
+        );
+        let module = &folded.groups[0].modules[0];
+        // The icon and its padding, and not the gap that would have separated it from
+        // text there is none of: 12 + 6 + 6.
+        assert_eq!(module.width, 24.0);
+        let icon = module.icon.expect("the icon is what is left");
+        // Which is what leaves the same room either side of it.
+        assert_eq!(icon.x - module.x, 6.0);
+        assert_eq!((module.x + module.width) - (icon.x + icon.size), 6.0);
     }
 
     #[test]
