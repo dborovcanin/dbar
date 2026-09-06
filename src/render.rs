@@ -362,7 +362,14 @@ fn draw_text(
         RunPixels::Coverage(coverage) => blend_coverage(
             pixmap, coverage, run.width, run.height, rx, ry, color, false,
         ),
-        RunPixels::Colour(rgba) => blend_rgba(pixmap, rgba, run.width, run.height, rx, ry),
+        // The text tinted first and what carries its own colour laid over it, which is
+        // how `☀ Clear` keeps the sun's colours and the module's own wording.
+        RunPixels::Mixed { coverage, rgba } => {
+            blend_coverage(
+                pixmap, coverage, run.width, run.height, rx, ry, color, false,
+            );
+            blend_rgba(pixmap, rgba, run.width, run.height, rx, ry);
+        }
     }
 }
 

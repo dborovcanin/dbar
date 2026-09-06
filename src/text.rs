@@ -52,11 +52,15 @@ pub struct TextRun {
 /// Almost all text is an outline, which comes back as coverage and is tinted with whatever
 /// colour the module asks for. An emoji carries its own colour and cannot be reduced to
 /// coverage without losing it, so it arrives already painted.
+///
+/// A string can be both at once - `☀ Clear` is an emoji and then ordinary text - and the
+/// two are kept apart rather than the whole run being painted, or the words would be drawn
+/// in whatever colour the emoji was rasterised against instead of the module's own.
 pub enum RunPixels {
     /// One byte of coverage per pixel, row-major.
     Coverage(Vec<u8>),
-    /// Premultiplied RGBA, row-major.
-    Colour(Vec<u8>),
+    /// Coverage to tint, and premultiplied RGBA to lay over it as it is.
+    Mixed { coverage: Vec<u8>, rgba: Vec<u8> },
 }
 
 /// A cache that forgets in generations rather than one entry at a time.
@@ -378,66 +382,85 @@ impl TextRenderer {
     }
 }
 
+/// One rectangle of one glyph, as cosmic-text hands it over.
+type Patch = (i32, i32, u32, u32, cosmic_text::Color);
+
+/// Draw the buffer against one colour and keep what came back.
+fn painted(
+    buffer: &mut Buffer,
+    fonts: &mut FontSystem,
+    swash: &mut SwashCache,
+    probe: Rgb,
+) -> Vec<Patch> {
+    let mut patches = Vec::new();
+    let colour = cosmic_text::Color::rgba(probe.0, probe.1, probe.2, 0xff);
+    buffer.draw(fonts, swash, colour, |x, y, w, h, c| {
+        if c.a() == 0 || w == 0 || h == 0 {
+            return;
+        }
+        patches.push((x, y, w, h, c));
+    });
+    patches
+}
+
+type Rgb = (u8, u8, u8);
+
+/// The colours the run is drawn against to find out which glyphs have one of their own.
+const FIRST_PROBE: Rgb = (0xff, 0xff, 0xff);
+const SECOND_PROBE: Rgb = (0x00, 0x00, 0x00);
+
 /// Turn a shaped buffer into pixels.
 ///
-/// The buffer is drawn once in white: a glyph rendered from an outline comes back with the
+/// The buffer is drawn in white: a glyph rendered from an outline comes back with the
 /// colour it was given and its coverage in the alpha, so white in means coverage out. A
-/// glyph that answers in some other colour is carrying its own, and the whole run is kept
-/// as painted pixels instead.
+/// glyph that answers in some other colour is carrying its own - an emoji - and has to be
+/// kept as painted pixels.
+///
+/// Which is which is a question about the glyph, not about the pixel: an emoji has white
+/// pixels in it, and deciding per pixel would tint the highlights on a sun. So a run with
+/// any colour in it is drawn a second time against another colour, and what followed the
+/// probe is text while what did not is carrying its own.
 fn rasterise(
     buffer: &mut Buffer,
     fonts: &mut FontSystem,
     swash: &mut SwashCache,
 ) -> Option<TextRun> {
-    let white = cosmic_text::Color::rgba(0xff, 0xff, 0xff, 0xff);
-    let mut patches: Vec<(i32, i32, u32, u32, cosmic_text::Color)> = Vec::new();
+    let patches = painted(buffer, fonts, swash, FIRST_PROBE);
+    if patches.is_empty() {
+        return None;
+    }
     let (mut min_x, mut min_y) = (i32::MAX, i32::MAX);
     let (mut max_x, mut max_y) = (i32::MIN, i32::MIN);
-    let mut coloured = false;
-
-    buffer.draw(fonts, swash, white, |x, y, w, h, c| {
-        if c.a() == 0 || w == 0 || h == 0 {
-            return;
-        }
-        coloured |= (c.r(), c.g(), c.b()) != (0xff, 0xff, 0xff);
-        patches.push((x, y, w, h, c));
+    for &(x, y, w, h, _) in &patches {
         min_x = min_x.min(x);
         min_y = min_y.min(y);
         max_x = max_x.max(x + w as i32);
         max_y = max_y.max(y + h as i32);
-    });
-
-    if patches.is_empty() {
-        return None;
     }
+
+    let owns_colour = own_colours(buffer, fonts, swash, &patches);
+    let coloured = owns_colour.iter().any(|&own| own);
     let (width, height) = ((max_x - min_x) as usize, (max_y - min_y) as usize);
 
     // Source-over of one patch onto what is already there. Whole runs are built this way
     // because two glyphs can touch the same pixel.
     let over = |under: u32, src: u32, alpha: u32| under + (src * (255 - alpha) + 127) / 255;
 
-    if !coloured {
-        let mut coverage = vec![0u8; width * height];
-        for (x, y, w, h, c) in patches {
+    let mut coverage = vec![0u8; width * height];
+    let mut rgba = match coloured {
+        true => vec![0u8; width * height * 4],
+        false => Vec::new(),
+    };
+    for (&(x, y, w, h, c), own) in patches.iter().zip(owns_colour) {
+        if !own {
             for row in 0..h as usize {
                 let line = ((y - min_y) as usize + row) * width + (x - min_x) as usize;
                 for slot in &mut coverage[line..line + w as usize] {
                     *slot = over(u32::from(c.a()), u32::from(*slot), u32::from(c.a())) as u8;
                 }
             }
+            continue;
         }
-        return Some(TextRun {
-            left: min_x,
-            top: min_y,
-            width,
-            height,
-            pixels: RunPixels::Coverage(coverage),
-        });
-    }
-
-    // Something in the run carries its own colour, so the whole run is kept painted.
-    let mut rgba = vec![0u8; width * height * 4];
-    for (x, y, w, h, c) in patches {
         let a = u32::from(c.a());
         let up = |v: u8| (u32::from(v) * a + 127) / 255;
         let (sr, sg, sb) = (up(c.r()), up(c.g()), up(c.b()));
@@ -456,8 +479,53 @@ fn rasterise(
         top: min_y,
         width,
         height,
-        pixels: RunPixels::Colour(rgba),
+        pixels: match coloured {
+            true => RunPixels::Mixed { coverage, rgba },
+            false => RunPixels::Coverage(coverage),
+        },
     })
+}
+
+/// Which of these patches came from a glyph carrying its own colour.
+///
+/// Nothing in the run answered in anything but the probe means every glyph is an outline,
+/// which is almost every string a bar draws and costs one pass. Otherwise the run is drawn
+/// again against a second colour: a patch that changed with it was being given its colour,
+/// and one that did not brought its own.
+fn own_colours(
+    buffer: &mut Buffer,
+    fonts: &mut FontSystem,
+    swash: &mut SwashCache,
+    patches: &[Patch],
+) -> Vec<bool> {
+    let follows = |c: &cosmic_text::Color, probe: Rgb| (c.r(), c.g(), c.b()) == probe;
+    if patches
+        .iter()
+        .all(|(_, _, _, _, c)| follows(c, FIRST_PROBE))
+    {
+        return vec![false; patches.len()];
+    }
+    let again = painted(buffer, fonts, swash, SECOND_PROBE);
+    unchanged(patches, &again)
+}
+
+/// The patches that came back the same colour both times, which are the ones that were
+/// never taking the colour they were given.
+///
+/// The same buffer drawn twice reports the same glyphs in the same order. If it ever did
+/// not, taking the whole run as painted is what dbar did before it knew better.
+fn unchanged(first: &[Patch], second: &[Patch]) -> Vec<bool> {
+    if first.len() != second.len() {
+        return vec![true; first.len()];
+    }
+    first
+        .iter()
+        .zip(second)
+        .map(|(&(fx, fy, fw, fh, fc), &(sx, sy, sw, sh, sc))| {
+            let same_place = (fx, fy, fw, fh) == (sx, sy, sw, sh);
+            !same_place || (fc.r(), fc.g(), fc.b()) == (sc.r(), sc.g(), sc.b())
+        })
+        .collect()
 }
 
 /// Shape one string at `metrics`, laying it out on a single unbounded line.
@@ -482,6 +550,26 @@ impl Measure for TextRenderer {
 
 #[cfg(test)]
 mod tests {
+
+    /// A glyph that followed the colour it was given is text to tint; one that came back
+    /// the same both times brought its own, which is what an emoji does. Deciding this per
+    /// glyph rather than per run is what keeps `☀ Clear` from drawing the word in the
+    /// colour the sun was rasterised against.
+    #[test]
+    fn a_glyph_that_ignored_both_probes_is_carrying_its_own_colour() {
+        let colour = |r, g, b| cosmic_text::Color::rgba(r, g, b, 0xff);
+        // A letter, reported in whichever colour it was drawn against.
+        let letter = |c| (0, 0, 4, 8, c);
+        // A patch of the sun, the same yellow either way.
+        let sun = |()| (8, 0, 6, 6, colour(0xfc, 0xc1, 0x1a));
+        let first = [letter(colour(0xff, 0xff, 0xff)), sun(())];
+        let second = [letter(colour(0x00, 0x00, 0x00)), sun(())];
+        assert_eq!(unchanged(&first, &second), [false, true]);
+        // Two passes that do not line up leave everything painted, which loses the tint
+        // rather than the colours.
+        assert_eq!(unchanged(&first, &second[..1]), [true, true]);
+    }
+
     use super::*;
 
     fn len<V>(cache: &Generations<V>) -> usize {
