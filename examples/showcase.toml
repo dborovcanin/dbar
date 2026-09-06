@@ -102,7 +102,7 @@ background = "#00000000" # default: transparent
 radius = 0               # default: 0
 min_width = 0            # default: 0
 icon = "none"            # default: none
-icon_size = 20           # default: 1.4x the font size
+icon_size = 20           # default: 1.6x the font size
 icon_gap = 5             # default: a quarter of the icon size
 
 # Filled transitions need neighbouring modules to contrast, so these alternate.
@@ -113,7 +113,7 @@ padding = 4
 radius = 0                 # default: 0
 min_width = 0              # default: 0
 icon = "none"              # default: none
-icon_size = 20             # default: 1.4x the font size
+icon_size = 20             # default: 1.6x the font size
 
 [style.warm]
 background = "$warning"
@@ -122,7 +122,7 @@ padding = 4
 radius = 0                 # default: 0
 min_width = 0              # default: 0
 icon = "none"              # default: none
-icon_size = 20             # default: 1.4x the font size
+icon_size = 20             # default: 1.6x the font size
 
 [style.mint]
 background = "$teal"
@@ -131,7 +131,7 @@ padding = 4
 radius = 0                 # default: 0
 min_width = 0              # default: 0
 icon = "none"              # default: none
-icon_size = 20             # default: 1.4x the font size
+icon_size = 20             # default: 1.6x the font size
 
 [style.stone]
 background = "$slate"
@@ -140,7 +140,7 @@ padding = 4
 radius = 0            # default: 0
 min_width = 0         # default: 0
 icon = "none"         # default: none
-icon_size = 20        # default: 1.4x the font size
+icon_size = 20        # default: 1.6x the font size
 
 # No background of its own, so the group background shows through continuously.
 # Hover is paint-only: background, foreground and radius. Anything affecting
@@ -152,7 +152,7 @@ padding = 4             # default: 8
 radius = 0              # default: 0
 min_width = 0           # default: 0
 icon = "none"           # default: none
-icon_size = 20          # default: 1.4x the font size
+icon_size = 20          # default: 1.6x the font size
 
 [style.plain]
 foreground = "$text"
@@ -161,7 +161,7 @@ background = "#00000000" # default: transparent
 radius = 0               # default: 0
 min_width = 0            # default: 0
 icon = "none"            # default: none
-icon_size = 20           # default: 1.4x the font size
+icon_size = 20           # default: 1.6x the font size
 
 [style.warning]
 background = "$warning"
@@ -170,7 +170,7 @@ padding = 4
 radius = 0                 # default: 0
 min_width = 0              # default: 0
 icon = "none"              # default: none
-icon_size = 20             # default: 1.4x the font size
+icon_size = 20             # default: 1.6x the font size
 
 [style.critical]
 background = "$critical"
@@ -179,7 +179,7 @@ padding = 4
 radius = 0                 # default: 0
 min_width = 0              # default: 0
 icon = "none"              # default: none
-icon_size = 20             # default: 1.4x the font size
+icon_size = 20             # default: 1.6x the font size
 
 # ---------------------------------------------------------------------------
 # Groups

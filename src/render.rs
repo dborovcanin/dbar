@@ -493,7 +493,7 @@ fn path_of(cmds: &[PathCmd]) -> Option<Path> {
 
 /// Draw an icon on its own, at one size and offset within a pixel, and keep the coverage.
 fn rasterise_icon(what: icon::Icon, level: usize, size: f32, fx: f32, fy: f32) -> Option<IconRun> {
-    let width = (size + fx).ceil() as usize + 1;
+    let width = (size * what.width() + fx).ceil() as usize + 1;
     let height = (size + fy).ceil() as usize + 1;
     let mut pixmap = Pixmap::new(width as u32, height as u32)?;
     let placed = PlacedIcon {
@@ -1487,7 +1487,16 @@ mod tests {
         use crate::icon::Icon;
         for size in [16.0f32, 20.0, 24.5] {
             for (fx, fy) in [(0.0f32, 0.0f32), (0.5, 0.25), (0.37, 0.81)] {
-                for what in [Icon::Cpu, Icon::Headphones, Icon::Wifi, Icon::Clock] {
+                // The battery is here because it is the one icon wider than its height,
+                // so a rasterised box sized as a square would lose its cap.
+                for what in [
+                    Icon::Cpu,
+                    Icon::Headphones,
+                    Icon::Wifi,
+                    Icon::Clock,
+                    Icon::Battery,
+                    Icon::BatteryCharging,
+                ] {
                     let placed = PlacedIcon {
                         icon: what,
                         level: 2,

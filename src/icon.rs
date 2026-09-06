@@ -1,9 +1,10 @@
 //! Built-in vector icons.
 //!
-//! Icons are drawn as geometry in a unit square, so they scale with `icon_size` instead of
-//! riding on a font. Graded icons take a level rather than being five separate drawings:
-//! a battery is one outline with a fill of varying width, wifi is a dot plus a count of
-//! arcs, and so on.
+//! Icons are drawn as geometry a unit tall, so they scale with `icon_size` instead of
+//! riding on a font. Most are a unit wide as well; a battery is longer than it is tall and
+//! says so with `width`, which is the only thing that varies. Graded icons take a level
+//! rather than being five separate drawings: a battery is one outline with a fill of
+//! varying width, wifi is a dot plus a count of arcs, and so on.
 
 /// Number of steps a graded icon has.
 pub const LEVELS: usize = 5;
@@ -162,6 +163,17 @@ impl Icon {
         })
     }
 
+    /// How wide this icon is drawn, as a multiple of its height.
+    ///
+    /// Icons are square unless they have a reason not to be. A battery does: the thing it
+    /// is a picture of is long, and a square one reads as a box with a pip on the end.
+    pub fn width(self) -> f32 {
+        match self {
+            Icon::Battery | Icon::BatteryCharging => BATTERY_WIDTH,
+            _ => 1.0,
+        }
+    }
+
     /// Whether this icon changes with a percentage in the module's text.
     pub fn is_graded(self) -> bool {
         matches!(
@@ -183,7 +195,7 @@ pub fn level_of(percent: f64) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Geometry, all inside the unit square
+// Geometry, a unit tall and `Icon::width` wide
 // ---------------------------------------------------------------------------
 
 /// Control-point ratio that turns a cubic into a quarter circle.
@@ -403,13 +415,20 @@ fn keyboard(out: &mut Vec<IconPath>) {
     finish(keys, Ink::Stroke(0.07), out);
 }
 
+/// How much longer than tall a battery is drawn.
+///
+/// A quarter over, which is what it takes to stop reading as a box, and which lands on a
+/// whole pixel at every icon size a whole-pixel font gives: 16 becomes 20, and the scaled
+/// sizes an output asks for follow.
+const BATTERY_WIDTH: f32 = 1.25;
+
 /// The battery's own geometry, shared by both of its drawings.
 ///
 /// A battery is a wide, shallow thing, so it is drawn as tall as the box allows and as
-/// long as it: at the sizes a bar uses the body is eight or nine pixels of it, and every
-/// one of them is the difference between a battery and a dash. It runs nearer the edges
-/// than the other icons because it is the one shape that is meant to look long.
-const BODY: (f32, f32, f32, f32) = (0.03, 0.188, 0.855, 0.812);
+/// long as it: at the sizes a bar uses the body is eleven or twelve pixels of it, and
+/// every one of them is the difference between a battery and a dash. It runs to the edges
+/// of its box, which is why the box is wider than the others to begin with.
+const BODY: (f32, f32, f32, f32) = (0.04, 0.188, 1.07, 0.812);
 /// How far the charge sits inside the shell, which is the stroke plus a hair of daylight.
 const INSET: f32 = 0.06;
 
@@ -437,7 +456,7 @@ fn shell(out: &mut Vec<IconPath>) {
     finish(shell, Ink::Stroke(0.08), out);
 
     let mut cap = Outline::new();
-    rounded(&mut cap, x1 + 0.04, 0.40, x1 + 0.13, 0.60, 0.03);
+    rounded(&mut cap, x1 + 0.05, 0.40, x1 + 0.16, 0.60, 0.03);
     finish(cap, Ink::Fill, out);
 }
 
@@ -468,8 +487,8 @@ fn battery_charging(out: &mut Vec<IconPath>, level: usize) {
 fn bolt(out: &mut Outline, y: f32) {
     // Half the height and half the width of the bolt, in unit space.
     const H: f32 = 0.222;
-    const W: f32 = 0.17;
-    let (cx, cy) = (0.44, y);
+    const W: f32 = 0.21;
+    let (cx, cy) = (0.555, y);
     let at = |x: f32, y: f32| (cx + x * W, cy + y * H);
     let (sx, sy) = at(0.55, -1.0);
     out.move_to(sx, sy);

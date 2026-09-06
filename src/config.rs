@@ -884,7 +884,7 @@ const ICON_GAP_RATIO: f32 = 0.25;
 /// Icon edge length as a multiple of the font size, when `[bar] icon_size` is absent.
 ///
 /// Ties the two together so that changing `[bar] font` scales the icons with the text.
-const ICON_SIZE_RATIO: f32 = 1.4;
+const ICON_SIZE_RATIO: f32 = 1.6;
 
 /// The starting point of the cascade, carrying the bar-wide icon size.
 fn base_style(icon_size: f32) -> Style {
@@ -904,7 +904,7 @@ impl Default for Style {
             min_width: 0.0,
             max_width: 0.0,
             icon: None,
-            icon_size: 14.0,
+            icon_size: 16.0,
             icon_gap: None,
         }
     }

@@ -307,7 +307,11 @@ icon_size = 18          # overrides both
 
 `icon_size` cascades like any other style property: `[bar]` sets the base, a
 named style overrides it, and a module overrides that. With `[bar] icon_size`
-left out it defaults to 1.4x the font size, so icons scale with the text.
+left out it defaults to 1.6x the font size, so icons scale with the text.
+
+`icon_size` is the icon's height. Icons are square apart from the battery, which
+is drawn a quarter longer than it is tall, and takes that much more room on the
+bar.
 
 `icon_gap` is the space between an icon and its text, in logical pixels. Left
 out, it is a quarter of the icon size, so a bigger icon keeps its breathing room

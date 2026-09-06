@@ -535,9 +535,13 @@ fn size_group(
             };
             (icon, level)
         });
-        // The icon and the space after it, which is what the text starts behind.
+        // The icon and the space after it, which is what the text starts behind. An icon
+        // is as tall as `icon_size` and as wide as its own shape asks for, which is the
+        // same thing for everything but the battery.
         let icon_advance = match icon {
-            Some(_) if style.icon_size > 0.0 => style.icon_size + style.gap(),
+            Some((icon, _)) if style.icon_size > 0.0 => {
+                style.icon_size * icon.width() + style.gap()
+            }
             _ => 0.0,
         };
         // A module that would outgrow max_width, or the room its run has left, loses text
@@ -1548,6 +1552,20 @@ spacing = 0
         // Twice the icon is twice the gap, so the proportions hold as the bar grows.
         assert_eq!(width(10.0) - 3.0, 12.5);
         assert_eq!(width(20.0) - 3.0, 25.0);
+    }
+
+    #[test]
+    fn a_battery_is_given_the_room_a_long_icon_needs() {
+        let width = |icon: &str| {
+            width_of(&format!(
+                "padding = 0\nicon_gap = 0\nicon_size = 20\nicon = \"{icon}\""
+            ))
+        };
+        // Three characters of text either way, and a square icon takes its size.
+        assert_eq!(width("cpu"), 23.0);
+        // The battery asks for a quarter more, and the text starts behind all of it.
+        assert_eq!(width("battery"), 28.0);
+        assert_eq!(width("battery-charging"), 28.0);
     }
 
     #[test]
