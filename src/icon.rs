@@ -403,23 +403,42 @@ fn keyboard(out: &mut Vec<IconPath>) {
     finish(keys, Ink::Stroke(0.07), out);
 }
 
+/// The battery's own geometry, shared by both of its drawings.
+///
+/// A battery is a wide, shallow thing, so it is drawn as tall as the box allows and as
+/// long as it: at the sizes a bar uses the body is eight or nine pixels of it, and every
+/// one of them is the difference between a battery and a dash. It runs nearer the edges
+/// than the other icons because it is the one shape that is meant to look long.
+const BODY: (f32, f32, f32, f32) = (0.03, 0.188, 0.855, 0.812);
+/// How far the charge sits inside the shell, which is the stroke plus a hair of daylight.
+const INSET: f32 = 0.06;
+
+/// The charge bar for a battery at this level, and the room left inside the shell.
+fn charge(level: usize) -> (f32, f32, f32, f32) {
+    let (x0, y0, x1, y1) = BODY;
+    let (fx0, fx1) = (x0 + INSET, x1 - INSET);
+    let filled = fx0 + (fx1 - fx0) * (level + 1) as f32 / LEVELS as f32;
+    (fx0, y0 + INSET, filled, y1 - INSET)
+}
+
 fn battery(out: &mut Vec<IconPath>, level: usize) {
-    let (x0, x1) = (0.10, 0.80);
+    shell(out);
+    let (fx0, fy0, filled, fy1) = charge(level);
+    let mut fill = Outline::new();
+    rounded(&mut fill, fx0, fy0, filled, fy1, 0.03);
+    finish(fill, Ink::Fill, out);
+}
+
+/// The shell and its cap, which are what say "battery" before the charge says anything.
+fn shell(out: &mut Vec<IconPath>) {
+    let (x0, y0, x1, y1) = BODY;
     let mut shell = Outline::new();
-    rounded(&mut shell, x0, 0.30, x1, 0.70, 0.07);
+    rounded(&mut shell, x0, y0, x1, y1, 0.08);
     finish(shell, Ink::Stroke(0.08), out);
 
     let mut cap = Outline::new();
-    rounded(&mut cap, 0.84, 0.42, 0.92, 0.58, 0.03);
+    rounded(&mut cap, x1 + 0.04, 0.40, x1 + 0.13, 0.60, 0.03);
     finish(cap, Ink::Fill, out);
-
-    // The charge fills the shell from the left, one fifth per level.
-    let inset = 0.055;
-    let (fx0, fx1) = (x0 + inset, x1 - inset);
-    let filled = fx0 + (fx1 - fx0) * (level + 1) as f32 / LEVELS as f32;
-    let mut fill = Outline::new();
-    rounded(&mut fill, fx0, 0.30 + inset, filled, 0.70 - inset, 0.03);
-    finish(fill, Ink::Fill, out);
 }
 
 /// A charging battery: the same charge bar as `battery`, with a bolt through it.
@@ -427,30 +446,44 @@ fn battery(out: &mut Vec<IconPath>, level: usize) {
 /// The bolt and the bar share one even-odd path, so the bolt reads as solid where the
 /// battery is empty and as a cut-out where it is full. Drawing it on top in the same colour
 /// would make it vanish over the bar.
+///
+/// It is drawn well inside the shell rather than across it. A bolt that reaches the walls
+/// has no daylight left to read against once the charge is behind it, which is what made a
+/// half-charged battery look like a smudge at bar sizes.
 fn battery_charging(out: &mut Vec<IconPath>, level: usize) {
-    let (x0, x1) = (0.10, 0.80);
-    let mut shell = Outline::new();
-    rounded(&mut shell, x0, 0.30, x1, 0.70, 0.07);
-    finish(shell, Ink::Stroke(0.08), out);
-
-    let mut cap = Outline::new();
-    rounded(&mut cap, 0.84, 0.42, 0.92, 0.58, 0.03);
-    finish(cap, Ink::Fill, out);
-
-    let inset = 0.055;
-    let (fx0, fx1) = (x0 + inset, x1 - inset);
-    let filled = fx0 + (fx1 - fx0) * (level + 1) as f32 / LEVELS as f32;
+    shell(out);
+    let (fx0, fy0, filled, fy1) = charge(level);
 
     let mut combined = Outline::new();
-    rounded(&mut combined, fx0, 0.30 + inset, filled, 0.70 - inset, 0.03);
-    combined.move_to(0.49, 0.31);
-    combined.line_to(0.30, 0.52);
-    combined.line_to(0.41, 0.52);
-    combined.line_to(0.38, 0.69);
-    combined.line_to(0.57, 0.48);
-    combined.line_to(0.46, 0.48);
-    combined.close();
+    rounded(&mut combined, fx0, fy0, filled, fy1, 0.03);
+    bolt(&mut combined, (fy0 + fy1) / 2.0);
     finish(combined, Ink::FillEvenOdd, out);
+}
+
+/// A lightning bolt, centred on `y` and standing clear of the shell either side of it.
+///
+/// It grows sideways rather than up: the shell is only eight pixels deep at bar sizes, and
+/// a bolt that takes the last of that has nothing left to read against once the charge is
+/// behind it. Across the battery there is room to spare, so that is where the weight goes.
+fn bolt(out: &mut Outline, y: f32) {
+    // Half the height and half the width of the bolt, in unit space.
+    const H: f32 = 0.222;
+    const W: f32 = 0.17;
+    let (cx, cy) = (0.44, y);
+    let at = |x: f32, y: f32| (cx + x * W, cy + y * H);
+    let (sx, sy) = at(0.55, -1.0);
+    out.move_to(sx, sy);
+    for (x, y) in [
+        (-1.0, 0.1),
+        (-0.2, 0.1),
+        (-0.45, 1.0),
+        (1.0, -0.15),
+        (0.2, -0.15),
+    ] {
+        let (px, py) = at(x, y);
+        out.line_to(px, py);
+    }
+    out.close();
 }
 
 /// Headphones: a headband over two earcups.
