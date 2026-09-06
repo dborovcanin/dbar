@@ -82,8 +82,11 @@ critical = "#fb4934"   # bright red
 [left]
 groups = ["desktop", "mode", "window"]
 
+[center]
+groups = ["time"]
+
 [right]
-groups = ["playing", "system", "network", "power", "weather", "time"]
+groups = ["playing", "weather", "system", "network", "power"]
 
 # ---------------------------------------------------------------------------
 # Styles
@@ -562,7 +565,7 @@ style = "critical"
 # click goes on working.
 [module.weather]
 source = "command"
-command = ["/home/dusan/.config/dbar/weather.sh"]
+command = ["/home/dusan/dotfiles/scripts/dbar/weather.sh"]
 # The knobs, in the order the script reads them: $1, $2, then everything left.
 # They live here rather than in the script, so moving city is a line in the config
 # and the script stays the same script.
@@ -611,7 +614,7 @@ format = "$now.time(f:'%a %d %b  %H:%M')"
 # A bar shows the time; a calendar is a different thing, and it belongs to a program of
 # your own rather than to dbar. The argv is run directly, so there is no shell here and
 # nothing to quote.
-on_click = { left = ["/home/dusan/dotfiles/scripts/sway_calendar.sh"] }
+on_click = { left = ["/home/dusan/dotfiles/scripts/dbar/sway_calendar.sh"] }
 style = "panel"
 foreground = "$background"
 icon = "clock"

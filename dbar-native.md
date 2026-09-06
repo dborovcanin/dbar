@@ -66,6 +66,15 @@ Two rules keep this honest:
 Both already half-hold in the current code (`layout.rs` is documented as
 "purely geometric"); the plan is to finish the job.
 
+A third rule follows from those two once there is more than one screen. Everything
+above `StatusItem` happens once for the session: one round of collecting, one set of
+readings, one i3bar child. Everything from layout down happens once per screen, because
+that is where width, scale and the pointer come in. `App` owns the first half and a
+`Bar` owns the second - its surface, its shm pool, its clip mask, its `Frame` - so a
+second monitor costs one more buffer and no more wake-ups. What a screen is showing
+reaches layout as `Inputs::output`, and is the only thing there that knows a screen
+exists at all.
+
 ---
 
 ## 2. What exists today

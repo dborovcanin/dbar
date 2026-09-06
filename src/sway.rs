@@ -4,6 +4,7 @@
 //! costs no dependencies. Two connections are used: one stays subscribed to events, which
 //! the protocol says must not carry other requests, and one issues queries.
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -72,6 +73,10 @@ pub const LANGUAGE_FIELDS: &[FieldSpec] = &[
 #[derive(Clone, Debug, Deserialize)]
 pub struct Workspace {
     pub name: String,
+    /// The screen it is on, named the way the compositor names it: "DP-1". A bar on one
+    /// screen lists the workspaces of that screen, so this is what ties the two together.
+    #[serde(default)]
+    pub output: String,
     #[serde(default)]
     pub focused: bool,
     #[serde(default)]
@@ -94,8 +99,14 @@ pub struct Layout {
 #[derive(Clone, Debug, Default)]
 pub struct SwayState {
     pub workspaces: Vec<Workspace>,
-    /// Title of the focused window, if any.
-    pub window: Option<String>,
+    /// The title each screen has focused, by the name of that screen.
+    ///
+    /// One per output rather than one altogether, because only one window in the session
+    /// is focused and every other screen still has something on it: a bar that showed the
+    /// focused title on all of them would be wrong everywhere but where the pointer is.
+    pub windows: HashMap<String, String>,
+    /// Which screen the compositor's focus is on, for a bar that does not know its own.
+    pub focused_output: Option<String>,
     /// The layout of the keyboard last switched, or nothing while no module asks for one.
     pub layout: Option<Layout>,
     /// The binding mode the compositor is in, which is `default` unless one is held.
@@ -154,24 +165,72 @@ fn query(stream: &mut UnixStream, kind: u32) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-/// Depth-first search for the focused node, which is where the title lives.
-fn focused(node: &serde_json::Value) -> Option<&serde_json::Value> {
-    if node.get("focused").and_then(|v| v.as_bool()) == Some(true) {
-        return Some(node);
-    }
-    for key in ["nodes", "floating_nodes"] {
-        for child in node
-            .get(key)
+/// The children of a node, ordinary and floating alike.
+fn children(node: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
+    ["nodes", "floating_nodes"]
+        .into_iter()
+        .flat_map(move |key| {
+            node.get(key)
+                .and_then(|v| v.as_array())
+                .into_iter()
+                .flatten()
+        })
+}
+
+/// The node a container would focus, found by following its focus chain to the end.
+///
+/// `focused` is true on exactly one node in the whole session, so it cannot say what the
+/// other screens are showing. Every container instead lists its children most recently
+/// focused first, and following that from an output arrives at the window that screen is
+/// on, whether or not the keyboard is there.
+fn focus_head(node: &serde_json::Value) -> &serde_json::Value {
+    let mut node = node;
+    loop {
+        let wanted = node
+            .get("focus")
             .and_then(|v| v.as_array())
-            .into_iter()
-            .flatten()
-        {
-            if let Some(found) = focused(child) {
-                return Some(found);
-            }
+            .and_then(|f| f.first())
+            .and_then(|v| v.as_u64());
+        let Some(wanted) = wanted else {
+            return node;
+        };
+        let child = children(node).find(|c| c.get("id").and_then(|v| v.as_u64()) == Some(wanted));
+        match child {
+            Some(child) => node = child,
+            None => return node,
         }
     }
-    None
+}
+
+/// What each screen is showing, by the name the compositor gives that screen.
+///
+/// The root's children are the outputs, so one pass over them covers every screen rather
+/// than only the one the keyboard is on.
+fn windows_by_output(tree: &serde_json::Value) -> HashMap<String, String> {
+    let mut windows = HashMap::new();
+    for output in children(tree) {
+        let Some(name) = output.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if let Some(title) = title_of(focus_head(output)) {
+            windows.insert(name.to_string(), title);
+        }
+    }
+    windows
+}
+
+/// The title a node carries, if it is a window at all.
+///
+/// The root, the outputs and the workspace containers all have a name and none of them is
+/// a window; an application id, or the properties an X11 client brings, is what tells them
+/// apart.
+fn title_of(node: &serde_json::Value) -> Option<String> {
+    if node.get("app_id").is_none() && node.get("window_properties").is_none() {
+        return None;
+    }
+    node.get("name")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
 }
 
 /// Re-read the two halves a workspace or window event can have changed.
@@ -181,13 +240,12 @@ fn read_desktop(query_stream: &mut UnixStream, state: &mut SwayState) -> Result<
 
     let tree: serde_json::Value =
         serde_json::from_slice(&query(query_stream, GET_TREE)?).context("parsing the tree")?;
-    // The root and the workspace containers report themselves focused when no window is,
-    // and neither carries an application id, which is what tells them apart.
-    state.window = focused(&tree)
-        .filter(|n| n.get("app_id").is_some() || n.get("window_properties").is_some())
-        .and_then(|n| n.get("name"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    state.windows = windows_by_output(&tree);
+    state.focused_output = state
+        .workspaces
+        .iter()
+        .find(|w| w.focused)
+        .map(|w| w.output.clone());
 
     Ok(())
 }
@@ -403,6 +461,64 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tree as sway reports it with two screens: the keyboard is on the left one, and
+    /// the right one is still showing what it was last used for.
+    const TREE: &str = r#"{
+      "id": 1, "name": "root", "type": "root", "focus": [3, 4],
+      "nodes": [
+        { "id": 3, "name": "DP-1", "type": "output", "focus": [6],
+          "nodes": [
+            { "id": 6, "name": "1", "type": "workspace", "focus": [9], "nodes": [
+              { "id": 9, "name": "vim", "app_id": "foot", "focused": true, "focus": [] },
+              { "id": 10, "name": "mail", "app_id": "thunderbird", "focus": [] }
+            ]}
+          ]},
+        { "id": 4, "name": "HDMI-A-1", "type": "output", "focus": [7],
+          "nodes": [
+            { "id": 7, "name": "2", "type": "workspace", "focus": [11], "nodes": [
+              { "id": 11, "name": "a page", "app_id": "firefox", "focus": [] }
+            ]}
+          ]},
+        { "id": 5, "name": "__i3", "type": "output", "focus": [] }
+      ]
+    }"#;
+
+    /// Only one window in the session is focused, so a bar that took the focused title
+    /// would say the same thing on every screen and be wrong on all but one of them.
+    #[test]
+    fn every_screen_reports_the_window_it_is_showing() {
+        let tree: serde_json::Value = serde_json::from_str(TREE).expect("a tree parses");
+        let windows = windows_by_output(&tree);
+        assert_eq!(windows.get("DP-1").map(String::as_str), Some("vim"));
+        assert_eq!(windows.get("HDMI-A-1").map(String::as_str), Some("a page"));
+    }
+
+    /// The root, the outputs and the workspace containers all have names, and none of them
+    /// is a window: a screen with nothing on it says nothing rather than saying "1".
+    #[test]
+    fn an_empty_screen_has_no_title_rather_than_its_workspace_name() {
+        let tree: serde_json::Value = serde_json::from_str(
+            r#"{"id":1,"focus":[3],"nodes":[
+                 {"id":3,"name":"DP-1","type":"output","focus":[6],
+                  "nodes":[{"id":6,"name":"1","type":"workspace","focus":[],"nodes":[]}]}]}"#,
+        )
+        .expect("a tree parses");
+        assert_eq!(windows_by_output(&tree).get("DP-1"), None);
+    }
+
+    /// Sway names the screen each workspace is on, which is what lets a bar list its own.
+    #[test]
+    fn a_workspace_says_which_screen_it_is_on() {
+        let list: Vec<Workspace> = serde_json::from_str(
+            r#"[{"name":"1","output":"DP-1","focused":true,"visible":true},
+                {"name":"2","output":"HDMI-A-1","visible":true}]"#,
+        )
+        .expect("a workspace list parses");
+        assert_eq!(list[0].output, "DP-1");
+        assert_eq!(list[1].output, "HDMI-A-1");
+        assert!(!list[1].focused);
+    }
 
     #[test]
     fn a_mode_event_names_the_mode_it_switched_to() {

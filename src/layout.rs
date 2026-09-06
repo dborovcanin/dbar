@@ -6,8 +6,8 @@
 use crate::collect::{Registry, Which};
 use crate::color::Color;
 use crate::config::{
-    Config, Direction, EdgeShape, Edges, Ends, Group as GroupCfg, Module as ModuleCfg, Separator,
-    SeparatorColor, SeparatorShape, Source, StateFlags, Style,
+    Config, Direction, EdgeShape, Edges, Ends, Group as GroupCfg, Module as ModuleCfg, Scope,
+    Separator, SeparatorColor, SeparatorShape, Source, StateFlags, Style,
 };
 use crate::format::Format;
 use crate::icon::{self, Icon};
@@ -42,6 +42,36 @@ pub struct Inputs<'a> {
     /// Which step of its turn a spinner is on. One step for the whole bar, so two waiting
     /// modules turn together rather than beating against each other.
     pub spin: usize,
+    /// The screen this bar is on, as the compositor names it, when it is known.
+    ///
+    /// Everything drawn from the compositor is about a screen: the workspaces on it and
+    /// the window it is showing. Nothing else in layout has any use for it.
+    pub output: Option<&'a str>,
+}
+
+impl<'a> Inputs<'a> {
+    /// Whether a screen's worth of the compositor belongs on this bar.
+    ///
+    /// A bar that does not know which screen it is on shows everything: half a workspace
+    /// list is worse than a whole one, and an unnamed output is not something a config can
+    /// have asked for either.
+    fn on_this_screen(&self, scope: Scope, output: &str) -> bool {
+        match (scope, self.output) {
+            (Scope::Session, _) | (_, None) => true,
+            (Scope::Output, Some(mine)) => mine == output,
+        }
+    }
+
+    /// The window title this bar is about: the one on its own screen, or whichever has the
+    /// session's focus.
+    fn window(&self, scope: Scope) -> Option<&str> {
+        let sway = self.sway;
+        let output = match scope {
+            Scope::Output => self.output.or(sway.focused_output.as_deref()),
+            Scope::Session => sway.focused_output.as_deref(),
+        }?;
+        sway.windows.get(output).map(String::as_str)
+    }
 }
 
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
@@ -365,10 +395,10 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     }
                 }
             }
-            Source::SwayWindow => {
-                if let Some(title) = &inputs.sway.window {
+            Source::SwayWindow(scope) => {
+                if let Some(title) = inputs.window(*scope) {
                     let mut fields = Fields::default();
-                    fields.set("title", Value::Text(title.clone()));
+                    fields.set("title", Value::Text(title.to_string()));
                     out.push(Candidate {
                         module,
                         text: wording(module, inputs.alt).render(&fields),
@@ -435,8 +465,11 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     });
                 }
             }
-            Source::SwayWorkspaces => {
+            Source::SwayWorkspaces(scope) => {
                 for workspace in &inputs.sway.workspaces {
+                    if !inputs.on_this_screen(*scope, &workspace.output) {
+                        continue;
+                    }
                     let mut fields = Fields::default();
                     fields.set("name", Value::Text(workspace.name.clone()));
                     out.push(Candidate {
@@ -1095,6 +1128,7 @@ mod tests {
             collapsed,
             waiting,
             spin: 3,
+            output: None,
         };
         compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
     }
@@ -1141,6 +1175,7 @@ padding = 0
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
+                output: None,
             };
             let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
             frame.groups.first().map(|g| g.modules[0].text.clone())
@@ -1162,6 +1197,157 @@ padding = 0
             index: 1,
         });
         assert_eq!(render(&sway).as_deref(), Some(" SE "));
+    }
+
+    /// A bar exists once per screen, so its workspace list is about that screen. Listing
+    /// all of them would put the other monitor's workspaces on this one, which is the whole
+    /// thing multiple bars are for.
+    #[test]
+    fn a_workspace_list_is_about_the_screen_its_bar_is_on() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["ws"]
+
+[module.ws]
+source = "sway:workspaces"
+padding = 0
+"##;
+        let cfg = Config::parse(config).expect("test config parses");
+        let sway = two_screens();
+        let on = |output: Option<&str>| {
+            let inputs = Inputs {
+                items: &[],
+                native: &Registry::new(&Default::default()),
+                sway: &sway,
+                alt: &Default::default(),
+                pages: &Default::default(),
+                collapsed: &Default::default(),
+                waiting: &Default::default(),
+                spin: 0,
+                output,
+            };
+            let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
+            let modules = frame.groups.first().map(|g| g.modules.clone());
+            modules
+                .unwrap_or_default()
+                .iter()
+                .map(|m| m.text.clone())
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(on(Some("DP-1")), ["1", "3"]);
+        assert_eq!(on(Some("HDMI-A-1")), ["2"]);
+        // A bar that has not been told which screen it is on shows the lot, because half a
+        // list is worse than a whole one.
+        assert_eq!(on(None), ["1", "2", "3"]);
+    }
+
+    /// `scope = "session"` is what a single-screen configuration always had, and what
+    /// someone who wants every workspace on every bar asks for.
+    #[test]
+    fn a_workspace_list_can_be_asked_for_the_whole_session() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["ws"]
+
+[module.ws]
+source = "sway:workspaces"
+scope = "session"
+padding = 0
+"##;
+        let cfg = Config::parse(config).expect("test config parses");
+        let sway = two_screens();
+        let inputs = Inputs {
+            items: &[],
+            native: &Registry::new(&Default::default()),
+            sway: &sway,
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed: &Default::default(),
+            waiting: &Default::default(),
+            spin: 0,
+            output: Some("HDMI-A-1"),
+        };
+        let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
+        let texts: Vec<String> = frame.groups[0]
+            .modules
+            .iter()
+            .map(|m| m.text.clone())
+            .collect();
+        assert_eq!(texts, ["1", "2", "3"]);
+    }
+
+    /// The same for the title above it: only one window in the session has focus, and the
+    /// other screen is still showing something.
+    #[test]
+    fn a_window_module_says_what_its_own_screen_is_showing() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["win"]
+
+[module.win]
+source = "sway:window"
+padding = 0
+"##;
+        let cfg = Config::parse(config).expect("test config parses");
+        let sway = two_screens();
+        let on = |output: Option<&str>| {
+            let inputs = Inputs {
+                items: &[],
+                native: &Registry::new(&Default::default()),
+                sway: &sway,
+                alt: &Default::default(),
+                pages: &Default::default(),
+                collapsed: &Default::default(),
+                waiting: &Default::default(),
+                spin: 0,
+                output,
+            };
+            let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
+            frame.groups.first().map(|g| g.modules[0].text.clone())
+        };
+
+        assert_eq!(on(Some("DP-1")).as_deref(), Some("vim"));
+        assert_eq!(on(Some("HDMI-A-1")).as_deref(), Some("a page"));
+        // Nothing said about the screen: the one with the focus is the best guess there is.
+        assert_eq!(on(None).as_deref(), Some("vim"));
+    }
+
+    /// Two screens, the keyboard on the first, and a workspace on each plus one more that
+    /// is open but not on screen.
+    fn two_screens() -> SwayState {
+        let workspace =
+            |name: &str, output: &str, focused: bool, visible: bool| crate::sway::Workspace {
+                name: name.to_string(),
+                output: output.to_string(),
+                focused,
+                visible,
+                urgent: false,
+            };
+        SwayState {
+            workspaces: vec![
+                workspace("1", "DP-1", true, true),
+                workspace("2", "HDMI-A-1", false, true),
+                workspace("3", "DP-1", false, false),
+            ],
+            windows: [
+                ("DP-1".to_string(), "vim".to_string()),
+                ("HDMI-A-1".to_string(), "a page".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            focused_output: Some("DP-1".to_string()),
+            ..SwayState::default()
+        }
     }
 
     /// The mode indicator is on the bar exactly while a mode is held. `default` is what a
@@ -1191,6 +1377,7 @@ padding = 0
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
+                output: None,
             };
             let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
             frame.groups.first().map(|g| g.modules[0].text.clone())

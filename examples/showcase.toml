@@ -38,6 +38,10 @@ font = "sans-serif 15"
 # fallback = ["Symbols Nerd Font", "Noto Color Emoji", "Noto Sans CJK JP"]
 icon_size = 20
 exclusive = true       # default: true; reserve the space so windows do not sit under the bar
+# Which screens to appear on, named the way the compositor names them - `swaymsg
+# -t get_outputs` lists them. Left out, or a single "*", is every screen there
+# is and every one plugged in later, each getting a bar of its own.
+# outputs = ["DP-1", "HDMI-A-1"]
 
 # ---------------------------------------------------------------------------
 # External status provider
@@ -346,6 +350,9 @@ overlap = 1
 #              or text, keyed by field name
 #   layouts    what a sway:language module calls each
 #              layout, keyed by xkb's name for it
+#   scope      how much of the session a sway:workspaces or
+#              sway:window module is about: "output", the
+#              screen its bar is on, or "session"  default: "output"
 #
 # and on a [module.*.states.*]:
 #
@@ -390,8 +397,13 @@ right = "none"
 width = 10
 overlap = 1
 
+# A bar exists once per screen, so a workspace list is about its own screen and
+# the title beside it is the window that screen is showing. `scope = "session"`
+# puts every workspace on every bar instead, and makes the title follow the
+# keyboard rather than the screen.
 [module.workspaces]
 source = "sway:workspaces"
+scope = "output"
 style = "plain"
 padding = 9
 
@@ -522,6 +534,9 @@ style = "warning"
 source = "sway:mode"
 format = " $mode "
 
+# The window this screen is showing, which on one screen is the focused window
+# and on several is one title per bar. `scope = "session"` gives every bar the
+# focused one instead.
 [module.title]
 source = "sway:window"
 style = "plain"

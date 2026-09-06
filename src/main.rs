@@ -118,7 +118,7 @@ fn main() -> Result<()> {
     let config = Config::load(args.config.as_deref())?;
 
     let conn = Connection::connect_to_env().context("connecting to the Wayland compositor")?;
-    let (globals, event_queue) =
+    let (globals, mut event_queue) =
         registry_queue_init::<App>(&conn).context("initializing the Wayland registry")?;
     let qh = event_queue.handle();
 
@@ -300,6 +300,17 @@ fn main() -> Result<()> {
         }
         Err(e) => log::warn!("compositor integration unavailable: {e}"),
     }
+
+    // Two rounds with the compositor before the loop starts: the first brings the outputs
+    // and the second what each of them is called, which is what decides where a bar goes.
+    // Judging a config's `outputs` before that would call a good one wrong for naming a
+    // screen that had simply not arrived yet.
+    for _ in 0..2 {
+        event_queue
+            .roundtrip(&mut app)
+            .context("asking the compositor what screens there are")?;
+    }
+    app.warn_if_nowhere();
 
     WaylandSource::new(conn, event_queue)
         .insert(handle)

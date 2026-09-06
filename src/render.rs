@@ -651,18 +651,22 @@ fn fill(
 /// This owns the pixel format, so the Wayland code never has to know how the renderer
 /// lays out its bytes.
 pub fn render_to_buffer(
-    canvas: &mut [u8],
-    width: u32,
-    height: u32,
+    target: Target<'_>,
     cfg: &Config,
     frame: &Frame,
     scale: f32,
     painter: &mut Painter<impl DrawText>,
 ) -> Result<()> {
+    let Target {
+        canvas,
+        width,
+        height,
+        clip,
+    } = target;
     {
         let mut pixmap =
             PixmapMut::from_bytes(canvas, width, height).context("wrapping the shm buffer")?;
-        render(&mut pixmap, cfg, frame, scale, painter);
+        render(&mut pixmap, cfg, frame, scale, painter, clip);
     }
     // tiny-skia writes premultiplied RGBA; wl_shm ARGB8888 is BGRA in memory order.
     for px in canvas.chunks_exact_mut(4) {
@@ -671,13 +675,28 @@ pub fn render_to_buffer(
     Ok(())
 }
 
+/// The surface a frame is drawn into: its pixels, its size in them, and the clip mask it
+/// keeps between frames.
+///
+/// One value because the three are one thing - a screen - while the painter and the config
+/// behind them are shared by every screen there is.
+pub struct Target<'a> {
+    pub canvas: &'a mut [u8],
+    pub width: u32,
+    pub height: u32,
+    pub clip: &'a mut Clip,
+}
+
 /// Draw the bar background, then every group and module, into `pixmap`.
+///
+/// `clip` is the surface's own, not the painter's, for the reason [`Clip`] gives.
 fn render(
     pixmap: &mut PixmapMut<'_>,
     cfg: &Config,
     frame: &Frame,
     scale: f32,
     painter: &mut Painter<impl DrawText>,
+    clip: &mut Clip,
 ) {
     pixmap.fill(tiny_skia::Color::TRANSPARENT);
     let transform = Transform::from_scale(scale, scale);
@@ -698,10 +717,10 @@ fn render(
     let Painter {
         text,
         scratch,
-        mask,
         layer_mask,
         icons,
     } = painter;
+    let mask = &mut clip.0;
     let line_height = text.line_height();
     let (pw, ph) = (pixmap.width(), pixmap.height());
 
@@ -1038,21 +1057,29 @@ pub struct Painter<T = TextRenderer> {
     /// buffer serves every such group in a frame, since each is cleared, drawn and put
     /// down before the next is started.
     scratch: Option<Pixmap>,
-    /// Clip masks, kept between frames. One per target, because tiny-skia wants a mask
-    /// exactly the size of what it clips: the surface and the layer are different sizes,
-    /// and a frame can draw groups onto both.
-    mask: Option<Mask>,
+    /// The clip mask for the layer, kept between frames. tiny-skia wants a mask exactly
+    /// the size of what it clips, and a frame can draw groups onto either the layer or the
+    /// surface; the surface's own mask therefore belongs to the surface and is passed in.
     layer_mask: Option<Mask>,
     /// Rasterised icons, kept between frames.
     icons: IconCache,
 }
+
+/// The clip mask one surface keeps between frames.
+///
+/// tiny-skia wants a mask exactly the size of what it clips, so this belongs to the surface
+/// rather than to the painter, which draws every bar in turn: one shared between two
+/// screens of different widths would be reallocated on each redraw. Opaque for the same
+/// reason the rest of the renderer's types are - nothing above `Frame` should have to name
+/// one.
+#[derive(Default)]
+pub struct Clip(Option<Mask>);
 
 impl<T: DrawText> Painter<T> {
     pub fn new(text: T) -> Painter<T> {
         Painter {
             text,
             scratch: None,
-            mask: None,
             layer_mask: None,
             icons: IconCache::new(),
         }
@@ -1378,7 +1405,14 @@ mod tests {
     fn shot(frame: &Frame, scale: f32) -> Pixmap {
         let mut pixmap = Pixmap::new((480.0 * scale) as u32, (20.0 * scale) as u32).unwrap();
         let mut painter = Painter::new(Blocks { scale, run: None });
-        render(&mut pixmap.as_mut(), &bar(), frame, scale, &mut painter);
+        render(
+            &mut pixmap.as_mut(),
+            &bar(),
+            frame,
+            scale,
+            &mut painter,
+            &mut Clip::default(),
+        );
         pixmap
     }
 

@@ -86,10 +86,10 @@ pub enum Source {
     /// A block from an external status provider, matched by name.
     #[default]
     Provider,
-    /// The title of the focused window.
-    SwayWindow,
+    /// The title of the focused window, on this screen or in the session.
+    SwayWindow(Scope),
     /// One entry per workspace, expanded at layout time.
-    SwayWorkspaces,
+    SwayWorkspaces(Scope),
     /// The active keyboard layout, with the short forms the module gives its layouts.
     SwayLanguage(BTreeMap<String, String>),
     /// The binding mode the compositor is in.
@@ -102,8 +102,8 @@ impl Source {
         match self {
             Source::Native(which) => which.fields(),
             Source::Provider => crate::status::i3bar::FIELDS,
-            Source::SwayWindow => crate::sway::WINDOW_FIELDS,
-            Source::SwayWorkspaces => crate::sway::WORKSPACE_FIELDS,
+            Source::SwayWindow(_) => crate::sway::WINDOW_FIELDS,
+            Source::SwayWorkspaces(_) => crate::sway::WORKSPACE_FIELDS,
             Source::SwayLanguage(_) => crate::sway::LANGUAGE_FIELDS,
             Source::SwayMode => crate::sway::MODE_FIELDS,
         }
@@ -117,12 +117,27 @@ impl Source {
         match self {
             Source::Native(which) => which.default_format(),
             Source::Provider => "$text",
-            Source::SwayWindow => "$title",
-            Source::SwayWorkspaces => "$name",
+            Source::SwayWindow(_) => "$title",
+            Source::SwayWorkspaces(_) => "$name",
             Source::SwayLanguage(_) => " $short ",
             Source::SwayMode => " $mode ",
         }
     }
+}
+
+/// How much of the session a module drawn from the compositor is about.
+///
+/// A bar exists once per screen, so a workspace list is about that screen and so is the
+/// window title above it. Naming the session instead gives every bar the same thing, which
+/// is what a single-screen configuration always had.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    /// Only what is on the screen this bar is on.
+    #[default]
+    Output,
+    /// Everything, whichever screen it is on.
+    Session,
 }
 
 /// The kind a command module says one of its fields will hold.
@@ -203,6 +218,10 @@ struct RawBar {
     /// Reserve space so windows are not covered. Defaults to on.
     #[serde(default = "default_true")]
     exclusive: bool,
+    /// Which screens to appear on, named the way the compositor names them: "DP-1".
+    /// Empty, or a single "*", is every screen there is and every one plugged in later.
+    #[serde(default)]
+    outputs: Vec<String>,
 }
 
 /// `on_click` as written: a program per button, each an argv.
@@ -342,6 +361,9 @@ struct RawModule {
     /// A layout named here is what `$short` says; anything else is abbreviated.
     #[serde(default)]
     layouts: BTreeMap<String, String>,
+    /// How much of the session a compositor module is about: `output`, which is the screen
+    /// this bar is on, or `session`. Defaults to the screen.
+    scope: Option<Scope>,
     /// A command module's argv. Executed directly: dbar never inserts a shell.
     #[serde(default)]
     command: Vec<String>,
@@ -489,6 +511,7 @@ impl Default for RawBar {
             icon_size: None,
             background: RawBarBackground::default(),
             exclusive: true,
+            outputs: Vec::new(),
         }
     }
 }
@@ -535,6 +558,21 @@ pub struct Bar {
     pub background: Color,
     pub radius: f32,
     pub exclusive: bool,
+    /// The screens this bar appears on, empty for all of them.
+    pub outputs: Vec<String>,
+}
+
+impl Bar {
+    /// Whether this bar belongs on a screen the compositor calls `name`.
+    ///
+    /// An output the compositor has not named yet is taken only by a bar that asked for
+    /// every screen: a list of names cannot be checked against a screen that has none.
+    pub fn shows_on(&self, name: Option<&str>) -> bool {
+        if self.outputs.is_empty() || self.outputs.iter().any(|o| o == "*") {
+            return true;
+        }
+        name.is_some_and(|name| self.outputs.iter().any(|o| o == name))
+    }
 }
 
 /// How to start an external i3bar-protocol provider, when a module reads from one.
@@ -1226,6 +1264,7 @@ impl Config {
             },
             radius: raw.bar.background.radius,
             exclusive: raw.bar.exclusive,
+            outputs: raw.bar.outputs.clone(),
         };
 
         // Named styles resolve against the built-in defaults, once.
@@ -1374,8 +1413,8 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
     let name = raw.and_then(|m| m.source.as_deref()).unwrap_or("provider");
     let source = match name {
         "provider" => Source::Provider,
-        "sway:window" => Source::SwayWindow,
-        "sway:workspaces" => Source::SwayWorkspaces,
+        "sway:window" => Source::SwayWindow(raw.and_then(|m| m.scope).unwrap_or_default()),
+        "sway:workspaces" => Source::SwayWorkspaces(raw.and_then(|m| m.scope).unwrap_or_default()),
         "sway:language" => Source::SwayLanguage(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
         "sway:mode" => Source::SwayMode,
         "command" => {
@@ -1486,6 +1525,14 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         if given && name != belongs_to {
             bail!("module {module_name:?} sets `{key}`, which only a {belongs_to} module reads");
         }
+    }
+    // `scope` is the one key two sources share, since both are about what is on a screen.
+    if raw.is_some_and(|m| m.scope.is_some()) && !matches!(name, "sway:window" | "sway:workspaces")
+    {
+        bail!(
+            "module {module_name:?} sets `scope`, which only a sway:window or \
+             sway:workspaces module reads"
+        );
     }
     Ok(source)
 }
@@ -2766,6 +2813,82 @@ scroll = "5%"
             .find(|m| m.name == "light")
             .expect("the module is there");
         assert_eq!(module.control, Some((Control::Brightness, 5.0)));
+    }
+
+    /// A bar with nothing to say about screens goes on all of them, including one plugged
+    /// in later, which is what a session with one monitor has always had.
+    #[test]
+    fn a_bar_that_names_no_screens_goes_on_every_one() {
+        let bar = Config::parse("[bar]\nheight = 20\n").expect("parses").bar;
+        assert!(bar.shows_on(Some("DP-1")));
+        assert!(bar.shows_on(None));
+    }
+
+    #[test]
+    fn a_bar_that_names_screens_goes_only_on_those() {
+        let bar = Config::parse("[bar]\noutputs = [\"DP-1\", \"DP-2\"]\n")
+            .expect("parses")
+            .bar;
+        assert!(bar.shows_on(Some("DP-1")));
+        assert!(!bar.shows_on(Some("HDMI-A-1")));
+        // A screen the compositor has not named yet cannot be one of two written down.
+        assert!(!bar.shows_on(None));
+
+        let all = Config::parse("[bar]\noutputs = [\"*\"]\n")
+            .expect("parses")
+            .bar;
+        assert!(all.shows_on(Some("HDMI-A-1")));
+        assert!(all.shows_on(None));
+    }
+
+    /// `scope` is about what is on a screen, so it means nothing on a module that is not
+    /// drawn from the compositor - and a key that quietly does nothing is how a config
+    /// comes to be wrong for months.
+    #[test]
+    fn scope_on_a_module_that_is_not_about_a_screen_is_rejected() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+source = "cpu"
+scope = "session"
+"##;
+        let e = Config::parse(config).expect_err("scope means nothing to a cpu module");
+        let message = format!("{e:#}");
+        assert!(message.contains("scope"), "{message}");
+        assert!(message.contains("sway:window"), "{message}");
+    }
+
+    #[test]
+    fn a_compositor_module_is_about_its_own_screen_unless_it_says_otherwise() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["ws", "win"]
+
+[module.ws]
+source = "sway:workspaces"
+
+[module.win]
+source = "sway:window"
+scope = "session"
+"##;
+        let cfg = Config::parse(config).expect("parses");
+        let source = |name: &str| {
+            cfg.modules()
+                .find(|m| m.name == name)
+                .expect("the module is there")
+                .source
+                .clone()
+        };
+        assert_eq!(source("ws"), Source::SwayWorkspaces(Scope::Output));
+        assert_eq!(source("win"), Source::SwayWindow(Scope::Session));
     }
 
     #[test]

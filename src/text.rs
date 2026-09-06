@@ -17,8 +17,20 @@ pub struct TextRenderer {
     family: String,
     /// Font size in logical pixels.
     size: f32,
+    /// What has been shaped, one set per scale that has been drawn at.
+    ///
+    /// A bar on one screen only ever fills the first of these. Two screens of different
+    /// scale would otherwise take turns clearing each other's work, since everything here
+    /// is shaped at the physical size, and every redraw would reshape the whole bar twice.
+    shaped: Vec<Shaped>,
+    /// Which of those the current scale is using.
+    active: usize,
+}
+
+/// Everything that only holds at one scale.
+struct Shaped {
     scale: f32,
-    /// Logical widths, keyed by scale-independent text. Cleared when the scale changes.
+    /// Logical widths, keyed by scale-independent text.
     widths: Generations<f32>,
     /// Rasterised runs, keyed the same way. `None` marks a string that must not be cached
     /// because it draws colour glyphs, so the discovery is not repeated every frame.
@@ -30,6 +42,41 @@ pub struct TextRenderer {
     /// this, so a value that layout has already sized costs nothing to put on screen.
     shapes: Generations<Buffer>,
 }
+
+impl Shaped {
+    fn new(scale: f32) -> Shaped {
+        Shaped {
+            scale,
+            widths: Generations::new(WIDTHS_KEPT),
+            runs: Generations::new(SHAPES_KEPT),
+            shapes: Generations::new(SHAPES_KEPT),
+        }
+    }
+}
+
+/// The set to shape at `scale`, starting one if this scale has not been drawn at.
+///
+/// Free-standing so the choosing can be exercised without a font database behind it.
+fn select(shaped: &mut Vec<Shaped>, scale: f32) -> usize {
+    if let Some(i) = shaped
+        .iter()
+        .position(|s| (s.scale - scale).abs() <= f32::EPSILON)
+    {
+        return i;
+    }
+    if shaped.len() >= SCALES_KEPT {
+        shaped.clear();
+    }
+    shaped.push(Shaped::new(scale));
+    shaped.len() - 1
+}
+
+/// How many scales are kept shaped at once.
+///
+/// One per screen, and a bar with more screens than this has bigger problems than
+/// reshaping. Reaching it starts again rather than growing without bound, so an output
+/// that came and went does not keep its glyphs forever.
+const SCALES_KEPT: usize = 4;
 
 /// A string already rasterised, as coverage per pixel.
 ///
@@ -110,11 +157,6 @@ impl<V> Generations<V> {
 
     fn insert(&mut self, key: &str, value: V) {
         self.get_or_insert(key, || value);
-    }
-
-    fn clear(&mut self) {
-        self.hot.clear();
-        self.cold.clear();
     }
 }
 
@@ -298,21 +340,20 @@ impl TextRenderer {
             swash: SwashCache::new(),
             family,
             size,
-            scale: 1.0,
-            widths: Generations::new(WIDTHS_KEPT),
-            runs: Generations::new(SHAPES_KEPT),
-            shapes: Generations::new(SHAPES_KEPT),
+            shaped: vec![Shaped::new(1.0)],
+            active: 0,
         })
     }
 
+    /// Draw at this scale from here on, keeping what was shaped at the last one.
     pub fn set_scale(&mut self, scale: f32) {
-        if (scale - self.scale).abs() > f32::EPSILON {
-            self.scale = scale;
-            // Both are shaped at the physical size, so neither survives a scale change.
-            self.widths.clear();
-            self.shapes.clear();
-            self.runs.clear();
+        if (scale - self.scale()).abs() > f32::EPSILON {
+            self.active = select(&mut self.shaped, scale);
         }
+    }
+
+    fn scale(&self) -> f32 {
+        self.shaped[self.active].scale
     }
 
     /// Line height in logical pixels.
@@ -321,7 +362,8 @@ impl TextRenderer {
     }
 
     fn metrics(&self) -> Metrics {
-        Metrics::new(self.size * self.scale, self.line_height() * self.scale)
+        let scale = self.scale();
+        Metrics::new(self.size * scale, self.line_height() * scale)
     }
 
     /// The shaped form of `text`, shaping it if this is the first time it has been seen.
@@ -334,25 +376,27 @@ impl TextRenderer {
         let TextRenderer {
             fonts,
             family,
-            shapes,
+            shaped,
+            active,
             ..
         } = self;
+        let shapes = &mut shaped[*active].shapes;
         let buffer = shapes.get_or_insert(text, || shape(fonts, family, metrics, text));
         (buffer, fonts)
     }
 
     /// Width of `text` in logical pixels.
     pub fn measure_text(&mut self, text: &str) -> f32 {
-        if let Some(w) = self.widths.get(text) {
+        if let Some(w) = self.shaped[self.active].widths.get(text) {
             return *w;
         }
-        let scale = self.scale;
+        let scale = self.scale();
         let (buffer, _) = self.shaped(text);
         let physical = buffer
             .layout_runs()
             .fold(0.0f32, |acc, run| acc.max(run.line_w));
         let logical = physical / scale;
-        self.widths.insert(text, logical);
+        self.shaped[self.active].widths.insert(text, logical);
         logical
     }
 
@@ -370,10 +414,11 @@ impl TextRenderer {
             fonts,
             family,
             swash,
-            shapes,
-            runs,
+            shaped,
+            active,
             ..
         } = self;
+        let Shaped { shapes, runs, .. } = &mut shaped[*active];
         runs.get_or_insert(text, || {
             let buffer = shapes.get_or_insert(text, || shape(fonts, family, metrics, text));
             rasterise(buffer, fonts, swash)
@@ -691,13 +736,32 @@ mod tests {
         );
     }
 
+    /// Two screens of different scale draw one after the other, so a set that was thrown
+    /// away on every switch would be reshaped twice per redraw for as long as both are
+    /// plugged in.
     #[test]
-    fn a_scale_change_drops_everything_shaped_for_the_old_one() {
-        let mut cache = Generations::new(4);
-        cache.insert("a", 1);
-        cache.get_or_insert("b", || 2);
-        cache.clear();
-        assert_eq!(len(&cache), 0);
-        assert_eq!(cache.get("a"), None);
+    fn a_scale_drawn_at_before_keeps_what_it_shaped() {
+        let mut shaped = vec![Shaped::new(1.0)];
+        shaped[0].widths.insert("12%", 30.0);
+
+        assert_eq!(select(&mut shaped, 2.0), 1, "a new scale starts a set");
+        let back = select(&mut shaped, 1.0);
+        assert_eq!(back, 0, "the old set is still there");
+        assert_eq!(
+            shaped[back].widths.get("12%"),
+            Some(&30.0),
+            "and still holds what was measured at that scale"
+        );
+    }
+
+    /// An output that came and went would otherwise keep its glyphs for as long as dbar
+    /// runs.
+    #[test]
+    fn more_scales_than_are_kept_start_again_rather_than_growing() {
+        let mut shaped = vec![Shaped::new(1.0)];
+        for i in 0..SCALES_KEPT + 2 {
+            select(&mut shaped, 2.0 + i as f32);
+        }
+        assert!(shaped.len() <= SCALES_KEPT, "{} kept", shaped.len());
     }
 }

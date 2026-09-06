@@ -62,13 +62,123 @@ const SPIN_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
 /// paid only while a program is actually out and never at idle.
 const SPIN_STEP: std::time::Duration = std::time::Duration::from_millis(60);
 
+/// One bar: a layer surface on one screen, and what belongs to that surface rather than to
+/// what is drawn on it.
+///
+/// Everything the bar shows is the app's and is shared by every screen; a bar keeps only
+/// its own geometry, the frame it last laid out and where the pointer is over it.
+struct Bar {
+    output: wl_output::WlOutput,
+    /// What the compositor calls this screen - "DP-1" - once it has said. Sway names its
+    /// outputs the same way, which is how a bar knows which workspaces are its own.
+    name: Option<String>,
+    layer: LayerSurface,
+    pool: SlotPool,
+    /// The clip mask for this surface, which is the one thing the renderer keeps per screen.
+    clip: render::Clip,
+    frame: Frame,
+
+    /// Surface size in logical pixels.
+    width: u32,
+    height: u32,
+    scale: i32,
+
+    /// Pointer position in surface coordinates, while it is over this bar.
+    pointer_at: Option<(f32, f32)>,
+    /// Scrolling not yet worth a step, in steps.
+    ///
+    /// A wheel notch and a finger on a touchpad both arrive as a stream of small amounts,
+    /// and acting on each one turns a flick of the wrist into thirty adjustments. What is
+    /// left over is carried to the next event so slow scrolling still gets there.
+    scrolled: f64,
+    configured: bool,
+    dirty: bool,
+    frame_pending: bool,
+}
+
+impl Bar {
+    /// Put a bar on one screen.
+    ///
+    /// The surface is bound to that output rather than left to the compositor's choice, so
+    /// two bars cannot end up on the same screen with nothing on the other.
+    fn new(
+        app: &App,
+        qh: &QueueHandle<App>,
+        output: wl_output::WlOutput,
+        name: Option<String>,
+        width: u32,
+        scale: i32,
+    ) -> Result<Bar> {
+        let cfg = &app.config.bar;
+        let stack = match cfg.layer {
+            BarLayer::Background => Layer::Background,
+            BarLayer::Bottom => Layer::Bottom,
+            BarLayer::Top => Layer::Top,
+            BarLayer::Overlay => Layer::Overlay,
+        };
+
+        let surface = app.compositor.create_surface(qh);
+        let layer =
+            app.layer_shell
+                .create_layer_surface(qh, surface, stack, Some("dbar"), Some(&output));
+
+        let edge = match cfg.position {
+            Edge::Top => Anchor::TOP,
+            Edge::Bottom => Anchor::BOTTOM,
+        };
+        layer.set_anchor(edge | Anchor::LEFT | Anchor::RIGHT);
+        // A zero width lets the compositor stretch us between the left and right anchors.
+        layer.set_size(0, cfg.height);
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        let m = cfg.margin;
+        match cfg.position {
+            Edge::Top => layer.set_margin(m, m, 0, m),
+            Edge::Bottom => layer.set_margin(0, m, m, m),
+        }
+        layer.set_exclusive_zone(if cfg.exclusive {
+            cfg.height as i32 + cfg.margin
+        } else {
+            0
+        });
+        // The first commit must carry no buffer; the compositor answers with a configure.
+        layer.commit();
+
+        // Only a starting size: the pool grows itself when a buffer does not fit, so a
+        // guess costs a resize at worst and an exactly-sized screen costs nothing.
+        let bytes = (width as usize * scale.max(1) as usize).max(1)
+            * cfg.height as usize
+            * scale.max(1) as usize
+            * 4;
+        let pool = SlotPool::new(bytes, &app.shm).context("creating the shm pool")?;
+
+        Ok(Bar {
+            output,
+            name,
+            layer,
+            pool,
+            clip: render::Clip::default(),
+            frame: Frame::default(),
+            width: 0,
+            height: cfg.height,
+            scale: scale.max(1),
+            pointer_at: None,
+            scrolled: 0.0,
+            configured: false,
+            dirty: true,
+            frame_pending: false,
+        })
+    }
+}
+
 pub struct App {
     registry_state: RegistryState,
     seat_state: SeatState,
     output_state: OutputState,
     shm: Shm,
-    pool: SlotPool,
-    layer: LayerSurface,
+    compositor: CompositorState,
+    layer_shell: LayerShell,
+    /// One per screen the config asks for, in the order the compositor announced them.
+    bars: Vec<Bar>,
     conn: Connection,
     qh: QueueHandle<App>,
 
@@ -115,30 +225,15 @@ pub struct App {
     control_warned: bool,
     /// Workspaces and the focused window, when a compositor is talking to us.
     sway: SwayState,
-    frame: Frame,
     /// Set when the status provider itself has failed; shown in place of the groups.
     fault: Option<String>,
     /// Item names from the last "nothing matched" warning, so it is not repeated per redraw.
     warned_names: Option<Vec<String>>,
     /// Whether the block-count mismatch has already been reported.
     name_count_warned: bool,
+    /// Whether a config that names screens which are not here has been reported.
+    no_output_warned: bool,
 
-    /// Surface size in logical pixels.
-    width: u32,
-    height: u32,
-    scale: i32,
-
-    /// Pointer position in surface coordinates, while it is over the bar.
-    pointer_at: Option<(f32, f32)>,
-    /// Scrolling not yet worth a step, in steps.
-    ///
-    /// A wheel notch and a finger on a touchpad both arrive as a stream of small amounts,
-    /// and acting on each one turns a flick of the wrist into thirty adjustments. What is
-    /// left over is carried to the next event so slow scrolling still gets there.
-    scrolled: f64,
-    configured: bool,
-    dirty: bool,
-    frame_pending: bool,
     pointer: Option<wl_pointer::WlPointer>,
     pub exit: bool,
 }
@@ -160,40 +255,6 @@ impl App {
         let config_collectors = config.collectors();
         let config_signals = config.signals();
         let bar = &config.bar;
-        let stack = match bar.layer {
-            BarLayer::Background => Layer::Background,
-            BarLayer::Bottom => Layer::Bottom,
-            BarLayer::Top => Layer::Top,
-            BarLayer::Overlay => Layer::Overlay,
-        };
-
-        let surface = compositor.create_surface(qh);
-        let layer = layer_shell.create_layer_surface(qh, surface, stack, Some("dbar"), None);
-
-        let edge = match bar.position {
-            Edge::Top => Anchor::TOP,
-            Edge::Bottom => Anchor::BOTTOM,
-        };
-        layer.set_anchor(edge | Anchor::LEFT | Anchor::RIGHT);
-        // A zero width lets the compositor stretch us between the left and right anchors.
-        layer.set_size(0, bar.height);
-        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        let m = bar.margin;
-        match bar.position {
-            Edge::Top => layer.set_margin(m, m, 0, m),
-            Edge::Bottom => layer.set_margin(0, m, m, m),
-        }
-        layer.set_exclusive_zone(if bar.exclusive {
-            bar.height as i32 + bar.margin
-        } else {
-            0
-        });
-        // The first commit must carry no buffer; the compositor answers with a configure.
-        layer.commit();
-
-        let height = bar.height;
-        let pool =
-            SlotPool::new(1920 * height as usize * 4, &shm).context("creating the shm pool")?;
         let text = TextRenderer::new(&bar.font_family, bar.font_size, &bar.font_fallback)?;
 
         Ok(App {
@@ -201,8 +262,9 @@ impl App {
             seat_state: SeatState::new(globals, qh),
             output_state: OutputState::new(globals, qh),
             shm,
-            pool,
-            layer,
+            compositor,
+            layer_shell,
+            bars: Vec::new(),
             conn,
             qh: qh.clone(),
             config,
@@ -225,18 +287,10 @@ impl App {
             provider,
             items: Vec::new(),
             sway: SwayState::default(),
-            frame: Frame::default(),
             fault: None,
             warned_names: None,
             name_count_warned: false,
-            width: 0,
-            height,
-            scale: 1,
-            pointer_at: None,
-            scrolled: 0.0,
-            configured: false,
-            dirty: true,
-            frame_pending: false,
+            no_output_warned: false,
             pointer: None,
             exit: false,
         })
@@ -594,94 +648,218 @@ impl App {
         needed
     }
 
-    /// Mark the bar as needing a redraw and draw immediately if the compositor is ready.
+    /// Mark every bar as needing a redraw, and draw the ones the compositor is ready for.
+    ///
+    /// What changed is what the bars show, and they all show the same thing, so a reading
+    /// arriving is a redraw on each screen. They are laid out separately because their
+    /// widths differ, but the work of collecting was done once.
     fn invalidate(&mut self) {
-        self.dirty = true;
+        for bar in &mut self.bars {
+            bar.dirty = true;
+        }
         self.draw_if_needed();
     }
 
-    /// Draw when there is something to draw and no frame callback is outstanding.
+    /// Draw every bar that has something to draw and no frame callback outstanding.
     pub fn draw_if_needed(&mut self) {
-        if !self.dirty || self.frame_pending || !self.configured || self.width == 0 {
-            return;
+        let mut drawn = false;
+        for i in 0..self.bars.len() {
+            let bar = &self.bars[i];
+            if !bar.dirty || bar.frame_pending || !bar.configured || bar.width == 0 {
+                continue;
+            }
+            match self.draw(i) {
+                Ok(()) => {
+                    self.bars[i].dirty = false;
+                    drawn = true;
+                }
+                // Left dirty, so the next thing to happen tries it again.
+                Err(e) => log::error!("draw failed: {e}"),
+            }
         }
-        if let Err(e) = self.draw() {
-            log::error!("draw failed: {e}");
-            return;
+        if drawn {
+            let _ = self.conn.flush();
         }
-        self.dirty = false;
-        let _ = self.conn.flush();
     }
 
-    fn draw(&mut self) -> Result<()> {
-        let scale = self.scale.max(1) as f32;
-        self.painter.text.set_scale(scale);
-        let (width, height) = (self.width as f32, self.height as f32);
-        self.frame = match &self.fault {
-            Some(message) => layout::fault(message, width, height, &mut self.painter.text),
-            None => {
-                let inputs = Inputs {
-                    items: &self.items,
-                    native: &self.native,
-                    sway: &self.sway,
-                    alt: &self.alt,
-                    pages: &self.pages,
-                    collapsed: &self.collapsed,
-                    waiting: &self.waiting,
-                    spin: self.spin,
-                };
-                let frame = layout::compute(
-                    &self.config,
-                    &inputs,
-                    width,
-                    height,
-                    &mut self.painter.text,
-                    self.pointer_at,
-                );
-                self.warn_if_nothing_matched(&frame);
-                frame
-            }
-        };
+    fn draw(&mut self, i: usize) -> Result<()> {
+        let frame = self.lay_out(i);
+        self.bars[i].frame = frame;
 
+        let App {
+            bars,
+            painter,
+            config,
+            qh,
+            ..
+        } = self;
+        let bar = &mut bars[i];
         log::debug!(
-            "draw: {}x{} scale {}, {} item(s) -> {} groups, {} modules",
-            self.width,
-            self.height,
-            self.scale,
-            self.items.len(),
-            self.frame.groups.len(),
-            self.frame
+            "draw {}: {}x{} scale {}, {} groups, {} modules",
+            bar.name.as_deref().unwrap_or("?"),
+            bar.width,
+            bar.height,
+            bar.scale,
+            bar.frame.groups.len(),
+            bar.frame
                 .groups
                 .iter()
                 .map(|g| g.modules.len())
                 .sum::<usize>()
         );
-        let pw = (self.width * self.scale.max(1) as u32) as i32;
-        let ph = (self.height * self.scale.max(1) as u32) as i32;
+        let scale = bar.scale.max(1);
+        let pw = (bar.width * scale as u32) as i32;
+        let ph = (bar.height * scale as u32) as i32;
         let stride = pw * 4;
-        let (buffer, canvas) = self
+        let (buffer, canvas) = bar
             .pool
             .create_buffer(pw, ph, stride, wl_shm::Format::Argb8888)
             .context("creating an shm buffer")?;
 
         render::render_to_buffer(
-            canvas,
-            pw as u32,
-            ph as u32,
-            &self.config,
-            &self.frame,
-            scale,
-            &mut self.painter,
+            render::Target {
+                canvas,
+                width: pw as u32,
+                height: ph as u32,
+                clip: &mut bar.clip,
+            },
+            config,
+            &bar.frame,
+            scale as f32,
+            painter,
         )?;
 
-        let surface = self.layer.wl_surface();
-        surface.set_buffer_scale(self.scale.max(1));
+        let surface = bar.layer.wl_surface();
+        surface.set_buffer_scale(scale);
         surface.damage_buffer(0, 0, pw, ph);
-        surface.frame(&self.qh, FrameCallbackData(surface.clone()));
-        self.frame_pending = true;
+        surface.frame(qh, FrameCallbackData(surface.clone()));
+        bar.frame_pending = true;
         buffer.attach_to(surface).context("attaching the buffer")?;
-        self.layer.commit();
+        bar.layer.commit();
         Ok(())
+    }
+
+    /// Work out what one bar looks like at its own size and scale.
+    ///
+    /// Separate from drawing it because the warning below wants the whole app while the
+    /// frame is being held, and because a bar's geometry is the only thing that differs:
+    /// everything laid out here came from one round of collecting.
+    fn lay_out(&mut self, i: usize) -> Frame {
+        let App {
+            bars,
+            painter,
+            config,
+            fault,
+            items,
+            native,
+            sway,
+            alt,
+            pages,
+            collapsed,
+            waiting,
+            spin,
+            ..
+        } = self;
+        let bar = &bars[i];
+        painter.text.set_scale(bar.scale.max(1) as f32);
+        let (width, height) = (bar.width as f32, bar.height as f32);
+        if let Some(message) = fault {
+            return layout::fault(message, width, height, &mut painter.text);
+        }
+        let inputs = Inputs {
+            items,
+            native,
+            sway,
+            alt,
+            pages,
+            collapsed,
+            waiting,
+            spin: *spin,
+            output: bar.name.as_deref(),
+        };
+        let frame = layout::compute(
+            config,
+            &inputs,
+            width,
+            height,
+            &mut painter.text,
+            bar.pointer_at,
+        );
+        self.warn_if_nothing_matched(&frame);
+        frame
+    }
+
+    /// Put a bar on a screen, if the config asks for one there.
+    fn add_bar(&mut self, output: wl_output::WlOutput) {
+        if self.bars.iter().any(|b| b.output == output) {
+            return;
+        }
+        let info = self.output_state.info(&output);
+        let name = info.as_ref().and_then(|i| i.name.clone());
+        if !self.config.bar.shows_on(name.as_deref()) {
+            log::debug!(
+                "not showing on output {}: the config names other screens",
+                name.as_deref().unwrap_or("?")
+            );
+            return;
+        }
+        // Only a hint for the first buffer, so an unknown width is not worth asking twice
+        // about: the pool grows to whatever the compositor configures.
+        let width = info
+            .as_ref()
+            .and_then(|i| i.logical_size)
+            .map(|(w, _)| w.max(0) as u32)
+            .unwrap_or(1920);
+        let scale = info.as_ref().map_or(1, |i| i.scale_factor);
+        match Bar::new(self, &self.qh, output, name.clone(), width, scale) {
+            Ok(bar) => {
+                log::info!("bar on output {}", name.as_deref().unwrap_or("?"));
+                self.bars.push(bar);
+                self.no_output_warned = false;
+            }
+            Err(e) => log::error!("no bar on output {}: {e:#}", name.as_deref().unwrap_or("?")),
+        }
+    }
+
+    /// Take the bar off a screen that has gone, or that the config no longer wants.
+    fn drop_bar(&mut self, output: &wl_output::WlOutput) {
+        let Some(i) = self.bars.iter().position(|b| &b.output == output) else {
+            return;
+        };
+        let bar = self.bars.remove(i);
+        log::info!("bar off output {}", bar.name.as_deref().unwrap_or("?"));
+        self.warn_if_nowhere();
+    }
+
+    /// Say once when a config names screens that are not here, which is otherwise a bar
+    /// that simply never appears.
+    ///
+    /// Asked once the compositor has finished listing its outputs, and again whenever one
+    /// goes: outputs are announced one at a time, and judging after the first would call a
+    /// perfectly good config wrong because the screen it names had not arrived yet.
+    pub fn warn_if_nowhere(&mut self) {
+        if !self.bars.is_empty() || self.no_output_warned || self.config.bar.outputs.is_empty() {
+            return;
+        }
+        let here: Vec<String> = self
+            .output_state
+            .outputs()
+            .filter_map(|o| self.output_state.info(&o).and_then(|i| i.name))
+            .collect();
+        log::warn!(
+            "no bar on any screen: [bar] outputs names {:?}, and the screens announced so \
+             far are {:?}",
+            self.config.bar.outputs,
+            here
+        );
+        self.no_output_warned = true;
+    }
+
+    /// Which bar a surface belongs to.
+    fn bar_of(&self, surface: &wl_surface::WlSurface) -> Option<usize> {
+        self.bars
+            .iter()
+            .position(|b| b.layer.wl_surface() == surface)
     }
 
     /// Point out a group list that selects nothing, which would otherwise leave a blank bar
@@ -713,24 +891,28 @@ impl App {
     ///
     /// Motion inside one module changes nothing that is drawn, and the bar is meant to sit
     /// idle, so a redraw per motion event would be wasted work.
-    fn set_pointer(&mut self, at: Option<(f32, f32)>) {
-        let before = self.frame.hover_key(self.pointer_at);
-        let after = self.frame.hover_key(at);
-        self.pointer_at = at;
+    fn set_pointer(&mut self, i: usize, at: Option<(f32, f32)>) {
+        let bar = &mut self.bars[i];
+        let before = bar.frame.hover_key(bar.pointer_at);
+        let after = bar.frame.hover_key(at);
+        bar.pointer_at = at;
         if before != after {
-            self.invalidate();
+            // Only the bar under the pointer has changed; the others are showing the same
+            // thing they were.
+            bar.dirty = true;
+            self.draw_if_needed();
         }
     }
 
-    fn on_click(&mut self, x: f64, y: f64, button: u32) {
+    fn on_click(&mut self, i: usize, x: f64, y: f64, button: u32) {
         let Some(i3_button) = i3bar_button(button) else {
             return;
         };
-        self.dispatch_click(x, y, i3_button);
+        self.dispatch_click(i, x, y, i3_button);
     }
 
-    fn dispatch_click(&mut self, x: f64, y: f64, button: u32) {
-        let Some(module) = self.frame.module_at(x as f32, y as f32) else {
+    fn dispatch_click(&mut self, i: usize, x: f64, y: f64, button: u32) {
+        let Some(module) = self.bars[i].frame.module_at(x as f32, y as f32) else {
             return;
         };
         // Everything the module has to say about this press, taken before anything is
@@ -850,12 +1032,16 @@ impl CompositorHandler for App {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         new_factor: i32,
     ) {
-        if new_factor != self.scale {
-            self.scale = new_factor.max(1);
-            self.invalidate();
+        let Some(i) = self.bar_of(surface) else {
+            return;
+        };
+        if new_factor.max(1) != self.bars[i].scale {
+            self.bars[i].scale = new_factor.max(1);
+            self.bars[i].dirty = true;
+            self.draw_if_needed();
         }
     }
 
@@ -872,10 +1058,12 @@ impl CompositorHandler for App {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
-        self.frame_pending = false;
+        if let Some(i) = self.bar_of(surface) {
+            self.bars[i].frame_pending = false;
+        }
         self.draw_if_needed();
     }
 
@@ -899,29 +1087,41 @@ impl CompositorHandler for App {
 }
 
 impl LayerShellHandler for App {
-    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, _layer: &LayerSurface) {
-        self.exit = true;
+    /// One surface has been taken away, which is a screen going rather than the bar
+    /// stopping: the rest keep drawing, and the connection ending is what ends dbar.
+    fn closed(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, layer: &LayerSurface) {
+        let output = self
+            .bar_of(layer.wl_surface())
+            .map(|i| self.bars[i].output.clone());
+        if let Some(output) = output {
+            self.drop_bar(&output);
+        }
     }
 
     fn configure(
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _layer: &LayerSurface,
+        layer: &LayerSurface,
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
+        let Some(i) = self.bar_of(layer.wl_surface()) else {
+            return;
+        };
+        let bar = &mut self.bars[i];
         let (w, h) = configure.new_size;
         if w != 0 {
-            self.width = w;
+            bar.width = w;
         }
         if h != 0 {
-            self.height = h;
+            bar.height = h;
         }
-        self.configured = true;
+        bar.configured = true;
         // A configure invalidates any pending frame callback expectation.
-        self.frame_pending = false;
-        self.invalidate();
+        bar.frame_pending = false;
+        bar.dirty = true;
+        self.draw_if_needed();
     }
 }
 
@@ -973,25 +1173,25 @@ impl PointerHandler for App {
         events: &[PointerEvent],
     ) {
         for event in events {
-            if &event.surface != self.layer.wl_surface() {
+            let Some(i) = self.bar_of(&event.surface) else {
                 continue;
-            }
+            };
             let (x, y) = event.position;
             match event.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
-                    self.set_pointer(Some((x as f32, y as f32)));
+                    self.set_pointer(i, Some((x as f32, y as f32)));
                 }
-                PointerEventKind::Leave { .. } => self.set_pointer(None),
-                PointerEventKind::Press { button, .. } => self.on_click(x, y, button),
+                PointerEventKind::Leave { .. } => self.set_pointer(i, None),
+                PointerEventKind::Press { button, .. } => self.on_click(i, x, y, button),
                 PointerEventKind::Axis { vertical, .. } => {
-                    let steps = steps_of(&vertical, &mut self.scrolled);
+                    let steps = steps_of(&vertical, &mut self.bars[i].scrolled);
                     // i3bar encodes scroll as buttons 4 (up) and 5 (down).
                     let button = match steps.is_negative() {
                         true => SCROLL_UP,
                         false => SCROLL_DOWN,
                     };
                     for _ in 0..steps.unsigned_abs() {
-                        self.dispatch_click(x, y, button);
+                        self.dispatch_click(i, x, y, button);
                     }
                 }
                 _ => {}
@@ -1005,9 +1205,42 @@ impl OutputHandler for App {
         &mut self.output_state
     }
 
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, output: wl_output::WlOutput) {
+        self.add_bar(output);
+    }
+
+    /// A screen has changed: its name may have only just arrived, and with it the answer
+    /// to whether this config wanted a bar there at all.
+    fn update_output(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        let name = self.output_state.info(&output).and_then(|i| i.name);
+        match self.bars.iter().position(|b| b.output == output) {
+            Some(i) if self.config.bar.shows_on(name.as_deref()) => {
+                if self.bars[i].name != name {
+                    // The workspaces a bar lists follow its name, so a bar that has just
+                    // learned one is showing the wrong screen's until it draws again.
+                    self.bars[i].name = name;
+                    self.bars[i].dirty = true;
+                    self.draw_if_needed();
+                }
+            }
+            Some(_) => self.drop_bar(&output),
+            None => self.add_bar(output),
+        }
+    }
+
+    fn output_destroyed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        output: wl_output::WlOutput,
+    ) {
+        self.drop_bar(&output);
+    }
 }
 
 impl ShmHandler for App {
