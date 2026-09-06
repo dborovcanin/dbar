@@ -118,6 +118,11 @@ a built-in default if there is none. `make install` takes `PREFIX=` if
   wheel moves between tracks, over MPRIS on the session bus
 - `collapsible = true`: a click folds a module down to its icon, and the next one
   unfolds it; `collapse_button` says which, and defaults to the right
+- `refresh_button = "left"`: a click reads the source again — what a reading
+  fetched over the network wants instead of an interval
+- `pages = true` on a command module: every line of a run is a reading of its
+  own, and the wheel scrolls between them — three cities from one fetch, in one
+  module, with one format
 - `signal = N`: read a source again on SIGRTMIN+N
 - `left` / `center` / `right` positions holding groups of modules
 - rounded group and module backgrounds
@@ -224,6 +229,7 @@ centre where the eye finds it without looking.
 | [states.toml](examples/states.toml)         | modules that restyle themselves as values move         |
 | [separators.toml](examples/separators.toml) | all seven separator shapes, side by side               |
 | [showcase.toml](examples/showcase.toml)     | every key dbar understands, as a reference             |
+| [weather.sh](examples/weather.sh)           | a `command` module's program, a page per city          |
 
 ```sh
 dbar -c examples/islands.toml
@@ -698,6 +704,22 @@ signal = 8            # counted from SIGRTMIN
 brightnessctl set +10%; pkill -RTMIN+8 dbar
 ```
 
+`refresh_button` is the same job from the bar itself: a button given to reading
+the source again, for what is worth asking for rather than sampling.
+
+```toml
+[module.weather]
+source = "command"
+command = ["my-weather"]
+interval = "once"     # fetched at startup, and then only when asked
+refresh_button = "left"
+```
+
+Both are refused where they could not mean anything: on a module fed by a
+provider, on a source that arrives when it changes rather than being read, and on
+a streaming command, which speaks when it has something to say and has no run to
+bring forward.
+
 The offsets count from SIGRTMIN rather than being absolute numbers, because
 where the realtime range starts is decided by the C library — the first few are
 reserved for the threading implementation — so an absolute number is not
@@ -730,7 +752,7 @@ format = "$text"
 | ---------- | --------------------------------------------------------------------------- |
 | *omitted*  | **streams**: started once and read a line at a time, for as long as it runs |
 | `"30s"`    | **runs to completion** every 30s, and what it printed is the reading        |
-| `"once"`   | runs at startup and never again                                             |
+| `"once"`   | runs at startup, and after that only when something asks                    |
 
 Streaming is the default because it is the cheapest thing there is: a line
 printed is a redraw, silence costs nothing at all, and no process is started to
@@ -759,6 +781,53 @@ anything on it**, so a script that logs before it reports still works — and
 anything it wants kept out of the reading goes to standard error, which lands
 in dbar's log. A non-zero exit is an error the module shows and, on an
 interval, retries when the interval next comes round.
+
+`params` are the knobs, handed to the command as further arguments in the order
+they were written — `$1`, `$2`, `$3` to a shell script. They are separate from
+`command` because that is what the program *is*, while these are what it is being
+asked about, and what each one means is the script's business: dbar passes them
+on and holds no opinion, which is what keeps one script good for two cities.
+
+```toml
+[module.weather]
+source = "command"
+command = ["/usr/local/bin/weather"]
+params = [
+  "metric",                         # $1  units
+  "/home/you/.config/dbar/owm.key", # $2  a key, or a file holding one
+  "45.2517,19.8369",                # $3+ where, one or more
+  "44.8147,20.4143",
+]
+interval = "once"        # fetched at startup
+pages = true             # a reading per line, scrolled with the wheel
+refresh_button = "left"  # fetch again
+alt_button = "right"     # swap the wording
+```
+
+Two modules running the same program with different params want two of it, and
+get two: what is run is what tells one command from another.
+
+They are arguments and nothing more, so a command that is `["sh", "-c", "..."]`
+gets them the way `sh` hands out arguments after a script: the first lands in
+`$0`, not `$1`. A script in a file of its own reads them as `$1`, `$2`, `$3`.
+
+`pages = true` says every line of a run is a reading of its own, in the order
+they were printed, instead of the last line being the answer. The wheel moves
+between them, and the module's `format` and `format_alt` are about whichever page
+is showing — so one command asked about three places is one module, one fetch and
+one wording, rather than three of each.
+
+```
+icon=☁	weather=Clouds	location=Novi Sad	temp=21
+icon=☀	weather=Clear	location=Beograd	temp=23
+icon=🌧	weather=Rain	location=Sokolac	temp=17
+```
+
+It is opt-in because the alternative would turn a script that logs its progress
+into a module with three pages of it. A script that pages should print a line per
+place even when one of them failed — `state=error` and what it knows — since a
+place that drops out shifts every page after it along. `examples/weather.sh` is a
+working one: OpenWeatherMap, `curl` and `jq`, a page per pair of coordinates.
 
 A line with no `=` in it is the whole of what the command said, and lands in
 `$text`. To publish real values instead, say what they are:
@@ -798,8 +867,8 @@ Commands are killed when the bar is, so a restart does not leave them behind.
 
 ### The i3bar provider
 
-For what dbar cannot read yet — Bluetooth, the weather, a mail count — point
-`[i3bar]` at a provider with its own configuration:
+For what dbar cannot read yet and no script of yours covers — Bluetooth, a mail
+count, a VPN — point `[i3bar]` at a provider with its own configuration:
 
 ```toml
 [i3bar]

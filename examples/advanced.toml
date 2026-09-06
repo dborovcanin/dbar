@@ -4,9 +4,12 @@
 # rather than something to run: it mixes six separator shapes, and it needs an
 # external provider installed before it will start without an error.
 #
-# This is the other thing - one coherent bar, every module read by dbar itself,
-# nothing to install and nothing to configure elsewhere. Everything on it is a
-# real reading from this machine.
+# This is the other thing - one coherent bar, almost all of it read by dbar
+# itself, and everything on it a real reading from this machine.
+#
+# The one exception is the weather, which is a web service rather than something
+# /proc knows: it comes from `weather.sh` next to this file, which needs `curl`,
+# `jq` and a key. Delete that module and its group and nothing else notices.
 #
 # The bar is quiet by default: colour means something is wrong, so on an idle
 # machine there is none. Thresholds are set where a person would actually want
@@ -70,7 +73,7 @@ icon_size = 20
 background = "#282828" # bg0
 surface = "#3c3836"    # bg1
 raised = "#504945"     # bg2, the same island one shade up
-text = "#ebdbb2"       # fg1
+text = "#d5c4a1"       # fg2 - fg1 reads white against these greys
 subtext = "#a89984"    # fg4
 accent = "#83a598"     # bright blue
 warning = "#fabd2f"    # bright yellow
@@ -80,7 +83,7 @@ critical = "#fb4934"   # bright red
 groups = ["desktop", "mode", "window"]
 
 [right]
-groups = ["playing", "system", "network", "power", "time"]
+groups = ["playing", "system", "network", "power", "weather", "time"]
 
 # ---------------------------------------------------------------------------
 # Styles
@@ -274,6 +277,18 @@ direction = "right"
 color = "previous"
 
 [group.power.edges]
+left = "round"
+right = "round"
+
+# The weather sits beside the clock because both are about the world outside the
+# machine rather than the machine.
+[group.weather]
+modules = ["weather"]
+background = "$surface"
+radius = 12
+# opacity = 0.8
+
+[group.weather.edges]
 left = "round"
 right = "round"
 
@@ -534,11 +549,69 @@ style = "warning"
 state = "critical"
 style = "critical"
 
+# The weather, from a script of your own - see `weather.sh` beside this file. dbar
+# has no collector for it and should not grow one, so the module is a `command`
+# and dbar's side of it is a source like any other: it publishes fields, a format
+# decides the wording, and state rules apply.
+#
+# `interval = "once"` fetches it at startup and then leaves it alone. A reading
+# that costs a request to somebody else's server is worth asking for rather than
+# taking on a schedule, and `refresh_button` is what asks: a left click fetches
+# again, a right click swaps the wording, and the wheel moves between the places.
+# Wanting it on a schedule after all is one line - `interval = "30m"` - and the
+# click goes on working.
+[module.weather]
+source = "command"
+command = ["/home/dusan/.config/dbar/weather.sh"]
+# The knobs, in the order the script reads them: $1, $2, then everything left.
+# They live here rather than in the script, so moving city is a line in the config
+# and the script stays the same script.
+params = [
+  "metric", # units
+  # The key itself, or a file holding it - which is the one worth using, since a
+  # config that goes into a git repository should not be carrying a credential.
+  # No shell runs here, so the path is a real path: `~` is not expanded.
+  "/home/dusan/.config/dbar/owm.key",
+  # Where. The places come last because they are the part that grows: add one and
+  # the module grows a page, while the fetch stays one fetch.
+  "45.2517,19.8369", # Novi Sad
+  "44.8147,20.4143", # Novi Beograd
+  "43.9365,18.7986", # Sokolac
+]
+interval = "once"
+# One line per place, and the wheel turns them. Both wordings below are about
+# whichever place is showing, so paging costs no format of its own.
+pages = true
+refresh_button = "left"
+alt_button = "right"
+# What the script publishes, and what kind each is. Declaring them is what lets a
+# typo in the format below be a startup error rather than a blank space, and what
+# makes $temp a number that a threshold could read rather than a piece of text.
+fields = { icon = "text", weather = "text", location = "text", temp = "number", wind = "number", direction = "text", forecast_icon = "text", forecast_avg = "number", forecast_min = "number", forecast_max = "number" }
+# The chain on $weather is what keeps the module on the bar when the fetch failed:
+# a format whose fields are all missing draws nothing, and a module that draws
+# nothing has nothing left to click to try again.
+format = "{$icon }$weather|'unavailable'{ ($location)}{ $temp.n(d:0) °C}{, $wind.n(d:1) m/s $direction}"
+format_alt = "{$forecast_icon }{$location, }next 9 h: $forecast_avg.n(d:0)|'unavailable'{ °C ($forecast_min.n(d:0) to $forecast_max.n(d:0))}"
+style = "panel"
+
+# The script rates its own reading with `state=error` when it could not fetch,
+# and dbar does the same when the script itself could not be run. Either way the
+# module greys rather than shouting: the weather being an hour old is worth
+# noticing and not worth an alarm, and a left click asks again.
+[module.weather.states.stale]
+state = "error"
+foreground = "$subtext"
+
 [module.clock]
 source = "time"
 # On the minute, rather than drifting from whenever dbar started.
 interval = "1m"
 format = "$now.time(f:'%a %d %b  %H:%M')"
+# A bar shows the time; a calendar is a different thing, and it belongs to a program of
+# your own rather than to dbar. The argv is run directly, so there is no shell here and
+# nothing to quote.
+on_click = { left = ["/home/dusan/dotfiles/scripts/sway_calendar.sh"] }
 style = "panel"
 foreground = "$background"
 icon = "clock"

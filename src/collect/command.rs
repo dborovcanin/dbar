@@ -12,9 +12,20 @@
 //!
 //! With one, the command answers: it is run to completion, what it printed becomes the
 //! reading, and it is run again when the interval comes round. `interval = "once"` runs it
-//! at startup and never again, for something that cannot change while the bar is up. This
-//! costs a process each time, which is why it is not the default, but it is what almost
-//! every script anybody already has is shaped like.
+//! at startup and then only when something asks, for something that changes rarely enough
+//! that a schedule is the wrong way to find out. This costs a process each time, which is
+//! why it is not the default, but it is what almost every script anybody already has is
+//! shaped like.
+//!
+//! A command that answers can be asked for another one - by a click, or by a signal -
+//! through a `Trigger`. The thread waits on that rather than sleeping through the rest of
+//! its interval, so an answer that was fetched over the network is a click away instead of
+//! a wait away.
+//!
+//! A command that answers can report on more than one thing at a time. With `pages`, every
+//! line of a run is a reading of its own rather than the last one being the answer, so one
+//! fetch covers the weather in three cities and the module scrolls between them. Nothing
+//! below this file knows the difference: a page is a reading like any other.
 //!
 //! Either way the running happens on this module's own thread and readings arrive on a
 //! channel, so a script that takes a second to answer delays nothing but itself.
@@ -26,6 +37,7 @@
 use std::io::{BufRead as _, BufReader};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -54,49 +66,104 @@ pub enum Run {
     Stream,
     /// Run to completion this often, taking what it printed as the reading.
     Every(Duration),
-    /// Run to completion at startup and never again.
+    /// Run to completion at startup, and after that only when something asks.
     Once,
 }
 
+/// The way to ask a command for another reading before its schedule would have one.
+///
+/// A module asks by being clicked or by being sent its signal. The command's thread is
+/// waiting on this rather than sleeping, so the run starts when the ask arrives rather
+/// than when the interval it was in the middle of runs out.
+pub struct Trigger(mpsc::Sender<()>);
+
+impl Trigger {
+    pub fn ask(&self) {
+        // A thread that has gone is a command that stopped answering, which the bar
+        // already knows from the last reading it sent.
+        let _ = self.0.send(());
+    }
+}
+
 /// Start `argv` and send readings from it, the way `run` says to.
+///
+/// `askable` says whether anything in the config can ask this command for another
+/// reading. Without it a command that answers once is done when it has answered, rather
+/// than keeping a thread parked on a question that can never come.
 ///
 /// The channel closes when the bar is shutting down, which is what stops the thread.
 pub fn spawn(
     argv: Vec<String>,
     run: Run,
     declared: &'static [FieldSpec],
-    sender: calloop::channel::Sender<Reading>,
-) -> Result<()> {
+    sender: calloop::channel::Sender<Vec<Reading>>,
+    askable: bool,
+    pages: bool,
+) -> Result<Option<Trigger>> {
     let (program, rest) = argv
         .split_first()
         .context("a command module names no command")?;
     let name = program.clone();
     let rest = rest.to_vec();
+    // A streaming command is never asked: it says what it has when it has it, and there
+    // is no run to bring forward.
+    let channel = (askable && run != Run::Stream).then(mpsc::channel::<()>);
+    let (trigger, asked) = match channel {
+        Some((ask, asked)) => (Some(Trigger(ask)), Some(asked)),
+        None => (None, None),
+    };
 
     std::thread::Builder::new()
         .name(format!("cmd:{name}"))
         .spawn(move || match run {
             Run::Stream => stream_forever(&name, &rest, declared, &sender),
             Run::Once => {
-                // One answer, and the thread is done: there is nothing left to wait for.
-                // A failure is reported the same as any other and not retried, because
-                // "once" is what the config asked for.
-                let _ = sender.send(answer(&name, &rest, declared));
+                // One answer, and then nothing until something asks. A failure is
+                // reported the same as any other and not retried, because "once" is what
+                // the config asked for.
+                loop {
+                    if sender.send(answer(&name, &rest, declared, pages)).is_err() {
+                        return;
+                    }
+                    // Nothing can ask, so there is nothing left to wait for.
+                    let Some(asked) = asked.as_ref() else {
+                        return;
+                    };
+                    if asked.recv().is_err() {
+                        return;
+                    }
+                    drain(asked);
+                }
             }
             Run::Every(period) => {
                 loop {
-                    if sender.send(answer(&name, &rest, declared)).is_err() {
+                    if sender.send(answer(&name, &rest, declared, pages)).is_err() {
                         return;
                     }
                     // A command that fails is tried again at its own interval rather than
                     // backed off: a scheduled reading that needs the network is expected
                     // to miss one now and then, and the module says so meanwhile.
-                    std::thread::sleep(period);
+                    match asked.as_ref() {
+                        Some(asked) => match asked.recv_timeout(period) {
+                            Ok(()) => drain(asked),
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            // Nothing is left to ask, so the interval is all there is.
+                            Err(mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(period),
+                        },
+                        None => std::thread::sleep(period),
+                    }
                 }
             }
         })
         .with_context(|| format!("spawning the thread for {argv:?}"))?;
-    Ok(())
+    Ok(trigger)
+}
+
+/// Take everything else that was asked for while a run was on its way.
+///
+/// Three impatient clicks want the reading, not three of it.
+fn drain(asked: &mpsc::Receiver<()>) {
+    while asked.try_recv().is_ok() {}
 }
 
 /// Keep a streaming command running, restarting it when it stops.
@@ -104,7 +171,7 @@ fn stream_forever(
     name: &str,
     rest: &[String],
     declared: &'static [FieldSpec],
-    sender: &calloop::channel::Sender<Reading>,
+    sender: &calloop::channel::Sender<Vec<Reading>>,
 ) {
     let mut wait = FIRST_WAIT;
     loop {
@@ -113,7 +180,7 @@ fn stream_forever(
             Ok(()) => log::debug!("{name} ended; starting it again in {wait:?}"),
             Err(e) => {
                 log::warn!("{name}: {e:#}");
-                if sender.send(failed(&e)).is_err() {
+                if sender.send(vec![failed(&e)]).is_err() {
                     return;
                 }
             }
@@ -123,36 +190,60 @@ fn stream_forever(
     }
 }
 
-/// Run the command to completion and turn what it printed into one reading.
+/// Run the command to completion and turn what it printed into readings.
 ///
-/// The last non-empty line is the answer. A script that prints one line means that line;
-/// one that prints several has said several things and the most recent is what a bar
-/// should be showing. Anything a script wants kept out of this goes to standard error,
-/// which is left alone and lands in dbar's log.
-fn answer(name: &str, rest: &[String], declared: &'static [FieldSpec]) -> Reading {
+/// Ordinarily the last non-empty line is the answer. A script that prints one line means
+/// that line; one that prints several has said several things and the most recent is what
+/// a bar should be showing. Anything a script wants kept out of this goes to standard
+/// error, which is left alone and lands in dbar's log.
+///
+/// With `pages`, every non-empty line is a reading instead, in the order they were
+/// printed. That is the shape of a script asked about several things at once, and it is
+/// opt-in because the alternative would make a script that logs its progress into a module
+/// with three pages of it.
+fn answer(
+    name: &str,
+    rest: &[String],
+    declared: &'static [FieldSpec],
+    pages: bool,
+) -> Vec<Reading> {
     match run_to_end(name, rest) {
         Ok(output) => {
-            match last_word(&output) {
-                Some(line) => reading_of(line, declared),
+            let readings: Vec<Reading> = match pages {
+                true => said(&output)
+                    .map(|line| reading_of(line, declared))
+                    .collect(),
+                false => last_word(&output)
+                    .map(|line| reading_of(line, declared))
+                    .into_iter()
+                    .collect(),
+            };
+            match readings.is_empty() {
                 // It ran, it worked, and it had nothing to say. An empty reading is the
                 // honest answer, and a module whose format needs a field it did not get
                 // draws nothing rather than something wrong.
-                None => Reading {
+                true => vec![Reading {
                     fields: Fields::default(),
                     state: State::Idle,
-                },
+                }],
+                false => readings,
             }
         }
         Err(e) => {
             log::warn!("{name}: {e:#}");
-            failed(&e)
+            vec![failed(&e)]
         }
     }
 }
 
+/// The lines a command had something on, which is a reading each when a module pages.
+fn said(output: &str) -> impl DoubleEndedIterator<Item = &str> {
+    output.lines().filter(|line| !line.trim().is_empty())
+}
+
 /// The line of a command's output that is its answer: the last one with anything on it.
 fn last_word(output: &str) -> Option<&str> {
-    output.lines().rev().find(|line| !line.trim().is_empty())
+    said(output).next_back()
 }
 
 /// Run the command until it exits, and hand back what it wrote to standard output.
@@ -176,7 +267,7 @@ fn run_once(
     program: &str,
     args: &[String],
     declared: &'static [FieldSpec],
-    sender: &calloop::channel::Sender<Reading>,
+    sender: &calloop::channel::Sender<Vec<Reading>>,
 ) -> Result<()> {
     let mut child = configured(program, args)
         .spawn()
@@ -191,7 +282,7 @@ fn run_once(
                 return Err(e).context("reading a line");
             }
         };
-        if sender.send(reading_of(&line, declared)).is_err() {
+        if sender.send(vec![reading_of(&line, declared)]).is_err() {
             // The bar has gone; take the command with it.
             reap(&mut child);
             return Ok(());
@@ -353,6 +444,16 @@ mod tests {
             last_word("only line, no newline"),
             Some("only line, no newline")
         );
+    }
+
+    /// What a paging module gets: one reading per line that had anything on it, in the
+    /// order they were printed, so three cities come back in the order they were asked
+    /// about.
+    #[test]
+    fn a_paging_command_says_one_thing_per_line() {
+        let out = "temp=1\n\ntemp=2\ntemp=3\n";
+        let lines: Vec<&str> = said(out).collect();
+        assert_eq!(lines, ["temp=1", "temp=2", "temp=3"]);
     }
 
     #[test]

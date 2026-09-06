@@ -1321,10 +1321,13 @@ mod tests {
             background,
             radius: 0.0,
             action: None,
+            name: None,
             alt: None,
             alt_button: crate::config::Button::Left,
-            collapsible: None,
+            collapsible: false,
             collapse_button: crate::config::Button::Right,
+            refresh: None,
+            paged: None,
             on_click: None,
         }
     }

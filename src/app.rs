@@ -31,13 +31,17 @@ use wayland_client::{
 
 use crate::collect::{Registry, Which, watch};
 use crate::config::{BarLayer, Button, Config, Edge};
-use crate::layout::{self, Frame, Inputs};
+use crate::layout::{self, Frame, Inputs, PlacedModule};
 use crate::render;
 use crate::status::{
     ActionTarget, ClickEvent, Control, I3BarProvider, StatusEvent, StatusItem, i3bar,
 };
 use crate::sway::{self, SwayEvent, SwayState};
 use crate::text::TextRenderer;
+
+/// How the i3bar protocol numbers a wheel notch, which is what click dispatch speaks.
+const SCROLL_UP: u32 = 4;
+const SCROLL_DOWN: u32 = 5;
 
 /// Linux input button codes, as delivered by `wl_pointer`.
 const BTN_LEFT: u32 = 0x110;
@@ -64,12 +68,17 @@ pub struct App {
     native: Registry,
     /// Modules showing their second wording, by name.
     alt: std::collections::HashMap<String, usize>,
+    /// Which page each module is scrolled to, by name, for a source that says several
+    /// things at once - the weather in three cities from one fetch.
+    pages: std::collections::HashMap<String, usize>,
     /// Programs started by a click, kept only until they have been reaped.
     children: Vec<std::process::Child>,
     /// Modules a right click has folded down to their icon, by name.
     collapsed: std::collections::HashSet<String>,
     /// Which sources each realtime signal reads again.
     signals: std::collections::HashMap<i32, Vec<Which>>,
+    /// The way to ask a command module's program for another reading, by source.
+    triggers: std::collections::HashMap<Which, crate::collect::command::Trigger>,
     /// Whether a timer is waiting to read collectors. False once every source left is
     /// watched, since then there is nothing to wait for.
     collect_scheduled: bool,
@@ -175,9 +184,11 @@ impl App {
             painter: render::Painter::new(text),
             native: Registry::new(&config_collectors),
             alt: std::collections::HashMap::new(),
+            pages: std::collections::HashMap::new(),
             children: Vec::new(),
             collapsed: std::collections::HashSet::new(),
             signals: config_signals,
+            triggers: std::collections::HashMap::new(),
             collect_scheduled: true,
             audio: None,
             media: None,
@@ -275,6 +286,11 @@ impl App {
         self.name_count_warned = true;
     }
 
+    /// Remember how to ask a command module's program for another reading.
+    pub fn set_trigger(&mut self, which: Which, trigger: crate::collect::command::Trigger) {
+        self.triggers.insert(which, trigger);
+    }
+
     /// Read again whatever a signal asks for.
     ///
     /// The timer that was already scheduled still fires at its old deadline; it finds
@@ -289,9 +305,37 @@ impl App {
             sources.len()
         );
         for which in sources.clone() {
-            self.native.refresh(&which);
+            self.refresh_source(&which);
         }
         self.collect();
+    }
+
+    /// Ask one source for a fresh reading, however that source is read.
+    ///
+    /// A collector is brought forward on the shared timer. A command is not read at all -
+    /// its program runs on a thread of its own - so it is asked there instead, and the
+    /// reading arrives the way every other one from it does.
+    fn refresh_source(&mut self, which: &Which) {
+        if let Some(trigger) = self.triggers.get(which) {
+            trigger.ask();
+            return;
+        }
+        self.native.refresh(which);
+    }
+
+    /// The source behind a module, by name.
+    ///
+    /// A click carries the module it landed on rather than what that module reads, since
+    /// a source cloned into every module of every frame would be paid for on the path
+    /// that runs forever.
+    fn source_of(&self, module: &str) -> Option<Which> {
+        self.config
+            .modules()
+            .find(|m| m.name == module)
+            .and_then(|m| match &m.source {
+                crate::config::Source::Native(which) => Some(which.clone()),
+                _ => None,
+            })
     }
 
     /// Read every collector that has come due, and say when the next one is.
@@ -424,19 +468,20 @@ impl App {
 
     /// Take what the session bus says is playing.
     pub fn on_media(&mut self, reading: crate::collect::Reading) {
-        self.native.push(&Which::Media, reading);
+        self.native.push(&Which::Media, vec![reading]);
         self.invalidate();
     }
 
     /// Take a reading a source pushed of its own accord, like the volume from PipeWire.
     pub fn on_audio(&mut self, reading: crate::collect::Reading) {
-        self.native.push(&Which::Audio, reading);
+        self.native.push(&Which::Audio, vec![reading]);
         self.invalidate();
     }
 
-    /// Take a reading a command of your own pushed, routed to the module that runs it.
-    pub fn on_command(&mut self, which: &Which, reading: crate::collect::Reading) {
-        self.native.push(which, reading);
+    /// Take what a command of your own published, routed to the module that runs it: one
+    /// reading, or a page each.
+    pub fn on_command(&mut self, which: &Which, readings: Vec<crate::collect::Reading>) {
+        self.native.push(which, readings);
         self.invalidate();
     }
 
@@ -497,6 +542,7 @@ impl App {
                     native: &self.native,
                     sway: &self.sway,
                     alt: &self.alt,
+                    pages: &self.pages,
                     collapsed: &self.collapsed,
                 };
                 let frame = layout::compute(
@@ -602,75 +648,105 @@ impl App {
         let Some(module) = self.frame.module_at(x as f32, y as f32) else {
             return;
         };
+        // Everything the module has to say about this press, taken before anything is
+        // done about it: the module is borrowed out of the frame, and acting needs the
+        // whole bar.
+        let what = gesture(module, button);
         let (mx, my, mw, mh) = (module.x, module.y, module.width, module.height);
-        // A program of the user's own comes first: it is the one thing on a module that
-        // the config asked for outright, so nothing built in may quietly take the button
-        // out from under it. Two claims on one button never reach here - that is a
-        // startup error - so this only ever runs where nothing else wanted the press.
-        if let Some(argv) = module
-            .on_click
-            .as_ref()
-            .and_then(|actions| button_of(button).and_then(|b| actions.for_button(b)))
-        {
-            let argv = argv.to_vec();
-            self.run(&argv);
-            return;
-        }
-        // A module with further wordings claims a button for moving through them, which is
-        // the whole point of having them. The other buttons carry on as usual.
-        if button == module.alt_button.number()
-            && let Some((name, views)) = module.alt.clone()
-        {
-            let showing = self.alt.entry(name).or_insert(0);
-            *showing = (*showing + 1) % views.max(1);
-            self.invalidate();
-            return;
-        }
-        // Folding a module down to its icon, and unfolding it. It is the one gesture that
-        // is about the bar rather than about what the module is showing, so it comes
-        // before anything the module itself would do with a click.
-        if button == module.collapse_button.number()
-            && let Some(name) = module.collapsible.clone()
-        {
-            if !self.collapsed.remove(&name) {
-                self.collapsed.insert(name);
-            }
-            self.invalidate();
-            return;
-        }
-        // Cloned because acting on the target needs the provider, and the module is
-        // borrowed out of the frame we are still holding.
-        let Some(action) = module.action.clone() else {
-            return;
+        let named = module.name.clone();
+        let action = module.action.clone();
+        let argv = match what {
+            Gesture::Run(button) => module
+                .on_click
+                .as_ref()
+                .and_then(|actions| actions.for_button(button))
+                .map(<[String]>::to_vec),
+            _ => None,
         };
 
-        match action {
-            // A module backed by the compositor acts on its own rather than forwarding.
-            ActionTarget::Sway(command) => {
-                if button == 1 {
-                    sway::run_command(&command);
+        match what {
+            // A program of the user's own, which the config asked for outright.
+            Gesture::Run(_) => {
+                if let Some(argv) = argv {
+                    self.run(&argv);
                 }
             }
-            ActionTarget::Control { what, step } => self.control(what, step, button),
-            ActionTarget::I3Bar { name, instance } => {
-                let event = ClickEvent {
-                    name: name.as_deref(),
-                    instance: instance.as_deref(),
-                    button,
-                    x: x as i32,
-                    y: y as i32,
-                    relative_x: (x as f32 - mx) as i32,
-                    relative_y: (y as f32 - my) as i32,
-                    width: mw as i32,
-                    height: mh as i32,
+            // Asking the source for a fresh reading. A weather script fetched over the
+            // network is the case: it is worth a click far more often than it is worth an
+            // interval, and the click is what says the answer is wanted now.
+            Gesture::Refresh => {
+                if let Some(which) = named.as_deref().and_then(|name| self.source_of(name)) {
+                    self.refresh_source(&which);
+                    self.collect();
+                }
+            }
+            // Turning the pages of a source that said several things at once, which is
+            // how one weather module covers three cities.
+            Gesture::Page { count, forward } => {
+                let Some(name) = named else {
+                    return;
                 };
-                log::debug!(
-                    "click button {button} on block {:?} instance {:?}",
-                    event.name,
-                    event.instance
-                );
-                if let Some(provider) = self.provider.as_mut() {
-                    provider.send_click(&event);
+                let showing = self.pages.entry(name).or_insert(0);
+                *showing = match forward {
+                    true => (*showing + 1) % count,
+                    false => (*showing + count - 1) % count,
+                };
+                self.invalidate();
+            }
+            // Moving on to the next wording, and round to the first again.
+            Gesture::Alt(views) => {
+                let Some(name) = named else {
+                    return;
+                };
+                let showing = self.alt.entry(name).or_insert(0);
+                *showing = (*showing + 1) % views;
+                self.invalidate();
+            }
+            // Folding a module down to its icon, and unfolding it.
+            Gesture::Collapse => {
+                let Some(name) = named else {
+                    return;
+                };
+                if !self.collapsed.remove(&name) {
+                    self.collapsed.insert(name);
+                }
+                self.invalidate();
+            }
+            // Nothing on the module wanted the press, so whatever it is showing gets it.
+            Gesture::Forward => {
+                let Some(action) = action else {
+                    return;
+                };
+                match action {
+                    // A module backed by the compositor acts on its own rather than
+                    // forwarding.
+                    ActionTarget::Sway(command) => {
+                        if button == Button::Left.number() {
+                            sway::run_command(&command);
+                        }
+                    }
+                    ActionTarget::Control { what, step } => self.control(what, step, button),
+                    ActionTarget::I3Bar { name, instance } => {
+                        let event = ClickEvent {
+                            name: name.as_deref(),
+                            instance: instance.as_deref(),
+                            button,
+                            x: x as i32,
+                            y: y as i32,
+                            relative_x: (x as f32 - mx) as i32,
+                            relative_y: (y as f32 - my) as i32,
+                            width: mw as i32,
+                            height: mh as i32,
+                        };
+                        log::debug!(
+                            "click button {button} on block {:?} instance {:?}",
+                            event.name,
+                            event.instance
+                        );
+                        if let Some(provider) = self.provider.as_mut() {
+                            provider.send_click(&event);
+                        }
+                    }
                 }
             }
         }
@@ -823,8 +899,8 @@ impl PointerHandler for App {
                     let steps = steps_of(&vertical, &mut self.scrolled);
                     // i3bar encodes scroll as buttons 4 (up) and 5 (down).
                     let button = match steps.is_negative() {
-                        true => 4,
-                        false => 5,
+                        true => SCROLL_UP,
+                        false => SCROLL_DOWN,
                     };
                     for _ in 0..steps.unsigned_abs() {
                         self.dispatch_click(x, y, button);
@@ -870,6 +946,73 @@ fn i3bar_button(code: u32) -> Option<u32> {
         BTN_RIGHT => Some(3),
         _ => None,
     }
+}
+
+/// What a press or a wheel notch on a module means.
+///
+/// Deciding is kept apart from doing: what a gesture means is about the module the pointer
+/// landed on and nothing else, so it can be checked without a compositor, while acting on
+/// it needs the whole bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Gesture {
+    /// Run the program the config gave this button.
+    Run(Button),
+    /// Read the module's source again.
+    Refresh,
+    /// Turn to another of the readings its source published, of `count` in all.
+    Page { count: usize, forward: bool },
+    /// Move on to the next of `views` wordings.
+    Alt(usize),
+    /// Fold the module down to its icon, or unfold it.
+    Collapse,
+    /// Nothing here wanted it; whatever the module is showing gets it.
+    Forward,
+}
+
+/// What this button does on this module.
+///
+/// A program of the user's own comes first: it is the one thing on a module that the
+/// config asked for outright, so nothing built in may quietly take the button out from
+/// under it. Two claims on one button never reach here - that is a startup error - so the
+/// order below only decides between things that cannot collide.
+fn gesture(module: &PlacedModule, button: u32) -> Gesture {
+    if let Some(pressed) = button_of(button)
+        && module
+            .on_click
+            .as_ref()
+            .is_some_and(|actions| actions.for_button(pressed).is_some())
+    {
+        return Gesture::Run(pressed);
+    }
+    // The rest are remembered against the module by name, so a module the frame did not
+    // name has nothing here to do.
+    if module.name.is_none() {
+        return Gesture::Forward;
+    }
+    if let Some(refresh) = module.refresh
+        && button == refresh.number()
+    {
+        return Gesture::Refresh;
+    }
+    // The wheel is not a button, so paging takes nothing away from what the presses do; a
+    // module whose source published one reading has nothing to turn and lets it through.
+    if let Some(count) = module.paged
+        && matches!(button, SCROLL_UP | SCROLL_DOWN)
+    {
+        return Gesture::Page {
+            count: count.max(1),
+            forward: button == SCROLL_DOWN,
+        };
+    }
+    if let Some(views) = module.alt
+        && button == module.alt_button.number()
+    {
+        return Gesture::Alt(views.max(1));
+    }
+    if module.collapsible && button == module.collapse_button.number() {
+        return Gesture::Collapse;
+    }
+    Gesture::Forward
 }
 
 /// Map the i3bar protocol's numbering back onto the buttons a config can name.
@@ -928,6 +1071,119 @@ fn steps_of(axis: &AxisScroll, carried: &mut f64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ClickActions;
+
+    /// A placed module with nothing on it, for saying what one gesture key does without
+    /// describing a whole bar.
+    fn placed() -> PlacedModule {
+        PlacedModule {
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            icon: None,
+            text: String::new(),
+            text_x: 0.0,
+            foreground: crate::color::Color::TRANSPARENT,
+            background: crate::color::Color::TRANSPARENT,
+            radius: 0.0,
+            action: None,
+            name: Some("weather".to_string()),
+            alt: None,
+            alt_button: Button::Left,
+            refresh: None,
+            paged: None,
+            collapsible: false,
+            collapse_button: Button::Right,
+            on_click: None,
+        }
+    }
+
+    /// The wheel turns pages on a module that has them. It used to be answered by
+    /// whatever the module's buttons did, because a notch has no button to compare.
+    #[test]
+    fn a_notch_turns_a_page_and_says_which_way() {
+        let module = PlacedModule {
+            paged: Some(3),
+            refresh: Some(Button::Left),
+            ..placed()
+        };
+        assert_eq!(
+            gesture(&module, SCROLL_DOWN),
+            Gesture::Page {
+                count: 3,
+                forward: true
+            }
+        );
+        assert_eq!(
+            gesture(&module, SCROLL_UP),
+            Gesture::Page {
+                count: 3,
+                forward: false
+            }
+        );
+        assert_eq!(gesture(&module, Button::Left.number()), Gesture::Refresh);
+    }
+
+    /// A module with nothing to page through leaves the notch alone, and it goes on to
+    /// whatever the module is showing - a volume that scrolls, or a provider's block.
+    #[test]
+    fn a_notch_on_a_module_with_one_reading_is_left_alone() {
+        let module = PlacedModule {
+            refresh: Some(Button::Left),
+            ..placed()
+        };
+        assert_eq!(gesture(&module, SCROLL_UP), Gesture::Forward);
+        assert_eq!(gesture(&module, SCROLL_DOWN), Gesture::Forward);
+    }
+
+    /// A program of the user's own is the one thing the config asked for outright, so it
+    /// takes its button before anything built in looks at it.
+    #[test]
+    fn a_program_of_your_own_comes_before_anything_built_in() {
+        let actions = ClickActions {
+            left: Some(vec!["cal".to_string()]),
+            ..ClickActions::default()
+        };
+        let module = PlacedModule {
+            on_click: Some(std::sync::Arc::new(actions)),
+            alt: Some(2),
+            ..placed()
+        };
+        assert_eq!(
+            gesture(&module, Button::Left.number()),
+            Gesture::Run(Button::Left)
+        );
+        // The button it was not given still does what the module says.
+        assert_eq!(gesture(&module, Button::Right.number()), Gesture::Forward);
+    }
+
+    #[test]
+    fn the_wordings_and_the_folding_answer_to_their_own_buttons() {
+        let module = PlacedModule {
+            alt: Some(3),
+            collapsible: true,
+            ..placed()
+        };
+        assert_eq!(gesture(&module, Button::Left.number()), Gesture::Alt(3));
+        assert_eq!(gesture(&module, Button::Right.number()), Gesture::Collapse);
+        assert_eq!(gesture(&module, Button::Middle.number()), Gesture::Forward);
+    }
+
+    /// A module the frame did not name has nothing remembered against it, so every press
+    /// goes to what it is showing.
+    #[test]
+    fn a_module_no_gesture_names_forwards_everything() {
+        let module = PlacedModule {
+            name: None,
+            alt: Some(2),
+            collapsible: true,
+            ..placed()
+        };
+        for button in [1, 2, 3, SCROLL_UP, SCROLL_DOWN] {
+            assert_eq!(gesture(&module, button), Gesture::Forward);
+        }
+    }
 
     fn wheel(value120: i32) -> AxisScroll {
         AxisScroll {

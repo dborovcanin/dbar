@@ -47,6 +47,9 @@ pub struct CommandSpec {
     pub argv: Vec<String>,
     /// Whether the command streams, answers on an interval, or answers once.
     pub run: command::Run,
+    /// Whether every line of a run is a reading of its own, rather than the last one
+    /// being the answer. One command, several places to report on.
+    pub pages: bool,
     /// Declared in the config, because dbar cannot know what somebody else's program
     /// prints. Leaked once while the config is read, which happens exactly once.
     pub fields: &'static [FieldSpec],
@@ -54,7 +57,7 @@ pub struct CommandSpec {
 
 impl PartialEq for CommandSpec {
     fn eq(&self, other: &Self) -> bool {
-        self.argv == other.argv && self.run == other.run
+        self.argv == other.argv && self.run == other.run && self.pages == other.pages
     }
 }
 
@@ -64,6 +67,7 @@ impl std::hash::Hash for CommandSpec {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.argv.hash(state);
         self.run.hash(state);
+        self.pages.hash(state);
     }
 }
 
@@ -252,9 +256,14 @@ struct Entry {
     which: Which,
     interval: Duration,
     collector: Box<dyn Collector>,
-    /// The last thing this said. Kept across a failure, so a momentary error does not
-    /// blank a module that was working a second ago.
-    reading: Reading,
+    /// The last thing this said, and never empty. Kept across a failure, so a momentary
+    /// error does not blank a module that was working a second ago.
+    ///
+    /// A source that reports on one thing holds one reading. A command reporting on
+    /// several - the weather in three cities - holds one per page, and the module scrolls
+    /// between them; everything below here is the same either way, since a page is just a
+    /// reading like any other.
+    readings: Vec<Reading>,
     /// When to read next, or nothing at all while the kernel is reporting changes.
     due: Option<Instant>,
     /// Whether a watcher is reporting this source's changes, so it costs no wake-ups.
@@ -278,7 +287,7 @@ impl Registry {
             .map(|(which, &interval)| Entry {
                 collector: which.open(),
                 interval,
-                reading: Reading::default(),
+                readings: vec![Reading::default()],
                 due: match which.pushed() {
                     true => None,
                     false => Some(now),
@@ -313,12 +322,14 @@ impl Registry {
                     }
                     entry.failures = 0;
                     entry.reported = false;
-                    entry.reading = reading;
+                    entry.readings = vec![reading];
                 }
                 Err(e) => {
                     // The last good reading stays on screen, marked as stale, rather than
                     // the module vanishing because a file was busy for one tick.
-                    entry.reading.state = State::Error;
+                    for reading in &mut entry.readings {
+                        reading.state = State::Error;
+                    }
                     entry.failures = entry.failures.saturating_add(1);
                     if !entry.reported {
                         log::warn!("{} could not be read: {e:#}", entry.which.describe());
@@ -336,16 +347,31 @@ impl Registry {
     ///
     /// The interval starts over from the refresh, so a source that is asked for often is
     /// not then read again a moment later out of habit.
+    ///
+    /// A pushed source has nothing to read: what it knows arrives from a thread. Bringing
+    /// one forward here would ask a collector that exists only to say it cannot answer,
+    /// and mark a working module as broken; a command is asked through its own trigger
+    /// instead.
     pub fn refresh(&mut self, which: &Which) {
+        if which.pushed() {
+            return;
+        }
         if let Some(entry) = self.entries.iter_mut().find(|e| &e.which == which) {
             entry.due = Some(Instant::now());
         }
     }
 
-    /// Take a reading a source sent of its own accord.
-    pub fn push(&mut self, which: &Which, reading: Reading) {
+    /// Take what a source sent of its own accord: one reading, or a page each.
+    ///
+    /// A publication with nothing in it is a source that ran and had nothing to say, which
+    /// is one empty reading rather than no reading at all - a module with no pages would
+    /// have nothing to draw and nothing left to click.
+    pub fn push(&mut self, which: &Which, readings: Vec<Reading>) {
         if let Some(entry) = self.entries.iter_mut().find(|e| &e.which == which) {
-            entry.reading = reading;
+            entry.readings = match readings.is_empty() {
+                true => vec![Reading::default()],
+                false => readings,
+            };
         }
     }
 
@@ -376,6 +402,12 @@ impl Registry {
     /// draws collectors without depending on the machine running the test.
     #[cfg(test)]
     pub fn fixture(which: Which, reading: Reading) -> Registry {
+        Registry::fixture_pages(which, vec![reading])
+    }
+
+    /// The same, for a source that published several readings at once.
+    #[cfg(test)]
+    pub fn fixture_pages(which: Which, readings: Vec<Reading>) -> Registry {
         /// Never due, so it is never asked for anything.
         struct Never;
         impl Collector for Never {
@@ -389,7 +421,7 @@ impl Registry {
                 which,
                 interval: Duration::from_secs(1),
                 collector: Box::new(Never),
-                reading,
+                readings,
                 due: Some(Instant::now() + Duration::from_secs(3600)),
                 watched: false,
                 failures: 0,
@@ -398,11 +430,35 @@ impl Registry {
         }
     }
 
+    /// The page a module is scrolled to, and how many there are to scroll through.
+    ///
+    /// Both come from one pass over the sources, because this is the redraw path: layout
+    /// asks it for every module of every frame.
+    ///
+    /// The index is the module's, not the source's, so it wraps: a fetch that came back
+    /// with fewer places than the last one leaves a module pointing past the end, and it
+    /// should show something rather than nothing.
+    pub fn showing(&self, which: &Which, index: usize) -> Option<(&Reading, usize)> {
+        let entry = self.entries.iter().find(|e| &e.which == which)?;
+        let pages = entry.readings.len();
+        let reading = entry.readings.get(index % pages.max(1))?;
+        Some((reading, pages))
+    }
+
+    /// What a source last said, or its first page when it said several things at once.
+    #[cfg(test)]
     pub fn reading(&self, which: &Which) -> Option<&Reading> {
-        self.entries
-            .iter()
-            .find(|e| &e.which == which)
-            .map(|e| &e.reading)
+        self.page(which, 0)
+    }
+
+    #[cfg(test)]
+    pub fn page(&self, which: &Which, index: usize) -> Option<&Reading> {
+        self.showing(which, index).map(|(reading, _)| reading)
+    }
+
+    #[cfg(test)]
+    pub fn pages(&self, which: &Which) -> usize {
+        self.showing(which, 0).map_or(0, |(_, pages)| pages)
     }
 }
 
@@ -515,13 +571,52 @@ mod tests {
         }
     }
 
+    /// A source that says several things at once holds them all, and the module picks
+    /// one. Everything else about a page is what a reading always was.
+    #[test]
+    fn a_publication_of_several_readings_is_a_page_each() {
+        let mut registry = Registry::new(&HashMap::from([(Which::Audio, Duration::from_secs(1))]));
+        let said = |text: &str| {
+            let mut fields = Fields::default();
+            fields.set("text", crate::status::Value::Text(text.to_string()));
+            Reading {
+                fields,
+                state: State::Idle,
+            }
+        };
+        registry.push(&Which::Audio, vec![said("one"), said("two")]);
+        assert_eq!(registry.pages(&Which::Audio), 2);
+        let text = |index: usize| match registry.page(&Which::Audio, index) {
+            Some(reading) => match reading.fields.get("text") {
+                Some(crate::status::Value::Text(t)) => t.clone(),
+                other => panic!("text is {other:?}"),
+            },
+            None => panic!("no page {index}"),
+        };
+        assert_eq!(text(0), "one");
+        assert_eq!(text(1), "two");
+        // Past the end wraps, so a module left pointing at a page a later fetch no longer
+        // has still draws something.
+        assert_eq!(text(2), "one");
+    }
+
+    /// A run that printed nothing is one empty reading, not no readings: a module with no
+    /// pages at all would have nothing to draw and nothing left to click.
+    #[test]
+    fn a_source_that_said_nothing_still_has_a_page() {
+        let mut registry = Registry::new(&HashMap::from([(Which::Audio, Duration::from_secs(1))]));
+        registry.push(&Which::Audio, Vec::new());
+        assert_eq!(registry.pages(&Which::Audio), 1);
+        assert!(registry.page(&Which::Audio, 0).is_some());
+    }
+
     fn scripted(answers: Vec<Option<&'static str>>) -> Registry {
         Registry {
             entries: vec![Entry {
                 which: Which::Cpu,
                 interval: Duration::from_secs(1),
                 collector: Box::new(Scripted { answers }),
-                reading: Reading::default(),
+                readings: vec![Reading::default()],
                 due: Some(Instant::now()),
                 watched: false,
                 failures: 0,

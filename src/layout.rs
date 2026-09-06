@@ -29,6 +29,9 @@ pub struct Inputs<'a> {
     pub sway: &'a SwayState,
     /// Modules currently showing their second wording, by name.
     pub alt: &'a std::collections::HashMap<String, usize>,
+    /// Which page each module is scrolled to, by name, for a source that published
+    /// several readings at once.
+    pub pages: &'a std::collections::HashMap<String, usize>,
     /// Modules folded down to their icon.
     pub collapsed: &'a std::collections::HashSet<String>,
 }
@@ -67,12 +70,23 @@ pub struct PlacedModule {
     pub radius: f32,
     /// What a click here does, if anything.
     pub action: Option<ActionTarget>,
-    /// The module's name and how many wordings it has, when a click can move through them.
-    pub alt: Option<(String, usize)>,
+    /// The module's name, when a gesture on it has to name it.
+    ///
+    /// Further wordings, folding, paging and refreshing are all remembered against the
+    /// module rather than against the frame, which is built again from nothing on every
+    /// redraw. One name serves all of them, and a module that answers to none carries
+    /// none.
+    pub name: Option<String>,
+    /// How many wordings there are to move through, when there is more than one.
+    pub alt: Option<usize>,
     /// Which button moves through those wordings.
     pub alt_button: Button,
-    /// The module's name, when a click folds it down to its icon.
-    pub collapsible: Option<String>,
+    /// Which button reads the module's source again, when the config gives one that job.
+    pub refresh: Option<Button>,
+    /// How many readings there are to scroll between, when the source published several.
+    pub paged: Option<usize>,
+    /// Whether a click folds this module down to its icon.
+    pub collapsible: bool,
     /// Which button does that folding.
     pub collapse_button: Button,
     /// The programs this module's buttons run, shared with the config rather than copied
@@ -220,8 +234,9 @@ fn wording<'g>(
 struct SizedModule {
     width: f32,
     text_width: f32,
-    /// The module's name, when a right click folds it down to its icon.
-    collapsible: Option<String>,
+    /// The module's name, when a gesture on it has to name it.
+    name: Option<String>,
+    collapsible: bool,
     /// Paint overrides applied while the pointer is over this module.
     hover_style: Option<Style>,
     /// Width of the icon plus its gap, or zero.
@@ -232,9 +247,11 @@ struct SizedModule {
     foreground: Color,
     background: Color,
     action: Option<ActionTarget>,
-    alt: Option<(String, usize)>,
+    alt: Option<usize>,
     alt_button: Button,
     collapse_button: Button,
+    refresh: Option<Button>,
+    paged: Option<usize>,
     on_click: Option<Arc<ClickActions>>,
 }
 
@@ -253,6 +270,8 @@ struct Candidate<'g> {
     foreground: Option<Color>,
     background: Option<Color>,
     action: Option<ActionTarget>,
+    /// How many readings the source published, when the module scrolls between them.
+    pages: usize,
 }
 
 /// Everything a group shows, in the order the group asks for.
@@ -274,6 +293,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
         foreground: item.foreground,
         background: item.background,
         action: item.action.clone(),
+        pages: 1,
     };
 
     if group.wildcard {
@@ -288,7 +308,10 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
             Source::Native(which) => {
                 // A collector that has not read yet has nothing to show, which is the same
                 // as a provider that has not spoken: the module simply is not there.
-                if let Some(reading) = inputs.native.reading(which) {
+                // Which of the readings this module is scrolled to. A source that
+                // published one has one, and the page is always that one.
+                let page = inputs.pages.get(&module.name).copied().unwrap_or(0);
+                if let Some((reading, pages)) = inputs.native.showing(which, page) {
                     out.push(Candidate {
                         module,
                         text: wording(module, inputs.alt).render(&reading.fields),
@@ -299,6 +322,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         values: reading.fields.clone(),
                         foreground: None,
                         background: None,
+                        pages,
                         // A module the config lets be operated carries what its buttons
                         // do; one that does not is drawn exactly as before.
                         action: module
@@ -325,6 +349,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         values: fields,
                         foreground: None,
                         background: None,
+                        pages: 1,
                         action: None,
                     });
                 }
@@ -357,6 +382,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         values: fields,
                         foreground: None,
                         background: None,
+                        pages: 1,
                         action: None,
                     });
                 }
@@ -377,6 +403,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         values: fields,
                         foreground: None,
                         background: None,
+                        pages: 1,
                         action: None,
                     });
                 }
@@ -397,6 +424,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         values: fields.clone(),
                         foreground: None,
                         background: None,
+                        pages: 1,
                         // Switching is what clicking a workspace is for.
                         action: Some(ActionTarget::Sway(format!(
                             "workspace {}",
@@ -435,6 +463,7 @@ fn size_group(
             foreground,
             background,
             action,
+            pages,
         } = candidate;
         // The i3bar protocol uses an empty `full_text` to mean "hide this block". A module
         // folded down is empty on purpose and stays, because its icon is still there.
@@ -548,11 +577,21 @@ fn size_group(
             background: background.unwrap_or(style.background),
             action,
             // How many views this module has in all, so a click knows where it wraps.
-            alt: (!module.format_alt.is_empty())
-                .then(|| (module.name.clone(), module.format_alt.len() + 1)),
+            alt: (!module.format_alt.is_empty()).then(|| module.format_alt.len() + 1),
             alt_button: module.alt_button,
-            collapsible: module.collapsible.then(|| module.name.clone()),
+            collapsible: module.collapsible,
             collapse_button: module.collapse_button,
+            refresh: module.refresh_button,
+            // Only where there is somewhere to scroll to: a command reporting on one
+            // thing leaves the wheel alone.
+            paged: (pages > 1).then_some(pages),
+            // Named only where something on the module answers to a gesture, so an
+            // ordinary module costs no allocation on the path that runs every frame.
+            name: (!module.format_alt.is_empty()
+                || module.collapsible
+                || module.refresh_button.is_some()
+                || pages > 1)
+                .then(|| module.name.clone()),
             on_click: module.on_click.clone(),
         });
     }
@@ -684,10 +723,13 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             background,
             radius: paint.radius,
             action: m.action,
+            name: m.name,
             alt: m.alt,
             alt_button: m.alt_button,
             collapsible: m.collapsible,
             collapse_button: m.collapse_button,
+            refresh: m.refresh,
+            paged: m.paged,
             on_click: m.on_click,
         });
         x += m.width;
@@ -862,9 +904,12 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
                 height,
                 icon: None,
                 action: None,
+                name: None,
                 alt_button: Button::Left,
-                collapsible: None,
+                collapsible: false,
                 collapse_button: Button::Right,
+                refresh: None,
+                paged: None,
                 on_click: None,
                 text: message.to_string(),
                 text_x: x + padding,
@@ -946,12 +991,24 @@ mod tests {
         alt: &std::collections::HashMap<String, usize>,
         collapsed: &std::collections::HashSet<String>,
     ) -> Frame {
+        frame_paged(config, items, native, alt, collapsed, &Default::default())
+    }
+
+    fn frame_paged(
+        config: &str,
+        items: &[StatusItem],
+        native: Registry,
+        alt: &std::collections::HashMap<String, usize>,
+        collapsed: &std::collections::HashSet<String>,
+        pages: &std::collections::HashMap<String, usize>,
+    ) -> Frame {
         let cfg = Config::parse(config).expect("test config parses");
         let inputs = Inputs {
             items,
             native: &native,
             sway: &SwayState::default(),
             alt,
+            pages,
             collapsed,
         };
         compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
@@ -995,6 +1052,7 @@ padding = 0
                 native: &Registry::new(&Default::default()),
                 sway,
                 alt: &Default::default(),
+                pages: &Default::default(),
                 collapsed: &Default::default(),
             };
             let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
@@ -1042,6 +1100,7 @@ padding = 0
                 native: &Registry::new(&Default::default()),
                 sway,
                 alt: &Default::default(),
+                pages: &Default::default(),
                 collapsed: &Default::default(),
             };
             let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
@@ -1094,6 +1153,68 @@ format = "$utilization.n(d:0)"
         );
         let frame = frame_with(config, &[], native);
         assert_eq!(frame.groups[0].modules[0].text, "42%");
+    }
+
+    /// One command reporting on three cities is three readings, and the module shows the
+    /// one it is scrolled to. The wording is the module's either way: a page is a reading
+    /// like any other, and nothing here knows it came from the same fetch as its
+    /// neighbours.
+    #[test]
+    fn a_source_that_said_several_things_shows_the_page_it_is_scrolled_to() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["weather"]
+
+[module.weather]
+source = "command"
+command = ["weather"]
+interval = "once"
+pages = true
+padding = 0
+format = "$text"
+"##;
+        let said = |text: &str| {
+            let mut fields = Fields::default();
+            fields.set("text", Value::Text(text.to_string()));
+            fields.set_primary("text");
+            Reading {
+                fields,
+                state: crate::status::State::Idle,
+            }
+        };
+        let which = Which::Command(crate::collect::CommandSpec {
+            argv: vec!["weather".to_string()],
+            run: crate::collect::command::Run::Once,
+            pages: true,
+            fields: crate::collect::command::PLAIN,
+        });
+        let page = |showing: usize| {
+            let native = Registry::fixture_pages(
+                which.clone(),
+                vec![said("Novi Sad"), said("Beograd"), said("Sokolac")],
+            );
+            let pages = std::collections::HashMap::from([("weather".to_string(), showing)]);
+            frame_paged(
+                config,
+                &[],
+                native,
+                &Default::default(),
+                &Default::default(),
+                &pages,
+            )
+            .groups[0]
+                .modules[0]
+                .text
+                .clone()
+        };
+        assert_eq!(page(0), "Novi Sad");
+        assert_eq!(page(1), "Beograd");
+        // A fetch that came back with fewer places than the last one leaves the module
+        // pointing past the end, and it wraps rather than showing nothing.
+        assert_eq!(page(4), "Beograd");
     }
 
     #[test]
@@ -1301,10 +1422,19 @@ padding = 0
         let frame = frame_of(config, &[item("cpu", "a"), item("mem", "b")]);
         assert_eq!(
             frame.groups[0].modules[0].alt,
-            Some(("cpu".to_string(), 2)),
+            Some(2),
             "one further wording is two views to go round"
         );
+        assert_eq!(
+            frame.groups[0].modules[0].name.as_deref(),
+            Some("cpu"),
+            "a click has to know which module it is turning"
+        );
         assert_eq!(frame.groups[0].modules[1].alt, None);
+        assert_eq!(
+            frame.groups[0].modules[1].name, None,
+            "a module no gesture names carries no name"
+        );
     }
 
     #[test]
@@ -1367,7 +1497,7 @@ format_alt = ["second", "third"]
         let frame = frame_of(config, &[item("cpu", "x")]);
         assert_eq!(
             frame.groups[0].modules[0].alt,
-            Some(("cpu".to_string(), 3)),
+            Some(3),
             "three views, so a click wraps after the third"
         );
     }
@@ -1503,11 +1633,11 @@ collapsible = true
 "##;
         let open = frame_of(config, &[item("cpu", "a long wording")]);
         assert_eq!(open.groups[0].modules[0].text, "a long wording");
-        assert_eq!(
-            open.groups[0].modules[0].collapsible.as_deref(),
-            Some("cpu"),
+        assert!(
+            open.groups[0].modules[0].collapsible,
             "the frame has to say a right click can fold it"
         );
+        assert_eq!(open.groups[0].modules[0].name.as_deref(), Some("cpu"));
 
         let folded = frame_folded(
             config,

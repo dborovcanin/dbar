@@ -442,13 +442,58 @@ command = ["uptime", "-p"]
 interval = "1m"
 format = "$text"
 
-# `interval = "once"` runs it at startup and never again, for something that
-# cannot change while the bar is up.
+# `interval = "once"` runs it at startup and then only when something asks, for
+# something that changes rarely enough that a schedule is the wrong way to find
+# out. Nothing here asks, so this one is read exactly once.
 [module.kernel]
 source = "command"
 command = ["uname", "-r"]
 interval = "once"
 format = "$text"
+
+# `params` are the knobs, handed to the command as further arguments in the order
+# they were written - $1, $2, $3 to a script in a file of its own, and $0, $1, $2
+# to a `["sh", "-c", "..."]`, which is how sh hands out arguments after a script. They are separate from
+# `command` because that is what the program is, while these are what it is being
+# asked about: moving city is a line here rather than an edit to the script.
+# What each one means is the script's business; dbar passes them on and holds no
+# opinion, which is what keeps one script good for two cities.
+#
+# `refresh_button` gives a button the job of reading the source again. A reading
+# that costs a request to somebody else's server is worth asking for rather than
+# taking on a schedule, and a click is what says the answer is wanted now. It is
+# a button like any other: claiming one something else already has is a startup
+# error, and here the right button is turning the page instead.
+#
+# Any source dbar reads takes it, not only a command - the same job `signal` does
+# from a key binding. A streaming command is the one that cannot: it speaks when
+# it has something to say, so there is no run to bring forward.
+#
+# `pages = true` makes every line of a run a reading of its own rather than the
+# last line being the answer, and the wheel moves between them. One command asked
+# about three cities prints three lines, and one module covers all of them: the
+# formats below are about whichever page is showing, so paging needs no wording of
+# its own and no second module. Without the key the last line is the answer, which
+# is what keeps a script that logs its progress from becoming three pages of it.
+[module.weather]
+source = "command"
+command = ["/usr/local/bin/weather"]
+params = [
+  "metric",                          # $1  units
+  "/home/you/.config/dbar/owm.key",  # $2  a key, or a file holding one
+  "45.2517,19.8369",                 # $3+ where, a page each
+  "44.8147,20.4143",
+]
+interval = "once"
+pages = true
+refresh_button = "left"
+alt_button = "right"
+fields = { icon = "text", weather = "text", temp = "number" }
+# The chain's last resort is what keeps the module on the bar when the fetch
+# failed: a format whose fields are all missing draws nothing, and a module that
+# draws nothing has nothing left to click to try again.
+format = "{$icon }$weather|'unavailable'{ $temp.n(d:0) °C}"
+format_alt = "{$icon }{$temp.n(d:1) °C}"
 
 # With no `interval` the command streams instead: it is started once and read a
 # line at a time, so it says something when there is something to say and costs

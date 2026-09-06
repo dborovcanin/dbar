@@ -128,6 +128,9 @@ fn main() -> Result<()> {
     // A signal brings a reading forward: after `brightnessctl set`, the bar should say so
     // now rather than when the interval next comes round.
     let offsets: Vec<i32> = config.signals().keys().copied().collect();
+    // Which sources a click or a signal can ask for another reading, so a command that
+    // nothing can ask keeps no thread waiting to be asked.
+    let askable = config.refreshable();
     let mut app = App::new(&globals, &qh, conn.clone(), config, provider)?;
 
     if listening {
@@ -226,16 +229,28 @@ fn main() -> Result<()> {
             continue;
         };
         let (tx, rx) = calloop::channel::channel();
-        if let Err(e) = crate::collect::command::spawn(spec.argv.clone(), spec.run, spec.fields, tx)
-        {
-            log::error!("{e:#}");
-            continue;
+        let trigger = match crate::collect::command::spawn(
+            spec.argv.clone(),
+            spec.run,
+            spec.fields,
+            tx,
+            askable.contains(which),
+            spec.pages,
+        ) {
+            Ok(trigger) => trigger,
+            Err(e) => {
+                log::error!("{e:#}");
+                continue;
+            }
+        };
+        if let Some(trigger) = trigger {
+            app.set_trigger(which.clone(), trigger);
         }
         let which = which.clone();
         handle
             .insert_source(rx, move |event, _, app: &mut App| {
-                if let calloop::channel::Event::Msg(reading) = event {
-                    app.on_command(&which, reading);
+                if let calloop::channel::Event::Msg(readings) = event {
+                    app.on_command(&which, readings);
                 }
             })
             .map_err(|e| anyhow::anyhow!("inserting a command source: {e}"))?;

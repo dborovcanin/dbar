@@ -885,6 +885,24 @@ mod tests {
         out
     }
 
+    /// The shape a fetched reading is written in: everything optional in a group, and one
+    /// chain with a last resort, so a module whose source could say nothing still draws
+    /// something. A module that draws nothing has nothing left to click, and a click is
+    /// how a command that answers on demand is asked to try again.
+    #[test]
+    fn a_chain_with_a_last_resort_keeps_a_module_on_the_bar() {
+        let format = "{$icon }$weather|'unavailable'{ ($location)}{ $temp.n(d:0) °C}";
+        let got = fields(&[
+            ("icon", Value::Text("☁".into())),
+            ("weather", Value::Text("Clouds".into())),
+            ("location", Value::Text("Novi Sad".into())),
+            ("temp", num(21.4, Unit::None)),
+        ]);
+        assert_eq!(render(format, &got), "☁ Clouds (Novi Sad) 21 °C");
+        // Nothing came back at all, which is what a failed fetch looks like.
+        assert_eq!(render(format, &Fields::default()), "unavailable");
+    }
+
     #[test]
     fn literal_text_passes_through() {
         assert_eq!(render(" hello ", &Fields::default()), " hello ");

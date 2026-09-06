@@ -345,6 +345,15 @@ struct RawModule {
     /// A command module's argv. Executed directly: dbar never inserts a shell.
     #[serde(default)]
     command: Vec<String>,
+    /// Further arguments for that command, in the order it reads them. Separate from
+    /// `command` because these are the knobs: what the program is stays put while where
+    /// it looks, what units it answers in and what key it uses are changed here.
+    #[serde(default)]
+    params: Vec<String>,
+    /// Whether every line the command prints is a reading of its own, which the wheel
+    /// scrolls between. Without it the last line is the answer.
+    #[serde(default)]
+    pages: bool,
     /// What that command publishes, and what kind each is: `number`, `percent` or `text`.
     #[serde(default)]
     fields: BTreeMap<String, String>,
@@ -362,6 +371,9 @@ struct RawModule {
     alt_button: Option<Button>,
     /// Which button folds the module down to its icon. Defaults to the right.
     collapse_button: Option<Button>,
+    /// Which button reads this module's source again. No default: a button is claimed
+    /// only where the config asks for one.
+    refresh_button: Option<Button>,
     /// What to run when this module is clicked, by button.
     on_click: Option<RawClickActions>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
@@ -692,6 +704,8 @@ pub struct Module {
     pub alt_button: Button,
     /// Which button folds the module down to its icon. Meaningless unless `collapsible`.
     pub collapse_button: Button,
+    /// Which button reads this module's source again, when the config gives one that job.
+    pub refresh_button: Option<Button>,
     /// Programs to run when this module is clicked.
     ///
     /// Shared rather than cloned: layout rebuilds every placed module on every redraw, and
@@ -1004,20 +1018,49 @@ fn click_actions(raw: &RawClickActions, module: &str) -> Result<ClickActions> {
     })
 }
 
+/// Whether a source can be read again on demand, and what to say when it cannot.
+///
+/// Everything dbar reads itself can be. Of the sources that arrive rather than being read,
+/// only a command can be asked, and only one that answers: a streaming command says what
+/// it has when it has it, so there is no run to bring forward.
+fn can_refresh(source: &Source) -> std::result::Result<(), &'static str> {
+    match source {
+        Source::Native(Which::Command(spec)) => match spec.run {
+            crate::collect::command::Run::Stream => Err(
+                "a streaming command speaks when it has something to say; give it an \
+                 `interval` for there to be a run to bring forward",
+            ),
+            _ => Ok(()),
+        },
+        Source::Native(which) if which.pushed() => Err(
+            "this source arrives when it changes rather than being read, so there is \
+             nothing to ask it for",
+        ),
+        Source::Native(_) => Ok(()),
+        _ => Err(
+            "its source is not one dbar reads, so there is no reading to bring forward; a \
+             provider and the compositor both speak when they have something to say",
+        ),
+    }
+}
+
+/// What a module has given its buttons to do, each named only where it was asked for.
+///
+/// A module with no further wordings has not claimed its `alt_button`, so writing one and
+/// nothing to use it with is not a collision with anything.
+struct Claims {
+    alt: Option<Button>,
+    collapse: Option<Button>,
+    refresh: Option<Button>,
+    control: Option<Control>,
+}
+
 /// Reject a module where two things want the same button.
 ///
 /// A button does one thing. Silently letting the first claimant win would make the loser
 /// a key that is present, spelled correctly and simply ignored, which is the kind of
 /// mistake a config file should not be able to express.
-fn claim_buttons(
-    module: &str,
-    alt_button: Button,
-    has_alt: bool,
-    collapse_button: Button,
-    collapsible: bool,
-    control: Option<Control>,
-    on_click: Option<&ClickActions>,
-) -> Result<()> {
+fn claim_buttons(module: &str, claims: &Claims, on_click: Option<&ClickActions>) -> Result<()> {
     let mut claimed: Vec<(Button, String)> = Vec::new();
     let mut claim = |button: Button, by: String| -> Result<()> {
         if let Some((_, first)) = claimed.iter().find(|(b, _)| *b == button) {
@@ -1030,16 +1073,19 @@ fn claim_buttons(
         Ok(())
     };
 
-    if has_alt {
-        claim(alt_button, "format_alt".to_string())?;
+    if let Some(button) = claims.alt {
+        claim(button, "format_alt".to_string())?;
     }
-    if collapsible {
-        claim(collapse_button, "collapsible".to_string())?;
+    if let Some(button) = claims.collapse {
+        claim(button, "collapsible".to_string())?;
+    }
+    if let Some(button) = claims.refresh {
+        claim(button, "refresh_button".to_string())?;
     }
     // What `controls` and `scroll` bind, for the sources dbar can operate as well as read.
     // Only the presses are listed: a scroll notch is not a button and collides with
     // nothing here.
-    match control {
+    match claims.control {
         Some(Control::Media) => claim(Button::Left, "controls".to_string())?,
         Some(Control::Volume) => claim(Button::Middle, "scroll".to_string())?,
         Some(Control::Brightness) | None => {}
@@ -1100,6 +1146,24 @@ impl Config {
             let sources = wanted.entry(offset).or_default();
             if !sources.contains(which) {
                 sources.push(which.clone());
+            }
+        }
+        wanted
+    }
+
+    /// The sources something in this config can ask to be read again.
+    ///
+    /// A command whose module has neither a signal nor a button for it is never asked, and
+    /// then a command that answers once is done when it has answered rather than keeping a
+    /// thread parked on a question that cannot come.
+    pub fn refreshable(&self) -> std::collections::HashSet<Which> {
+        let mut wanted = std::collections::HashSet::new();
+        for module in self.modules() {
+            let Source::Native(which) = &module.source else {
+                continue;
+            };
+            if module.signal.is_some() || module.refresh_button.is_some() {
+                wanted.insert(which.clone());
             }
         }
         wanted
@@ -1306,12 +1370,18 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         "sway:language" => Source::SwayLanguage(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
         "sway:mode" => Source::SwayMode,
         "command" => {
-            let argv = raw.map(|m| m.command.clone()).unwrap_or_default();
+            let mut argv = raw.map(|m| m.command.clone()).unwrap_or_default();
             if argv.is_empty() {
                 bail!(
                     "module {module_name:?} reads from a command but names none; \
                      add `command = [\"program\", \"argument\"]`"
                 );
+            }
+            // The knobs are handed over as further arguments, in the order they were
+            // written: what they mean is the program's business, and dbar looking at
+            // them would be dbar deciding what a script is allowed to be about.
+            if let Some(params) = raw.map(|m| &m.params) {
+                argv.extend(params.iter().cloned());
             }
             let declared = raw.map(|m| &m.fields).filter(|f| !f.is_empty());
             let fields = match declared {
@@ -1331,9 +1401,20 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
                 }
             };
             let run = parse_run(raw.and_then(|m| m.interval.as_deref()), module_name)?;
+            let pages = raw.is_some_and(|m| m.pages);
+            // A streaming command says one thing at a time, as it happens; there is no
+            // run whose lines could be pages of one another.
+            if pages && run == crate::collect::command::Run::Stream {
+                bail!(
+                    "module {module_name:?} asks for pages, but a streaming command sends \
+                     a reading per line as it prints them; give it an `interval` for a run \
+                     whose lines are pages of one answer"
+                );
+            }
             Source::Native(Which::Command(crate::collect::CommandSpec {
                 argv,
                 run,
+                pages,
                 fields,
             }))
         }
@@ -1380,6 +1461,12 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
             raw.is_some_and(|m| !m.fields.is_empty()),
             "command",
         ),
+        (
+            "params",
+            raw.is_some_and(|m| !m.params.is_empty()),
+            "command",
+        ),
+        ("pages", raw.is_some_and(|m| m.pages), "command"),
         (
             "layouts",
             raw.is_some_and(|m| !m.layouts.is_empty()),
@@ -1575,11 +1662,8 @@ fn resolve_group(
 
         let signal = raw_module.and_then(|m| m.signal);
         if let Some(offset) = signal {
-            if !matches!(source, Source::Native(_)) {
-                bail!(
-                    "module {module_name:?} sets a signal, but its source is not one dbar \
-                     reads; a provider handles its own signals"
-                );
+            if let Err(why) = can_refresh(&source) {
+                bail!("module {module_name:?} sets a signal, but {why}");
             }
             let highest = signal_range();
             if offset < 0 || offset > highest {
@@ -1615,6 +1699,10 @@ fn resolve_group(
             ),
             (Some(step), false) => match control_of(&source) {
                 Some(what) => Some((what, step)),
+                None if matches!(source, Source::Native(Which::Command(_))) => bail!(
+                    "module {module_name:?} asks to be scrolled, but a command is read \
+                     rather than set; `pages = true` is what puts its readings on the wheel"
+                ),
                 None => bail!(
                     "module {module_name:?} asks to be scrolled, but dbar can only change \
                      what it can also set: a backlight or the volume"
@@ -1660,19 +1748,25 @@ fn resolve_group(
         let collapse_button = raw_module
             .and_then(|m| m.collapse_button)
             .unwrap_or(Button::Right);
+        // No default: a button is claimed only where the config asked for it, so a module
+        // that never mentions refreshing leaves all three for whatever else wants them.
+        let refresh_button = raw_module.and_then(|m| m.refresh_button);
+        if refresh_button.is_some()
+            && let Err(why) = can_refresh(&source)
+        {
+            bail!("module {module_name:?} gives a button to refreshing it, but {why}");
+        }
         let on_click = raw_module
             .and_then(|m| m.on_click.as_ref())
             .map(|raw| click_actions(raw, module_name))
             .transpose()?;
-        claim_buttons(
-            module_name,
-            alt_button,
-            !format_alt.is_empty(),
-            collapse_button,
-            collapsible,
-            control.map(|(what, _)| what),
-            on_click.as_ref(),
-        )?;
+        let claims = Claims {
+            alt: (!format_alt.is_empty()).then_some(alt_button),
+            collapse: collapsible.then_some(collapse_button),
+            refresh: refresh_button,
+            control: control.map(|(what, _)| what),
+        };
+        claim_buttons(module_name, &claims, on_click.as_ref())?;
 
         modules.push(Module {
             name: module_name.clone(),
@@ -1683,6 +1777,7 @@ fn resolve_group(
             collapsible,
             alt_button,
             collapse_button,
+            refresh_button,
             on_click: on_click.map(std::sync::Arc::new),
             format,
             format_alt,
@@ -1759,6 +1854,7 @@ fn resolve_group(
                 collapsible: false,
                 alt_button: Button::Left,
                 collapse_button: Button::Right,
+                refresh_button: None,
                 on_click: None,
                 format: resolve_format(&Source::Provider, None)?,
                 format_alt: Vec::new(),
@@ -1842,7 +1938,7 @@ modules = ["m"]
     }
 
     #[test]
-    fn once_runs_it_at_startup_and_never_again() {
+    fn once_runs_it_at_startup_and_then_only_when_asked() {
         use crate::collect::command::Run;
         assert_eq!(run_of("once"), Run::Once);
         assert_eq!(run_of("ONCE"), Run::Once, "case is not the point");
@@ -1878,6 +1974,7 @@ modules = ["m"]
         let a = crate::collect::CommandSpec {
             argv: vec!["s".to_string()],
             run: Run::Every(Duration::from_secs(1)),
+            pages: false,
             fields: crate::collect::command::PLAIN,
         };
         let b = crate::collect::CommandSpec {
@@ -1887,6 +1984,166 @@ modules = ["m"]
         let same = a.clone();
         assert_ne!(a, b);
         assert_eq!(a, same);
+    }
+
+    /// The argv a command module ends up with, given what it wrote.
+    fn argv_of(body: &str) -> Vec<String> {
+        let cfg = Config::parse(&one_module(body)).expect("a command module");
+        match &cfg.modules().next().unwrap().source {
+            Source::Native(Which::Command(spec)) => spec.argv.clone(),
+            other => panic!("source is {other:?}"),
+        }
+    }
+
+    /// The knobs are arguments, in the order they were written: what they mean is the
+    /// script's business, which is what keeps one script good for two cities.
+    #[test]
+    fn params_are_handed_to_the_command_as_further_arguments() {
+        let argv = argv_of(
+            "source = \"command\"\ncommand = [\"weather\", \"--quiet\"]\n\
+             params = [\"metric\", \"45.25,19.83\"]",
+        );
+        assert_eq!(argv, ["weather", "--quiet", "metric", "45.25,19.83"]);
+    }
+
+    /// Two modules running the same script with different knobs want two of it, since
+    /// what is run is what tells one command from another.
+    #[test]
+    fn changing_a_param_asks_for_a_different_command() {
+        let here = argv_of("source = \"command\"\ncommand = [\"w\"]\nparams = [\"here\"]");
+        let there = argv_of("source = \"command\"\ncommand = [\"w\"]\nparams = [\"there\"]");
+        assert_ne!(here, there);
+    }
+
+    /// One command asked about three places says three things, and the module scrolls
+    /// between them.
+    #[test]
+    fn a_command_can_publish_a_page_per_line() {
+        let cfg = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"weather\"]\ninterval = \"once\"\npages = true",
+        ))
+        .expect("a command with pages");
+        match &cfg.modules().next().unwrap().source {
+            Source::Native(Which::Command(spec)) => assert!(spec.pages),
+            other => panic!("source is {other:?}"),
+        }
+    }
+
+    /// Paging is what a run's lines mean, so two modules that read them differently are
+    /// two commands rather than one they would have to agree about.
+    #[test]
+    fn paging_tells_one_command_from_another() {
+        use crate::collect::command::Run;
+        let plain = crate::collect::CommandSpec {
+            argv: vec!["w".to_string()],
+            run: Run::Once,
+            pages: false,
+            fields: crate::collect::command::PLAIN,
+        };
+        let paged = crate::collect::CommandSpec {
+            pages: true,
+            ..plain.clone()
+        };
+        assert_ne!(plain, paged);
+    }
+
+    #[test]
+    fn a_streaming_command_has_no_lines_to_page_between() {
+        let e = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"tail\"]\npages = true",
+        ))
+        .expect_err("a streaming command sends a reading per line as it goes");
+        let message = format!("{e:#}");
+        assert!(message.contains("interval"), "{message}");
+    }
+
+    #[test]
+    fn pages_belong_to_a_command_and_nothing_else() {
+        let e = Config::parse(&one_module("source = \"cpu\"\npages = true"))
+            .expect_err("a cpu module publishes one reading");
+        let message = format!("{e:#}");
+        assert!(message.contains("pages"), "{message}");
+    }
+
+    /// `scroll` is for what dbar can set as well as read. A command module is scrolled
+    /// too, but through its pages, so the error says which key that is.
+    #[test]
+    fn scrolling_a_command_points_at_pages() {
+        let e = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"w\"]\nscroll = \"5%\"",
+        ))
+        .expect_err("a command is not something dbar can set");
+        let message = format!("{e:#}");
+        assert!(message.contains("pages = true"), "{message}");
+    }
+
+    #[test]
+    fn params_belong_to_a_command_and_nothing_else() {
+        let e = Config::parse(&one_module("source = \"cpu\"\nparams = [\"metric\"]"))
+            .expect_err("a cpu module runs nothing to pass them to");
+        let message = format!("{e:#}");
+        assert!(message.contains("params"), "{message}");
+        assert!(message.contains("command"), "{message}");
+    }
+
+    /// A reading that costs a request to somebody else's server is worth asking for
+    /// rather than taking on a schedule, and this is what asks.
+    #[test]
+    fn a_button_can_ask_a_source_to_be_read_again() {
+        let cfg = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"weather\"]\ninterval = \"once\"\n\
+             refresh_button = \"left\"",
+        ))
+        .expect("a command that answers when asked");
+        let module = cfg.modules().next().expect("the one module");
+        assert_eq!(module.refresh_button, Some(Button::Left));
+        assert_eq!(cfg.refreshable().len(), 1, "something can ask for it");
+    }
+
+    /// A command nothing can ask keeps no way of being asked, so one that answers once is
+    /// done when it has answered rather than parking a thread on a question that cannot
+    /// come.
+    #[test]
+    fn a_command_nobody_can_ask_is_not_askable() {
+        let cfg = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"uname\"]\ninterval = \"once\"",
+        ))
+        .expect("a command module");
+        assert!(cfg.refreshable().is_empty());
+    }
+
+    #[test]
+    fn a_streaming_command_has_no_run_to_bring_forward() {
+        let e = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"tail\"]\nrefresh_button = \"left\"",
+        ))
+        .expect_err("a streaming command speaks for itself");
+        let message = format!("{e:#}");
+        assert!(message.contains("interval"), "{message}");
+    }
+
+    /// The volume arrives when it moves. Asking for it would be asking a collector that
+    /// exists only to say it cannot answer, so the config says so instead.
+    #[test]
+    fn a_source_that_arrives_on_its_own_cannot_be_asked() {
+        for key in ["refresh_button = \"left\"", "signal = 3"] {
+            let e = Config::parse(&one_module(&format!("source = \"audio\"\n{key}")))
+                .expect_err("the volume is not read");
+            let message = format!("{e:#}");
+            assert!(message.contains("arrives when it changes"), "{message}");
+        }
+    }
+
+    #[test]
+    fn refreshing_cannot_take_a_button_something_else_has() {
+        let e = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"weather\"]\ninterval = \"once\"\n\
+             format_alt = \"$text!\"\nrefresh_button = \"left\"",
+        ))
+        .expect_err("the left button was already turning the page");
+        let message = format!("{e:#}");
+        assert!(message.contains("format_alt"), "{message}");
+        assert!(message.contains("refresh_button"), "{message}");
     }
 
     #[test]
