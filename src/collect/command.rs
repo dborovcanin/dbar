@@ -70,6 +70,17 @@ pub enum Run {
     Once,
 }
 
+/// What a command's thread has to say.
+///
+/// A run that is on its way is worth saying out loud, because a command that answers can
+/// take as long as the network does and a bar that shows nothing meanwhile looks stuck.
+/// A streaming command never sends this: it is always waiting, so waiting is not news.
+pub enum Message {
+    /// A run has begun, and the reading for it has not arrived yet.
+    Started,
+    Readings(Vec<Reading>),
+}
+
 /// The way to ask a command for another reading before its schedule would have one.
 ///
 /// A module asks by being clicked or by being sent its signal. The command's thread is
@@ -96,7 +107,7 @@ pub fn spawn(
     argv: Vec<String>,
     run: Run,
     declared: &'static [FieldSpec],
-    sender: calloop::channel::Sender<Vec<Reading>>,
+    sender: calloop::channel::Sender<Message>,
     askable: bool,
     pages: bool,
 ) -> Result<Option<Trigger>> {
@@ -122,7 +133,11 @@ pub fn spawn(
                 // reported the same as any other and not retried, because "once" is what
                 // the config asked for.
                 loop {
-                    if sender.send(answer(&name, &rest, declared, pages)).is_err() {
+                    if sender.send(Message::Started).is_err() {
+                        return;
+                    }
+                    let readings = answer(&name, &rest, declared, pages);
+                    if sender.send(Message::Readings(readings)).is_err() {
                         return;
                     }
                     // Nothing can ask, so there is nothing left to wait for.
@@ -137,7 +152,11 @@ pub fn spawn(
             }
             Run::Every(period) => {
                 loop {
-                    if sender.send(answer(&name, &rest, declared, pages)).is_err() {
+                    if sender.send(Message::Started).is_err() {
+                        return;
+                    }
+                    let readings = answer(&name, &rest, declared, pages);
+                    if sender.send(Message::Readings(readings)).is_err() {
                         return;
                     }
                     // A command that fails is tried again at its own interval rather than
@@ -171,7 +190,7 @@ fn stream_forever(
     name: &str,
     rest: &[String],
     declared: &'static [FieldSpec],
-    sender: &calloop::channel::Sender<Vec<Reading>>,
+    sender: &calloop::channel::Sender<Message>,
 ) {
     let mut wait = FIRST_WAIT;
     loop {
@@ -180,7 +199,7 @@ fn stream_forever(
             Ok(()) => log::debug!("{name} ended; starting it again in {wait:?}"),
             Err(e) => {
                 log::warn!("{name}: {e:#}");
-                if sender.send(vec![failed(&e)]).is_err() {
+                if sender.send(Message::Readings(vec![failed(&e)])).is_err() {
                     return;
                 }
             }
@@ -267,7 +286,7 @@ fn run_once(
     program: &str,
     args: &[String],
     declared: &'static [FieldSpec],
-    sender: &calloop::channel::Sender<Vec<Reading>>,
+    sender: &calloop::channel::Sender<Message>,
 ) -> Result<()> {
     let mut child = configured(program, args)
         .spawn()
@@ -282,7 +301,10 @@ fn run_once(
                 return Err(e).context("reading a line");
             }
         };
-        if sender.send(vec![reading_of(&line, declared)]).is_err() {
+        if sender
+            .send(Message::Readings(vec![reading_of(&line, declared)]))
+            .is_err()
+        {
             // The bar has gone; take the command with it.
             reap(&mut child);
             return Ok(());

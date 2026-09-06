@@ -3,7 +3,7 @@
 //! The result is purely geometric: the renderer draws it and the pointer code hit-tests it,
 //! neither needs to know about config or where the items came from.
 
-use crate::collect::Registry;
+use crate::collect::{Registry, Which};
 use crate::color::Color;
 use crate::config::{
     Config, Direction, EdgeShape, Edges, Ends, Group as GroupCfg, Module as ModuleCfg, Separator,
@@ -34,6 +34,14 @@ pub struct Inputs<'a> {
     pub pages: &'a std::collections::HashMap<String, usize>,
     /// Modules folded down to their icon.
     pub collapsed: &'a std::collections::HashSet<String>,
+    /// Command sources with a run on its way that has been out long enough to say so.
+    ///
+    /// Which run it is does not matter here, only that one is happening: a module waiting
+    /// on its program shows a spinner where its icon goes.
+    pub waiting: &'a std::collections::HashSet<Which>,
+    /// Which step of its turn a spinner is on. One step for the whole bar, so two waiting
+    /// modules turn together rather than beating against each other.
+    pub spin: usize,
 }
 
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
@@ -306,30 +314,46 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
     for module in &group.modules {
         match &module.source {
             Source::Native(which) => {
-                // A collector that has not read yet has nothing to show, which is the same
-                // as a provider that has not spoken: the module simply is not there.
                 // Which of the readings this module is scrolled to. A source that
                 // published one has one, and the page is always that one.
                 let page = inputs.pages.get(&module.name).copied().unwrap_or(0);
-                if let Some((reading, pages)) = inputs.native.showing(which, page) {
-                    out.push(Candidate {
-                        module,
-                        text: wording(module, inputs.alt).render(&reading.fields),
-                        flags: StateFlags {
-                            state: reading.state,
-                            ..StateFlags::default()
-                        },
-                        values: reading.fields.clone(),
-                        foreground: None,
-                        background: None,
-                        pages,
-                        // A module the config lets be operated carries what its buttons
-                        // do; one that does not is drawn exactly as before.
-                        action: module
-                            .control
-                            .map(|(what, step)| ActionTarget::Control { what, step }),
-                    });
-                }
+                // A collector that has not read yet has nothing to show, which is the same
+                // as a provider that has not spoken: the module simply is not there. A
+                // command with its first run still out is the exception, because it has a
+                // reason to be on the bar early: the spinner stands in until the reading
+                // lands, in the place the reading will land in.
+                let Some((reading, pages)) = inputs.native.showing(which, page) else {
+                    if inputs.waiting.contains(which) {
+                        out.push(Candidate {
+                            module,
+                            text: String::new(),
+                            flags: StateFlags::default(),
+                            values: Fields::default(),
+                            foreground: None,
+                            background: None,
+                            action: None,
+                            pages: 1,
+                        });
+                    }
+                    continue;
+                };
+                out.push(Candidate {
+                    module,
+                    text: wording(module, inputs.alt).render(&reading.fields),
+                    flags: StateFlags {
+                        state: reading.state,
+                        ..StateFlags::default()
+                    },
+                    values: reading.fields.clone(),
+                    foreground: None,
+                    background: None,
+                    pages,
+                    // A module the config lets be operated carries what its buttons
+                    // do; one that does not is drawn exactly as before.
+                    action: module
+                        .control
+                        .map(|(what, step)| ActionTarget::Control { what, step }),
+                });
             }
             Source::Provider => {
                 for item in inputs.items {
@@ -465,10 +489,15 @@ fn size_group(
             action,
             pages,
         } = candidate;
+        // Whether this module's program is out, which the spinner is drawn for. The check
+        // is skipped outright while nothing is waiting, which is nearly always.
+        let waiting = !inputs.waiting.is_empty()
+            && matches!(&module.source, Source::Native(which) if inputs.waiting.contains(which));
         // The i3bar protocol uses an empty `full_text` to mean "hide this block". A module
-        // folded down is empty on purpose and stays, because its icon is still there.
+        // folded down is empty on purpose and stays, because its icon is still there, and
+        // so does one whose spinner is the only thing it has to show.
         let folded = module.collapsible && inputs.collapsed.contains(&module.name);
-        if content.is_empty() && !folded {
+        if content.is_empty() && !folded && !waiting {
             continue;
         }
         // The state rules and the graded icons both key on what the source published, not
@@ -503,8 +532,9 @@ fn size_group(
             None => content,
         };
         // Stripping can empty the text entirely, which is fine when an icon is left to
-        // carry the module: a muted volume is the icon and nothing else.
-        if content.is_empty() && style.icon.is_none() {
+        // carry the module: a muted volume is the icon and nothing else, and so is a
+        // command that has not answered yet.
+        if content.is_empty() && style.icon.is_none() && !waiting {
             continue;
         }
 
@@ -527,14 +557,20 @@ fn size_group(
             content.clear();
         }
 
-        let icon = style.icon.map(|icon| {
-            let level = if icon.is_graded() {
-                value.map(icon::level_of).unwrap_or(0)
-            } else {
-                0
-            };
-            (icon, level)
-        });
+        // A command with a run on its way says so where its icon goes, so the reading
+        // that is coming lands in the place the spinner was and nothing else moves. A
+        // module with no icon of its own grows one for as long as it is waiting.
+        let icon = match waiting {
+            true => Some((Icon::Spinner, inputs.spin)),
+            false => style.icon.map(|icon| {
+                let level = if icon.is_graded() {
+                    value.map(icon::level_of).unwrap_or(0)
+                } else {
+                    0
+                };
+                (icon, level)
+            }),
+        };
         // The icon and the space after it, which is what the text starts behind. An icon
         // is as tall as `icon_size` and as wide as its own shape asks for, which is the
         // same thing for everything but the battery.
@@ -557,7 +593,9 @@ fn size_group(
         } else {
             content
         };
-        if content.is_empty() && style.icon.is_none() {
+        // Truncation can take the last of it, which an icon still carries - a spinner
+        // included, since a module waiting on its first answer has nothing else.
+        if content.is_empty() && style.icon.is_none() && !waiting {
             continue;
         }
 
@@ -1006,6 +1044,27 @@ mod tests {
         collapsed: &std::collections::HashSet<String>,
         pages: &std::collections::HashMap<String, usize>,
     ) -> Frame {
+        frame_waiting(
+            config,
+            items,
+            native,
+            alt,
+            collapsed,
+            pages,
+            &Default::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn frame_waiting(
+        config: &str,
+        items: &[StatusItem],
+        native: Registry,
+        alt: &std::collections::HashMap<String, usize>,
+        collapsed: &std::collections::HashSet<String>,
+        pages: &std::collections::HashMap<String, usize>,
+        waiting: &std::collections::HashSet<Which>,
+    ) -> Frame {
         let cfg = Config::parse(config).expect("test config parses");
         let inputs = Inputs {
             items,
@@ -1014,6 +1073,8 @@ mod tests {
             alt,
             pages,
             collapsed,
+            waiting,
+            spin: 3,
         };
         compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
     }
@@ -1058,6 +1119,8 @@ padding = 0
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed: &Default::default(),
+                waiting: &Default::default(),
+                spin: 0,
             };
             let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
             frame.groups.first().map(|g| g.modules[0].text.clone())
@@ -1106,6 +1169,8 @@ padding = 0
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed: &Default::default(),
+                waiting: &Default::default(),
+                spin: 0,
             };
             let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
             frame.groups.first().map(|g| g.modules[0].text.clone())
@@ -1219,6 +1284,102 @@ format = "$text"
         // A fetch that came back with fewer places than the last one leaves the module
         // pointing past the end, and it wraps rather than showing nothing.
         assert_eq!(page(4), "Beograd");
+    }
+
+    #[test]
+    fn a_command_with_a_run_out_shows_a_spinner_where_its_icon_goes() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["weather"]
+
+[module.weather]
+source = "command"
+command = ["weather"]
+interval = "30m"
+icon = "clock"
+"##;
+        let which = Which::Command(crate::collect::CommandSpec {
+            argv: vec!["weather".to_string()],
+            run: crate::collect::command::Run::Every(std::time::Duration::from_secs(1800)),
+            pages: false,
+            fields: crate::collect::command::PLAIN,
+        });
+        let mut fields = Fields::default();
+        fields.set("text", Value::Text("18C".to_string()));
+        fields.set_primary("text");
+        let reading = Reading {
+            fields,
+            state: crate::status::State::Idle,
+        };
+        let drawn = |waiting: bool| {
+            let waiting = match waiting {
+                true => std::collections::HashSet::from([which.clone()]),
+                false => std::collections::HashSet::new(),
+            };
+            let module = frame_waiting(
+                config,
+                &[],
+                Registry::fixture(which.clone(), reading.clone()),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                &waiting,
+            )
+            .groups[0]
+                .modules[0]
+                .clone();
+            (module.text.clone(), module.icon.map(|i| (i.icon, i.level)))
+        };
+        // Nothing is out, so the module is its own icon and its last reading.
+        assert_eq!(drawn(false), (" 18C ".to_string(), Some((Icon::Clock, 0))));
+        // A run is out. The reading stays put - it is still the truth until the next one
+        // lands - and the icon says that another is on its way.
+        assert_eq!(drawn(true), (" 18C ".to_string(), Some((Icon::Spinner, 3))));
+    }
+
+    #[test]
+    fn a_command_waiting_on_its_first_answer_is_drawn_anyway() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["weather"]
+
+[module.weather]
+source = "command"
+command = ["weather"]
+interval = "once"
+"##;
+        let which = Which::Command(crate::collect::CommandSpec {
+            argv: vec!["weather".to_string()],
+            run: crate::collect::command::Run::Once,
+            pages: false,
+            fields: crate::collect::command::PLAIN,
+        });
+        let frame = |waiting: std::collections::HashSet<Which>| {
+            frame_waiting(
+                config,
+                &[],
+                Registry::fixture(which.clone(), Reading::default()),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                &waiting,
+            )
+        };
+        // Nothing said yet and nothing on its way: the module is not there at all, the
+        // same as any other source that has not read.
+        assert!(frame(Default::default()).groups.is_empty());
+        // The first run is out. There is no wording to show and no icon in the config,
+        // and the spinner is enough to carry the module on its own.
+        let module =
+            frame(std::collections::HashSet::from([which.clone()])).groups[0].modules[0].clone();
+        assert_eq!(module.text, "");
+        assert_eq!(module.icon.map(|i| i.icon), Some(Icon::Spinner));
     }
 
     #[test]

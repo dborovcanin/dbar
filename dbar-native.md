@@ -355,6 +355,13 @@ small, and it keeps every source uniform from the event loop's point of view.
   entirely, and goes back on it only if its file disappears. Polling stays for
   genuinely sampled metrics (cpu, throughput), which is an accepted cost against
   spec.md's zero-idle-wakeup goal and should be documented as such.
+- The bar animates in exactly one place: a command module whose program is still
+  running. Its timer is separate from the collector timer, exists only while a run
+  is out, drops itself when the last answer lands, and steps at 60ms. Nothing is
+  drawn for the first 400ms of a run, so the scripts that answer straight away
+  never animate at all and the idle case is untouched. This is the only sanctioned exception to
+  "no animation tick", and it stays the only one: it is bounded by work that is
+  genuinely in flight, which is the test any future exception has to pass.
 
 ### 6.3 Layout
 

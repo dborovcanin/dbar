@@ -89,6 +89,24 @@ fn schedule(handle: &calloop::LoopHandle<'static, App>) -> Result<()> {
     Ok(())
 }
 
+/// Start the timer that turns the spinners, if one is not already going.
+///
+/// Separate from the collector timer on purpose: this one exists only while a command is
+/// out, and drops itself the moment the last answer arrives. Putting the two together
+/// would mean a bar that animates is a bar that reads its collectors at animation rate.
+fn schedule_spin(handle: &calloop::LoopHandle<'static, App>) -> Result<()> {
+    handle
+        .insert_source(
+            calloop::timer::Timer::from_duration(std::time::Duration::from_millis(0)),
+            |_, _, app: &mut App| match app.on_spin() {
+                Some(next) => calloop::timer::TimeoutAction::ToInstant(next),
+                None => calloop::timer::TimeoutAction::Drop,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("inserting the spinner timer: {e}"))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
@@ -247,10 +265,23 @@ fn main() -> Result<()> {
             app.set_trigger(which.clone(), trigger);
         }
         let which = which.clone();
+        let handle_for_spin = handle.clone();
         handle
             .insert_source(rx, move |event, _, app: &mut App| {
-                if let calloop::channel::Event::Msg(readings) = event {
-                    app.on_command(&which, readings);
+                let calloop::channel::Event::Msg(message) = event else {
+                    return;
+                };
+                match message {
+                    crate::collect::command::Message::Started => {
+                        if app.on_command_started(&which)
+                            && let Err(e) = schedule_spin(&handle_for_spin)
+                        {
+                            log::error!("{e}");
+                        }
+                    }
+                    crate::collect::command::Message::Readings(readings) => {
+                        app.on_command(&which, readings)
+                    }
                 }
             })
             .map_err(|e| anyhow::anyhow!("inserting a command source: {e}"))?;

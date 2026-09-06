@@ -48,6 +48,20 @@ const BTN_LEFT: u32 = 0x110;
 const BTN_RIGHT: u32 = 0x111;
 const BTN_MIDDLE: u32 = 0x112;
 
+/// How long a command's program runs before the bar says out loud that it is waiting.
+///
+/// Long enough that the scripts which answer straight away never animate at all, which is
+/// what keeps a spinner from costing anything in the ordinary case, and short enough that
+/// a slow one is admitted to before it reads as a bar that has hung.
+const SPIN_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
+/// How long one step of a spinner's turn lasts, and so the only rate at which this bar
+/// ever animates.
+///
+/// Sixteen a second is where the sweep stops reading as a sequence of positions. It is
+/// also the whole price of the spinner, since every step is a redraw, which is why it is
+/// paid only while a program is actually out and never at idle.
+const SPIN_STEP: std::time::Duration = std::time::Duration::from_millis(60);
+
 pub struct App {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -79,6 +93,17 @@ pub struct App {
     signals: std::collections::HashMap<i32, Vec<Which>>,
     /// The way to ask a command module's program for another reading, by source.
     triggers: std::collections::HashMap<Which, crate::collect::command::Trigger>,
+    /// Command sources with a run on its way, and when that run started.
+    ///
+    /// A command that answers quickly is in here for a few milliseconds and never draws
+    /// anything, which is the point: the spinner is what a slow command gets, and a fast
+    /// one costs nothing to have waited.
+    running: std::collections::HashMap<Which, std::time::Instant>,
+    /// Command sources that have been waiting long enough to be drawing a spinner.
+    waiting: std::collections::HashSet<Which>,
+    /// Which step of its turn the spinner is on, and whether a timer is driving it.
+    spin: usize,
+    spin_scheduled: bool,
     /// Whether a timer is waiting to read collectors. False once every source left is
     /// watched, since then there is nothing to wait for.
     collect_scheduled: bool,
@@ -189,6 +214,10 @@ impl App {
             collapsed: std::collections::HashSet::new(),
             signals: config_signals,
             triggers: std::collections::HashMap::new(),
+            running: std::collections::HashMap::new(),
+            waiting: std::collections::HashSet::new(),
+            spin: 0,
+            spin_scheduled: false,
             collect_scheduled: true,
             audio: None,
             media: None,
@@ -481,8 +510,63 @@ impl App {
     /// Take what a command of your own published, routed to the module that runs it: one
     /// reading, or a page each.
     pub fn on_command(&mut self, which: &Which, readings: Vec<crate::collect::Reading>) {
+        // The answer is here, so whatever was said about waiting for it stops being said.
+        // The timer finds nothing left to do on its next firing and drops itself.
+        self.running.remove(which);
+        self.waiting.remove(which);
         self.native.push(which, readings);
         self.invalidate();
+    }
+
+    /// Note that a command's program is running, and say whether a timer is now wanted.
+    ///
+    /// Nothing is drawn from here. The bar has no idea yet whether this run is one of the
+    /// quick ones, and starting a spinner for a script that answers in ten milliseconds
+    /// would be a flicker bought with a wake-up.
+    pub fn on_command_started(&mut self, which: &Which) -> bool {
+        self.running
+            .insert(which.clone(), std::time::Instant::now());
+        let needed = !self.spin_scheduled;
+        self.spin_scheduled = true;
+        needed
+    }
+
+    /// Advance the spinner if anything has been waiting long enough, and say when it is
+    /// next wanted.
+    ///
+    /// Returning nothing stops the timer, which is what happens the moment the last
+    /// command answers: a bar with nothing outstanding is back to costing nothing.
+    pub fn on_spin(&mut self) -> Option<std::time::Instant> {
+        let now = std::time::Instant::now();
+        let was = self.waiting.len();
+        self.waiting.clear();
+        let mut soonest = None;
+        for (which, started) in &self.running {
+            match now.duration_since(*started) >= SPIN_AFTER {
+                true => {
+                    self.waiting.insert(which.clone());
+                }
+                // Not yet worth saying anything about, but worth waking for when it is.
+                false => {
+                    let due = *started + SPIN_AFTER;
+                    soonest = Some(soonest.map_or(due, |s: std::time::Instant| s.min(due)));
+                }
+            }
+        }
+        if !self.waiting.is_empty() {
+            self.spin = (self.spin + 1) % crate::icon::SPINNER_FRAMES;
+        }
+        // A spinner that has just appeared or just gone changes the bar as much as one
+        // that has turned, so both are a redraw.
+        if !self.waiting.is_empty() || was != self.waiting.len() {
+            self.invalidate();
+        }
+        let next = match self.waiting.is_empty() {
+            false => Some(now + SPIN_STEP),
+            true => soonest,
+        };
+        self.spin_scheduled = next.is_some();
+        next
     }
 
     /// Take the sources a watcher covers off the timer.
@@ -544,6 +628,8 @@ impl App {
                     alt: &self.alt,
                     pages: &self.pages,
                     collapsed: &self.collapsed,
+                    waiting: &self.waiting,
+                    spin: self.spin,
                 };
                 let frame = layout::compute(
                     &self.config,

@@ -136,6 +136,9 @@ pub enum Icon {
     Play,
     Pause,
     Keyboard,
+    /// A module is waiting on something. Graded by the animation frame rather than by a
+    /// reading, which is why it has more steps than the rest and no name in the config.
+    Spinner,
 }
 
 impl Icon {
@@ -161,6 +164,15 @@ impl Icon {
             "keyboard" | "language" => Icon::Keyboard,
             _ => return None,
         })
+    }
+
+    /// How many steps this icon has, which is the animation's length for a spinner and
+    /// the grading's for everything else.
+    pub fn frames(self) -> usize {
+        match self {
+            Icon::Spinner => SPINNER_FRAMES,
+            _ => LEVELS,
+        }
     }
 
     /// How wide this icon is drawn, as a multiple of its height.
@@ -261,7 +273,7 @@ fn finish(pb: Outline, ink: Ink, out: &mut Vec<IconPath>) {
 
 /// Build `icon` at `level`, as paths inside the unit square.
 pub fn art(icon: Icon, level: usize) -> IconArt {
-    let level = level.min(LEVELS - 1);
+    let level = level.min(icon.frames() - 1);
     let mut out = Vec::new();
     match icon {
         Icon::Cpu => cpu(&mut out),
@@ -288,6 +300,7 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
             line(&mut pb, 0.88, 0.36, 0.62, 0.64);
             finish(pb, Ink::Stroke(0.08), &mut out);
         }
+        Icon::Spinner => spinner(&mut out, level),
         Icon::Brightness => brightness(&mut out, level),
         Icon::Temperature => temperature(&mut out, level),
         Icon::Headphones => headphones(&mut out),
@@ -637,4 +650,60 @@ fn brightness(out: &mut Vec<IconPath>, level: usize) {
         );
     }
     finish(rays, Ink::Stroke(0.08), out);
+}
+
+/// How many steps a spinner turns through before it is back where it started.
+///
+/// Twenty-four at the rate the bar animates is a turn and a half a second, and a step of
+/// fifteen degrees, which is small enough that the head reads as sweeping rather than as
+/// jumping between positions. It is not `LEVELS` because it is not a grading: nothing
+/// measures a spinner, it just goes round.
+pub const SPINNER_FRAMES: usize = 24;
+
+/// How far round the circle the comet reaches, from its head back to the end of its tail.
+const SPINNER_SPAN: f32 = std::f32::consts::TAU * 0.38;
+/// How far the comet sits from the middle of its box.
+const SPINNER_RADIUS: f32 = 0.35;
+/// How thick the comet is at its head and at the end of its tail.
+const SPINNER_HEAD: f32 = 0.135;
+const SPINNER_TAIL: f32 = 0.03;
+/// How many pieces the taper is drawn in. Enough that the steps between them are smaller
+/// than the round caps that cover them, and few enough to stay a handful of paths.
+const SPINNER_SEGMENTS: usize = 7;
+
+/// A spinner, as a comet at `frame` of its turn: thick at the head, tapering to nothing
+/// behind it, so the direction it is going is visible in the shape and not only in the
+/// movement.
+///
+/// The taper is several stroked arcs rather than one, because an icon path carries a
+/// single stroke width. The renderer caps every stroke round, so each piece ends in a
+/// half-disc that the next piece's own cap covers, and what a cache of them draws is a
+/// continuous shape rather than seven of them. A fade would have been the other way to
+/// say the same thing, and an icon is painted in one colour.
+fn spinner(out: &mut Vec<IconPath>, frame: usize) {
+    let head = std::f32::consts::TAU * frame as f32 / SPINNER_FRAMES as f32;
+    for piece in 0..SPINNER_SEGMENTS {
+        // How far back along the tail this piece runs, as a share of the whole comet.
+        let (near, far) = (
+            piece as f32 / SPINNER_SEGMENTS as f32,
+            (piece + 1) as f32 / SPINNER_SEGMENTS as f32,
+        );
+        let mut pb = Outline::new();
+        arc(
+            &mut pb,
+            0.5,
+            0.5,
+            SPINNER_RADIUS,
+            head - SPINNER_SPAN * far,
+            head - SPINNER_SPAN * near,
+        );
+        // Thickness is taken in the middle of the piece, so the two ends of the comet are
+        // its true head and tail rather than the widths of the pieces that reach them.
+        let along = (near + far) / 2.0;
+        finish(
+            pb,
+            Ink::Stroke(SPINNER_HEAD + (SPINNER_TAIL - SPINNER_HEAD) * along),
+            out,
+        );
+    }
 }

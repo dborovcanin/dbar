@@ -811,6 +811,13 @@ alt_button = "right"     # swap the wording
 Two modules running the same program with different params want two of it, and
 get two: what is run is what tells one command from another.
 
+A command that answers slowly says so. Once a run has been out for four tenths of
+a second, the module shows a spinner where its icon goes until the reading lands,
+and a module that has never answered appears with the spinner alone rather than
+waiting to exist. Nothing is drawn before that, so a script that answers straight
+away never animates and costs no wake-ups: this is the only thing on the bar that
+moves on its own, and it moves only while your program is actually running.
+
 They are arguments and nothing more, so a command that is `["sh", "-c", "..."]`
 gets them the way `sh` hands out arguments after a script: the first lands in
 `$0`, not `$1`. A script in a file of its own reads them as `$1`, `$2`, `$3`.
