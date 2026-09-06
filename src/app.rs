@@ -407,7 +407,6 @@ impl App {
             (Control::Media, 1) => self.tell_media(crate::collect::media::Command::PlayPause),
             (Control::Media, 4) => self.tell_media(crate::collect::media::Command::Next),
             (Control::Media, 5) => self.tell_media(crate::collect::media::Command::Previous),
-            (Control::Volume, 2) => self.tell_audio(crate::collect::audio::Command::ToggleMute),
             (Control::Volume, 4 | 5) => {
                 self.tell_audio(crate::collect::audio::Command::Volume(delta))
             }
@@ -788,6 +787,9 @@ impl App {
                 *showing = (*showing + 1) % views;
                 self.invalidate();
             }
+            // Muting, which the sound server reports back the way it reports a volume
+            // changed from anywhere else, so what is drawn is what actually happened.
+            Gesture::Mute => self.tell_audio(crate::collect::audio::Command::ToggleMute),
             // Folding a module down to its icon, and unfolding it.
             Gesture::Collapse => {
                 let Some(name) = named else {
@@ -1051,6 +1053,8 @@ enum Gesture {
     Alt(usize),
     /// Fold the module down to its icon, or unfold it.
     Collapse,
+    /// Mute what the module is showing, or unmute it.
+    Mute,
     /// Nothing here wanted it; whatever the module is showing gets it.
     Forward,
 }
@@ -1069,6 +1073,14 @@ fn gesture(module: &PlacedModule, button: u32) -> Gesture {
             .is_some_and(|actions| actions.for_button(pressed).is_some())
     {
         return Gesture::Run(pressed);
+    }
+    // Muting comes before the name test: it acts on the sound server rather than on
+    // anything the bar remembers against a module, so a volume module that is otherwise
+    // anonymous still answers to it.
+    if let Some(mute) = module.mute
+        && button == mute.number()
+    {
+        return Gesture::Mute;
     }
     // The rest are remembered against the module by name, so a module the frame did not
     // name has nothing here to do.
@@ -1178,6 +1190,7 @@ mod tests {
             alt: None,
             alt_button: Button::Left,
             refresh: None,
+            mute: None,
             paged: None,
             collapsible: false,
             collapse_button: Button::Right,

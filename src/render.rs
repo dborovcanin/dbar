@@ -1327,6 +1327,7 @@ mod tests {
             collapsible: false,
             collapse_button: crate::config::Button::Right,
             refresh: None,
+            mute: None,
             paged: None,
             on_click: None,
         }

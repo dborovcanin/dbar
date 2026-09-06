@@ -615,8 +615,10 @@ style = "warning"
 [module.brightness]
 source = "backlight"
 # `scroll` is what one notch of the wheel is worth, and only the sources dbar can
-# set as well as read take it: a backlight and the volume. On audio, the middle
-# button mutes.
+# set as well as read take it: a backlight and the volume. On audio a click mutes
+# as well, and `mute_button` says which one: "left", "middle" (the default) or
+# "right". It is claimed like any other button, so moving the mute is how the one
+# it was on becomes free for a wording or a program of your own.
 scroll = "5%"
 signal = 8
 format = " $brightness.n(w:4) "

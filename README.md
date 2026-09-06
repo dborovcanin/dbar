@@ -113,7 +113,8 @@ a built-in default if there is none. `make install` takes `PREFIX=` if
   directly with no shell. A calendar over the clock, a mixer over the volume —
   the things a bar should reach rather than grow
 - `scroll = "5%"`: scrolling over a backlight or volume module changes it, and a
-  middle click mutes; dbar sets both itself rather than running a helper
+  click mutes; `mute_button` says which and defaults to the middle. dbar sets
+  both itself rather than running a helper
 - `controls = true` on a media module: a left click plays and pauses, and the
   wheel moves between tracks, over MPRIS on the session bus
 - `collapsible = true`: a click folds a module down to its icon, and the next one

@@ -91,6 +91,8 @@ pub struct PlacedModule {
     pub alt_button: Button,
     /// Which button reads the module's source again, when the config gives one that job.
     pub refresh: Option<Button>,
+    /// Which button mutes, for a module showing the volume. None on everything else.
+    pub mute: Option<Button>,
     /// How many readings there are to scroll between, when the source published several.
     pub paged: Option<usize>,
     /// Whether a click folds this module down to its icon.
@@ -259,6 +261,7 @@ struct SizedModule {
     alt_button: Button,
     collapse_button: Button,
     refresh: Option<Button>,
+    mute: Option<Button>,
     paged: Option<usize>,
     on_click: Option<Arc<ClickActions>>,
 }
@@ -624,6 +627,7 @@ fn size_group(
             collapsible: module.collapsible,
             collapse_button: module.collapse_button,
             refresh: module.refresh_button,
+            mute: module.mute_button,
             // Only where there is somewhere to scroll to: a command reporting on one
             // thing leaves the wheel alone.
             paged: (pages > 1).then_some(pages),
@@ -771,6 +775,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             collapsible: m.collapsible,
             collapse_button: m.collapse_button,
             refresh: m.refresh,
+            mute: m.mute,
             paged: m.paged,
             on_click: m.on_click,
         });
@@ -951,6 +956,7 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
                 collapsible: false,
                 collapse_button: Button::Right,
                 refresh: None,
+                mute: None,
                 paged: None,
                 on_click: None,
                 text: message.to_string(),

@@ -374,6 +374,9 @@ struct RawModule {
     /// Which button reads this module's source again. No default: a button is claimed
     /// only where the config asks for one.
     refresh_button: Option<Button>,
+    /// Which button mutes and unmutes. Defaults to the middle, and means nothing on a
+    /// module that is not showing the volume.
+    mute_button: Option<Button>,
     /// What to run when this module is clicked, by button.
     on_click: Option<RawClickActions>,
     /// Conditional restyling, keyed on the block's value or its urgent flag.
@@ -706,6 +709,9 @@ pub struct Module {
     pub collapse_button: Button,
     /// Which button reads this module's source again, when the config gives one that job.
     pub refresh_button: Option<Button>,
+    /// Which button mutes and unmutes, for a module that operates the volume. None where
+    /// there is nothing to mute, so nothing is claimed and the press falls through.
+    pub mute_button: Option<Button>,
     /// Programs to run when this module is clicked.
     ///
     /// Shared rather than cloned: layout rebuilds every placed module on every redraw, and
@@ -1053,6 +1059,9 @@ struct Claims {
     collapse: Option<Button>,
     refresh: Option<Button>,
     control: Option<Control>,
+    /// Which button mutes, for the control that has one. Meaningless for the others, and
+    /// read only where `control` says it is the volume.
+    mute: Button,
 }
 
 /// Reject a module where two things want the same button.
@@ -1087,7 +1096,7 @@ fn claim_buttons(module: &str, claims: &Claims, on_click: Option<&ClickActions>)
     // nothing here.
     match claims.control {
         Some(Control::Media) => claim(Button::Left, "controls".to_string())?,
-        Some(Control::Volume) => claim(Button::Middle, "scroll".to_string())?,
+        Some(Control::Volume) => claim(claims.mute, "mute_button".to_string())?,
         Some(Control::Brightness) | None => {}
     }
     if let Some(actions) = on_click {
@@ -1748,6 +1757,19 @@ fn resolve_group(
         let collapse_button = raw_module
             .and_then(|m| m.collapse_button)
             .unwrap_or(Button::Right);
+        // Muting is the volume's alone. A key naming a button on a module with nothing to
+        // mute is a button that would be present, spelled correctly and ignored.
+        if raw_module.and_then(|m| m.mute_button).is_some()
+            && !matches!(control, Some((Control::Volume, _)))
+        {
+            bail!(
+                "module {module_name:?} sets `mute_button`, but nothing about it can be \
+                 muted; a module operates the volume once it names a `scroll` step"
+            );
+        }
+        let mute_button = raw_module
+            .and_then(|m| m.mute_button)
+            .unwrap_or(Button::Middle);
         // No default: a button is claimed only where the config asked for it, so a module
         // that never mentions refreshing leaves all three for whatever else wants them.
         let refresh_button = raw_module.and_then(|m| m.refresh_button);
@@ -1765,6 +1787,7 @@ fn resolve_group(
             collapse: collapsible.then_some(collapse_button),
             refresh: refresh_button,
             control: control.map(|(what, _)| what),
+            mute: mute_button,
         };
         claim_buttons(module_name, &claims, on_click.as_ref())?;
 
@@ -1778,6 +1801,9 @@ fn resolve_group(
             alt_button,
             collapse_button,
             refresh_button,
+            // Carried only where there is something to mute, so a press on anything else
+            // falls through to whatever the module was already forwarding it to.
+            mute_button: matches!(control, Some((Control::Volume, _))).then_some(mute_button),
             on_click: on_click.map(std::sync::Arc::new),
             format,
             format_alt,
@@ -1855,6 +1881,7 @@ fn resolve_group(
                 alt_button: Button::Left,
                 collapse_button: Button::Right,
                 refresh_button: None,
+                mute_button: None,
                 on_click: None,
                 format: resolve_format(&Source::Provider, None)?,
                 format_alt: Vec::new(),
@@ -2223,6 +2250,54 @@ modules = ["m"]
         let module = moved.modules().next().unwrap();
         assert_eq!(module.collapse_button, Button::Middle);
         assert!(module.on_click.is_some());
+    }
+
+    #[test]
+    fn muting_answers_to_the_middle_button_unless_told_otherwise() {
+        let cfg = Config::parse(&one_module("source = \"audio\"\nscroll = \"5%\""))
+            .expect("a volume module");
+        assert_eq!(
+            cfg.modules().next().unwrap().mute_button,
+            Some(Button::Middle)
+        );
+
+        // Moved onto the left, with the wordings moved off it so nothing is claimed twice.
+        let moved = Config::parse(&one_module(
+            "source = \"audio\"\nscroll = \"5%\"\nmute_button = \"left\"\nformat_alt = [\" $volume \"]\nalt_button = \"right\"",
+        ))
+        .expect("nothing is claimed twice");
+        assert_eq!(
+            moved.modules().next().unwrap().mute_button,
+            Some(Button::Left)
+        );
+
+        // A module with nothing to mute carries no button for it, so the press falls
+        // through to whatever the module was forwarding to.
+        let cpu = Config::parse(&one_module("source = \"cpu\"")).expect("a cpu module");
+        assert_eq!(cpu.modules().next().unwrap().mute_button, None);
+    }
+
+    #[test]
+    fn muting_is_refused_where_there_is_nothing_to_mute() {
+        let e = Config::parse(&one_module("source = \"cpu\"\nmute_button = \"left\""))
+            .expect_err("a cpu module cannot be muted");
+        assert!(format!("{e:#}").contains("mute_button"), "{e:#}");
+    }
+
+    #[test]
+    fn the_button_that_mutes_is_claimed_like_any_other() {
+        // The volume's own button is taken, so a program cannot be given the same one.
+        let e = Config::parse(&one_module(
+            "source = \"audio\"\nscroll = \"5%\"\non_click = { middle = [\"true\"] }",
+        ))
+        .expect_err("muting is already on the middle");
+        assert!(format!("{e:#}").contains("mute_button"), "{e:#}");
+
+        // Moving the mute frees the button it left behind.
+        Config::parse(&one_module(
+            "source = \"audio\"\nscroll = \"5%\"\nmute_button = \"right\"\non_click = { middle = [\"true\"] }",
+        ))
+        .expect("the middle is free once muting has moved off it");
     }
 
     #[test]
