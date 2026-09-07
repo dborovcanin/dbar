@@ -1364,6 +1364,85 @@ mod tests {
         }
     }
 
+    impl crate::layout::Measure for Blocks {
+        fn measure(&mut self, text: &str) -> f32 {
+            text.chars().count() as f32 * BLOCK
+        }
+    }
+
+    /// A bar of the shape the rules care about: an island per position, a Powerline run of
+    /// eight modules with filled separators, and one faded group, which is the frame that
+    /// goes down the slowest path the renderer has.
+    const BUSY: &str = r##"
+[bar]
+height = 34
+font = "sans-serif 11"
+
+[colors]
+ink = "#cdd6f4"
+one = "#313244"
+two = "#45475a"
+
+[style.default]
+foreground = "$ink"
+background = "$one"
+padding = 8
+
+[left]
+groups = ["l"]
+
+[center]
+groups = ["c"]
+
+[right]
+groups = ["r"]
+
+[group.l]
+modules = ["a", "b", "c"]
+
+[group.c]
+modules = ["d"]
+opacity = 0.85
+
+[group.r]
+modules = ["e", "f", "g", "h", "i", "j", "k", "m"]
+
+[group.r.separator]
+shape = "slant"
+width = 12
+direction = "right"
+color = "previous"
+
+[group.r.ends]
+left = "slant"
+right = "slant"
+
+[module.a]
+format = "$text"
+[module.b]
+format = "$text"
+[module.c]
+format = "$text"
+[module.d]
+format = "$text"
+[module.e]
+format = "$text"
+[module.f]
+format = "$text"
+[module.g]
+format = "$text"
+[module.h]
+format = "$text"
+[module.i]
+format = "$text"
+[module.j]
+format = "$text"
+[module.k]
+format = "$text"
+[module.m]
+format = "$text"
+"##;
+
     /// The two layouts are the same picture, told to the compositor two ways: ABGR8888 is
     /// what the rasteriser already writes, ARGB8888 is that with red and blue changed
     /// over. Getting this the wrong way round is a bar drawn in the wrong colours, which
@@ -1408,6 +1487,115 @@ mod tests {
                 [b[0], b[1], b[2], b[3]],
                 "the swap has to move red and blue and leave green and alpha alone"
             );
+        }
+    }
+
+    /// What a whole frame costs to paint, which is the number that decides whether
+    /// partial repainting is worth its buffer-age machinery.
+    ///
+    /// Ignored: it measures the machine it runs on, and a test that fails on a slow one
+    /// would be a test about hardware. Run it deliberately:
+    ///
+    /// ```text
+    /// cargo test --release -- --ignored --nocapture paint_costs
+    /// ```
+    #[test]
+    #[ignore]
+    fn paint_costs_this_much_per_frame() {
+        use crate::status::{Fields, State, StatusItem, Value};
+        use std::time::Instant;
+
+        let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "m"];
+        let items: Vec<StatusItem> = names
+            .iter()
+            .map(|name| {
+                let mut fields = Fields::default();
+                fields.set("text", Value::Text(format!("{name} 100%")));
+                StatusItem {
+                    id: Some((*name).to_string()),
+                    fields,
+                    state: State::Idle,
+                    urgent: false,
+                    foreground: None,
+                    background: None,
+                    action: None,
+                }
+            })
+            .collect();
+
+        let cfg = Config::parse(BUSY).expect("the bench config parses");
+        println!("width scale  pixels        as written    swapped");
+        for width in [1920.0f32, 3840.0] {
+            for scale in [1.0f32, 2.0] {
+                let mut painter = Painter::new(Blocks { scale, run: None });
+                let frame = {
+                    let native = crate::collect::Registry::new(&Default::default());
+                    let inputs = crate::layout::Inputs {
+                        items: &items,
+                        native: &native,
+                        sway: &Default::default(),
+                        alt: &Default::default(),
+                        pages: &Default::default(),
+                        collapsed: &Default::default(),
+                        waiting: &Default::default(),
+                        spin: 0,
+                        tray: &Default::default(),
+                        output: None,
+                    };
+                    crate::layout::compute(
+                        &cfg,
+                        &inputs,
+                        width,
+                        cfg.bar.height as f32,
+                        &mut painter.text,
+                        None,
+                    )
+                };
+
+                let (pw, ph) = (
+                    (width * scale) as u32,
+                    (cfg.bar.height as f32 * scale) as u32,
+                );
+                let mut canvas = vec![0u8; pw as usize * ph as usize * 4];
+                let mut clip = Clip::default();
+
+                let time = |canvas: &mut Vec<u8>,
+                            clip: &mut Clip,
+                            painter: &mut Painter<Blocks>,
+                            pixels: Pixels| {
+                    // One frame first, so a cache filling up is not counted as painting.
+                    let mut once = |canvas: &mut Vec<u8>, clip: &mut Clip| {
+                        render_to_buffer(
+                            Target {
+                                canvas,
+                                width: pw,
+                                height: ph,
+                                clip,
+                                pixels,
+                            },
+                            &cfg,
+                            &frame,
+                            scale,
+                            painter,
+                        )
+                        .expect("painting a frame");
+                    };
+                    once(canvas, clip);
+                    let runs = 50;
+                    let start = Instant::now();
+                    for _ in 0..runs {
+                        once(canvas, clip);
+                    }
+                    start.elapsed().as_secs_f64() * 1e6 / runs as f64
+                };
+
+                let written = time(&mut canvas, &mut clip, &mut painter, Pixels::AsWritten);
+                let swapped = time(&mut canvas, &mut clip, &mut painter, Pixels::Swapped);
+                println!(
+                    "{width:>5.0} {scale:>5.0} {:>9}  {written:>9.0} us {swapped:>9.0} us",
+                    pw * ph
+                );
+            }
         }
     }
 
