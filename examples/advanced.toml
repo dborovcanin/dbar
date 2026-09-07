@@ -603,8 +603,9 @@ style = "critical"
 #
 # `interval = "once"` fetches it at startup and then leaves it alone. A reading
 # that costs a request to somebody else's server is worth asking for rather than
-# taking on a schedule, and `refresh_button` is what asks: a left click fetches
-# again, a right click swaps the wording, and the wheel moves between the places.
+# taking on a schedule, and `refresh_button` is what asks: a middle click fetches
+# again, a right click moves through the three wordings - the full reading, the
+# forecast, and a short one - and the wheel moves between the places.
 # Wanting it on a schedule after all is one line - `interval = "30m"` - and the
 # click goes on working.
 [module.weather]
@@ -629,7 +630,7 @@ interval = "once"
 # One line per place, and the wheel turns them. Both wordings below are about
 # whichever place is showing, so paging costs no format of its own.
 pages = true
-refresh_button = "left"
+refresh_button = "middle"
 alt_button = "right"
 # What the script publishes, and what kind each is. Declaring them is what lets a
 # typo in the format below be a startup error rather than a blank space, and what
@@ -639,7 +640,15 @@ fields = { icon = "text", weather = "text", location = "text", temp = "number", 
 # a format whose fields are all missing draws nothing, and a module that draws
 # nothing has nothing left to click to try again.
 format = "{$icon }$weather|'unavailable'{ ($location)}{ $temp.n(d:0) °C}{, $wind.n(d:1) m/s $direction}"
-format_alt = "{$forecast_icon }{$location, }next 9 h: $forecast_avg.n(d:0)|'unavailable'{ °C ($forecast_min.n(d:0) to $forecast_max.n(d:0))}"
+format_alt = [
+  "{$forecast_icon }{$location, }next 9 h: $forecast_avg.n(d:0)|'unavailable'{ °C ($forecast_min.n(d:0) to $forecast_max.n(d:0))}",
+  # The short one, for when the full reading is more bar than it is worth: the
+  # script's own glyph and the temperature, and nothing that grows with the place
+  # name or the wind. `collapsible` cannot do this job - folding shows the style's
+  # icon, which is a vector from dbar's own set, and the glyph here is text the
+  # script published, so the two would sit side by side.
+  "{$icon }$temp.n(d:0)|'unavailable'",
+]
 style = "panel"
 
 # The script rates its own reading with `state=error` when it could not fetch,
