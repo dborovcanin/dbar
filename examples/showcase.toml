@@ -571,6 +571,32 @@ field = "status"
 equals = "attention"
 background = "$critical"
 
+# ---------------------------------------------------------------------------
+# The menu behind a tray icon
+#
+# A right click opens it, and so does a left click on an item that says it is a
+# menu rather than a button. It is a surface of its own, so it inherits nothing
+# from the bar by sitting on it: what is left out here is taken from the bar's
+# own background and from the colours every module starts with.
+#
+# There is no font of its own and no width to set per row - a menu is a list, and
+# the only thing to say about it is what it is painted in.
+# ---------------------------------------------------------------------------
+
+[menu]
+background = "$surface"
+foreground = "$text"
+highlight = "$overlay"
+highlight_foreground = "$text"
+# What a row that cannot be chosen is written in - a heading, or a network that
+# is out of range.
+disabled = "$subtext"
+separator = "$slate"
+padding = 8
+radius = 8
+# How wide a menu may get before a long label is cut short.
+max_width = 360
+
 # The compositor's binding mode. Nothing is drawn while it is `default`, so the
 # module is on the bar exactly while a mode is being held.
 [module.mode]

@@ -141,8 +141,8 @@ fn is_svg(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
 }
 
-/// A themed icon that is already pixels.
-fn from_png(bytes: &[u8], target: u32) -> Option<Raster> {
+/// An icon handed over as PNG, which is how a menu item carries one.
+pub fn from_png(bytes: &[u8], target: u32) -> Option<Raster> {
     // tiny-skia already decodes PNG for its own loading, so this half costs no dependency
     // at all - only the code that was already there becoming reachable.
     let decoded = tiny_skia::Pixmap::decode_png(bytes).ok()?;

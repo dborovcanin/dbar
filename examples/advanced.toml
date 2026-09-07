@@ -356,10 +356,20 @@ radius = 12
 # click plays and pauses, and the wheel moves between tracks. dbar asks the
 # player over the session bus and draws what the player then reports, so what is
 # on the bar is what actually happened.
-# An application's own icon, drawn as it shipped it. A left click is what the
-# application calls being activated - usually showing its window - and the middle
-# button is its second action. There is nothing to write here: the picture is the
-# whole module, and `format` is empty by default because of it.
+# The menu a tray icon opens, which for several applications is the only way in:
+# a network applet has no activation at all and keeps everything here.
+[menu]
+background = "$surface"
+foreground = "$text"
+highlight = "$raised"
+disabled = "$subtext"
+separator = "$raised"
+
+# An application's own icon, drawn as it shipped it. A right click opens the menu
+# behind it, a left click is what the application calls being activated - usually
+# showing its window - and the middle button is its second action. There is
+# nothing to write here: the picture is the whole module, and `format` is empty by
+# default because of it.
 [module.tray]
 source = "tray"
 style = "panel"

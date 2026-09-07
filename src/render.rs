@@ -5,7 +5,7 @@
 
 use anyhow::{Context as _, Result};
 use tiny_skia::{
-    FillRule, LineCap, Mask, Paint, Path, PathBuilder, Pixmap, PixmapMut, PixmapRef,
+    FillRule, LineCap, LineJoin, Mask, Paint, Path, PathBuilder, Pixmap, PixmapMut, PixmapRef,
     PremultipliedColorU8, Rect, Stroke, Transform,
 };
 
@@ -14,7 +14,7 @@ use crate::config::{Config, Direction, EdgeShape, SeparatorShape};
 use crate::icon::{self, IconArt, Ink, PathCmd};
 use std::collections::HashMap;
 
-use crate::layout::{Frame, PlacedGroup, PlacedIcon, PlacedModule, PlacedSeparator};
+use crate::layout::{Frame, MenuFrame, PlacedGroup, PlacedIcon, PlacedModule, PlacedSeparator};
 use crate::text::{RunPixels, TextRenderer, TextRun};
 
 /// What the renderer needs from a text backend.
@@ -714,6 +714,156 @@ pub fn render_to_buffer(
         px.swap(0, 2);
     }
     Ok(())
+}
+
+/// Render a menu into a `wl_shm` ARGB8888 buffer.
+///
+/// Its own entry point rather than a kind of frame: a menu is a surface of its own, with
+/// no groups, no separators between modules and nothing to clip.
+pub fn render_menu_to_buffer(
+    target: Target<'_>,
+    frame: &MenuFrame,
+    scale: f32,
+    painter: &mut Painter<impl DrawText>,
+) -> Result<()> {
+    let Target {
+        canvas,
+        width,
+        height,
+        ..
+    } = target;
+    {
+        let mut pixmap =
+            PixmapMut::from_bytes(canvas, width, height).context("wrapping the shm buffer")?;
+        render_menu(&mut pixmap, frame, scale, painter);
+    }
+    for px in canvas.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    Ok(())
+}
+
+fn render_menu(
+    pixmap: &mut PixmapMut<'_>,
+    frame: &MenuFrame,
+    scale: f32,
+    painter: &mut Painter<impl DrawText>,
+) {
+    pixmap.fill(tiny_skia::Color::TRANSPARENT);
+    let transform = Transform::from_scale(scale, scale);
+    fill(
+        pixmap,
+        (0.0, 0.0, frame.width, frame.height),
+        frame.radius,
+        frame.background,
+        transform,
+        None,
+    );
+
+    let Painter { text, icons, .. } = painter;
+    let line = text.line_height();
+    for row in &frame.rows {
+        if row.separator {
+            // A rule sits in the middle of the space it was given, inset from both edges
+            // so it reads as a division rather than as an edge of its own.
+            let inset = frame.width * 0.06;
+            let thickness = (1.0f32).max(1.0 / scale);
+            fill(
+                pixmap,
+                (
+                    inset,
+                    row.y + (row.height - thickness) / 2.0,
+                    frame.width - inset * 2.0,
+                    thickness,
+                ),
+                0.0,
+                row.foreground,
+                transform,
+                None,
+            );
+            continue;
+        }
+
+        if row.highlight {
+            fill(
+                pixmap,
+                (0.0, row.y, frame.width, row.height),
+                0.0,
+                row.highlight_color,
+                transform,
+                None,
+            );
+        }
+        if let Some(icon) = &row.icon {
+            draw_icon_cached(pixmap, icon, row.foreground, transform, None, icons);
+        }
+        if let Some((x, y)) = row.mark {
+            draw_tick(pixmap, x, y, line * 0.5, row.foreground, transform);
+        }
+        if let Some((x, y)) = row.arrow {
+            draw_arrow(pixmap, x, y, line * 0.32, row.foreground, transform);
+        }
+        draw_text(
+            pixmap,
+            text,
+            &row.text,
+            row.text_x,
+            row.text_y,
+            scale,
+            row.foreground,
+        );
+    }
+}
+
+/// The tick on a row that is switched on.
+fn draw_tick(
+    pixmap: &mut PixmapMut<'_>,
+    x: f32,
+    y: f32,
+    size: f32,
+    color: Color,
+    transform: Transform,
+) {
+    let mut builder = PathBuilder::new();
+    builder.move_to(x, y);
+    builder.line_to(x + size * 0.4, y + size * 0.45);
+    builder.line_to(x + size * 1.1, y - size * 0.5);
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color(skia_color(color));
+    paint.anti_alias = true;
+    let stroke = Stroke {
+        width: (size * 0.28).max(1.0),
+        line_cap: LineCap::Round,
+        line_join: LineJoin::Round,
+        ..Stroke::default()
+    };
+    pixmap.stroke_path(&path, &paint, &stroke, transform, None);
+}
+
+/// The arrow on a row that opens another menu.
+fn draw_arrow(
+    pixmap: &mut PixmapMut<'_>,
+    x: f32,
+    y: f32,
+    size: f32,
+    color: Color,
+    transform: Transform,
+) {
+    let mut builder = PathBuilder::new();
+    builder.move_to(x, y - size);
+    builder.line_to(x + size * 0.8, y);
+    builder.line_to(x, y + size);
+    builder.close();
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    let mut paint = Paint::default();
+    paint.set_color(skia_color(color));
+    paint.anti_alias = true;
+    pixmap.fill_path(&path, &paint, FillRule::Winding, transform, None);
 }
 
 /// The surface a frame is drawn into: its pixels, its size in them, and the clip mask it

@@ -76,6 +76,144 @@ impl<'a> Inputs<'a> {
     }
 }
 
+/// A menu laid out: where every row sits, and what is drawn on it.
+///
+/// Geometry and colour like `Frame`, and for the same reason - the renderer draws this
+/// without knowing a bus exists.
+#[derive(Clone, Debug)]
+pub struct MenuFrame {
+    pub width: f32,
+    pub height: f32,
+    pub background: Color,
+    pub radius: f32,
+    pub rows: Vec<PlacedRow>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlacedRow {
+    pub y: f32,
+    pub height: f32,
+    /// A rule rather than a row: drawn as a line and never highlighted.
+    pub separator: bool,
+    /// Whether the pointer is on this row.
+    pub highlight: bool,
+    /// What that highlight is painted in.
+    pub highlight_color: Color,
+    pub text: String,
+    pub text_x: f32,
+    pub text_y: f32,
+    pub foreground: Color,
+    pub icon: Option<PlacedIcon>,
+    /// Where a tick goes, for a row that carries one and is on.
+    pub mark: Option<(f32, f32)>,
+    /// Where the arrow saying "there is more" goes.
+    pub arrow: Option<(f32, f32)>,
+}
+
+impl Default for MenuFrame {
+    fn default() -> MenuFrame {
+        MenuFrame {
+            width: 0.0,
+            height: 0.0,
+            background: Color::TRANSPARENT,
+            radius: 0.0,
+            rows: Vec::new(),
+        }
+    }
+}
+
+impl MenuFrame {
+    /// Which row is at this point, if it is one that can be chosen.
+    pub fn row_at(&self, y: f32) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| !row.separator && y >= row.y && y < row.y + row.height)
+    }
+}
+
+/// Lay out a menu: one row per entry, wide enough for the longest of them.
+///
+/// The width is the menu's own business rather than the bar's - a menu is a separate
+/// surface and has no column to fit into - so it is measured from what it has to say and
+/// capped where a label would otherwise run off the screen.
+pub fn menu(
+    rows: &[crate::tray::menu::Row],
+    style: &crate::config::Menu,
+    icon_size: f32,
+    line: f32,
+    hover: Option<usize>,
+    text: &mut dyn Measure,
+) -> MenuFrame {
+    let row_height = (line + style.padding).max(icon_size + 4.0);
+    let rule_height = (style.padding * 0.75).max(3.0);
+    // Room on the left for a picture or a tick, and on the right for the arrow that says a
+    // row opens another menu. Both columns exist whether or not every row uses them, so
+    // the labels line up instead of stepping in and out.
+    let gutter = icon_size + style.padding * 0.5;
+    let arrow = line * 0.4;
+
+    let widest = rows
+        .iter()
+        .filter(|row| !row.separator)
+        .map(|row| text.measure(&row.label))
+        .fold(0.0f32, f32::max);
+    let width = (style.padding * 2.0 + gutter + widest + style.padding + arrow)
+        .min(style.max_width)
+        .max(icon_size * 3.0);
+
+    let mut placed = Vec::with_capacity(rows.len());
+    let mut y = style.padding;
+    for (index, row) in rows.iter().enumerate() {
+        let height = match row.separator {
+            true => rule_height,
+            false => row_height,
+        };
+        let highlight = hover == Some(index) && row.selectable();
+        let foreground = match (row.separator, row.enabled, highlight) {
+            (true, _, _) => style.separator,
+            (false, false, _) => style.disabled,
+            (false, true, true) => style.highlight_foreground,
+            (false, true, false) => style.foreground,
+        };
+        let text_x = style.padding + gutter;
+        placed.push(PlacedRow {
+            y,
+            height,
+            separator: row.separator,
+            highlight,
+            highlight_color: style.highlight,
+            text: row.label.clone(),
+            text_x,
+            text_y: y + (height - line) / 2.0,
+            foreground,
+            icon: row.icon.as_ref().map(|art| PlacedIcon {
+                icon: Icon::Raster,
+                level: 0,
+                x: style.padding,
+                y: y + (height - icon_size) / 2.0,
+                size: icon_size,
+                art: Some(art.clone()),
+            }),
+            // A tick shares the left column with a picture, and a row with both is not a
+            // thing any menu sends.
+            mark: (row.toggle == Some(true) && row.icon.is_none())
+                .then(|| (style.padding, y + height / 2.0)),
+            arrow: row
+                .submenu
+                .then(|| (width - style.padding - arrow, y + height / 2.0)),
+        });
+        y += height;
+    }
+
+    MenuFrame {
+        width,
+        height: y + style.padding,
+        background: style.background,
+        radius: style.radius,
+        rows: placed,
+    }
+}
+
 /// What layout needs from a text backend: how wide a string is, and how tall a line is.
 ///
 /// Layout is otherwise free of rendering concerns, so it can be exercised with a stub
@@ -1485,6 +1623,8 @@ padding = 0
     fn tray_item(key: &str, title: &str) -> crate::tray::Item {
         crate::tray::Item {
             key: key.to_string(),
+            is_menu: false,
+            has_menu: false,
             id: title.to_lowercase(),
             title: title.to_string(),
             status: crate::tray::Status::Active,
@@ -1510,6 +1650,122 @@ padding = 0
             output: None,
         };
         compute(cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
+    }
+
+    fn menu_row(label: &str) -> crate::tray::menu::Row {
+        crate::tray::menu::Row {
+            id: 1,
+            label: label.to_string(),
+            enabled: true,
+            ..Default::default()
+        }
+    }
+
+    fn menu_style() -> crate::config::Menu {
+        Config::parse("[bar]\nheight = 20\n")
+            .expect("a bar with no modules is a config")
+            .menu
+    }
+
+    /// A menu is as wide as the longest thing it has to say, and every row is the same
+    /// height so the pointer does not have to hunt for them.
+    #[test]
+    fn a_menu_is_sized_by_what_it_has_to_say() {
+        let rows = vec![menu_row("Short"), menu_row("A much longer label")];
+        let frame = menu(&rows, &menu_style(), 16.0, 10.0, None, &mut Fixed);
+        // The stub measurer makes every character one unit wide.
+        assert!(frame.width > "A much longer label".len() as f32);
+        assert_eq!(frame.rows.len(), 2);
+        assert_eq!(frame.rows[0].height, frame.rows[1].height);
+        // Rows follow one another with no gap, and the whole is as tall as they are plus
+        // the padding at each end.
+        assert_eq!(frame.rows[1].y, frame.rows[0].y + frame.rows[0].height);
+        assert!(frame.height > frame.rows[1].y + frame.rows[1].height);
+    }
+
+    /// A rule is shorter than a row and cannot be pointed at: hunting for a row and
+    /// landing on the line between two of them is how a menu feels broken.
+    #[test]
+    fn a_separator_is_not_something_the_pointer_can_land_on() {
+        let rows = vec![
+            menu_row("One"),
+            crate::tray::menu::Row {
+                id: 2,
+                separator: true,
+                ..Default::default()
+            },
+            menu_row("Two"),
+        ];
+        let frame = menu(&rows, &menu_style(), 16.0, 10.0, None, &mut Fixed);
+        assert!(frame.rows[1].height < frame.rows[0].height);
+
+        let middle = |index: usize| frame.rows[index].y + frame.rows[index].height / 2.0;
+        assert_eq!(frame.row_at(middle(0)), Some(0));
+        assert_eq!(frame.row_at(middle(1)), None, "a rule is not a row");
+        assert_eq!(frame.row_at(middle(2)), Some(2));
+    }
+
+    /// The highlight follows the pointer, and never onto a row that does nothing.
+    #[test]
+    fn only_a_row_that_can_be_chosen_is_highlighted() {
+        let rows = vec![
+            menu_row("Enabled"),
+            crate::tray::menu::Row {
+                id: 2,
+                label: "Disabled".to_string(),
+                enabled: false,
+                ..Default::default()
+            },
+        ];
+        let style = menu_style();
+        let frame = menu(&rows, &style, 16.0, 10.0, Some(0), &mut Fixed);
+        assert!(frame.rows[0].highlight);
+        assert!(!frame.rows[1].highlight);
+
+        // Pointing at the disabled row highlights nothing, and it keeps its quieter ink.
+        let frame = menu(&rows, &style, 16.0, 10.0, Some(1), &mut Fixed);
+        assert!(!frame.rows[0].highlight);
+        assert!(!frame.rows[1].highlight);
+        assert_eq!(frame.rows[1].foreground, style.disabled);
+    }
+
+    /// Both columns exist on every row so the labels line up, whether or not each row has
+    /// something to put in them.
+    #[test]
+    fn a_mark_and_an_arrow_are_placed_only_where_they_belong() {
+        let rows = vec![
+            crate::tray::menu::Row {
+                id: 1,
+                label: "Ticked".to_string(),
+                enabled: true,
+                toggle: Some(true),
+                ..Default::default()
+            },
+            crate::tray::menu::Row {
+                id: 2,
+                label: "Unticked".to_string(),
+                enabled: true,
+                toggle: Some(false),
+                ..Default::default()
+            },
+            crate::tray::menu::Row {
+                id: 3,
+                label: "More".to_string(),
+                enabled: true,
+                submenu: true,
+                ..Default::default()
+            },
+        ];
+        let frame = menu(&rows, &menu_style(), 16.0, 10.0, None, &mut Fixed);
+        assert!(frame.rows[0].mark.is_some());
+        assert!(
+            frame.rows[1].mark.is_none(),
+            "an unticked row wears no tick"
+        );
+        assert!(frame.rows[2].arrow.is_some());
+        assert!(frame.rows[0].arrow.is_none());
+        // The labels start in the same place regardless.
+        assert_eq!(frame.rows[0].text_x, frame.rows[2].text_x);
     }
 
     /// The mode indicator is on the bar exactly while a mode is held. `default` is what a

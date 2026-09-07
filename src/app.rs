@@ -7,7 +7,10 @@ use anyhow::{Context as _, Result};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, FrameCallbackData},
     delegate_registry,
+    error::GlobalError,
+    globals::{GlobalData, ProvidesBoundGlobal},
     output::{OutputHandler, OutputState},
+    reexports::protocols::xdg::shell::client::{xdg_positioner, xdg_wm_base},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
@@ -20,6 +23,10 @@ use smithay_client_toolkit::{
             Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
             LayerSurfaceConfigure,
         },
+        xdg::{
+            XdgPositioner, XdgShell,
+            popup::{Popup, PopupConfigure, PopupHandler},
+        },
     },
     shm::{Shm, ShmHandler, slot::SlotPool},
 };
@@ -31,7 +38,7 @@ use wayland_client::{
 
 use crate::collect::{Registry, Which, watch};
 use crate::config::{BarLayer, Button, Config, Edge};
-use crate::layout::{self, Frame, Inputs, PlacedModule};
+use crate::layout::{self, Frame, Inputs, MenuFrame, PlacedModule};
 use crate::render;
 use crate::status::{
     ActionTarget, ClickEvent, Control, I3BarProvider, StatusEvent, StatusItem, i3bar,
@@ -61,6 +68,52 @@ const SPIN_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
 /// also the whole price of the spinner, since every step is a redraw, which is why it is
 /// paid only while a program is actually out and never at idle.
 const SPIN_STEP: std::time::Duration = std::time::Duration::from_millis(60);
+
+/// What a menu hangs from.
+enum Anchor2 {
+    /// A tray icon on a bar.
+    Bar { bar: usize, x: f32, width: f32 },
+    /// A row of a menu that is already open.
+    Row { level: usize, id: i32 },
+}
+
+/// One menu on screen: the rows it holds and the surface it draws them on.
+///
+/// A menu is a popup rather than a layer surface of its own, and deliberately: a popup is
+/// the only thing on Wayland that comes with a grab, which is what makes a click anywhere
+/// else close it. A menu that will not close is worse than no menu at all.
+struct OpenMenu {
+    /// The tray item this menu belongs to, so a choice can be sent back to it.
+    key: String,
+    rows: Vec<crate::tray::menu::Row>,
+    popup: Popup,
+    pool: SlotPool,
+    frame: MenuFrame,
+    /// Which row the pointer is on.
+    hover: Option<usize>,
+    width: u32,
+    height: u32,
+    scale: i32,
+    configured: bool,
+    dirty: bool,
+}
+
+/// The bound `xdg_wm_base`, which is all of the xdg shell a menu needs.
+struct WmBase(xdg_wm_base::XdgWmBase);
+
+// The positioner asks for one version of the global and the popup for another, and both
+// are the same object either way.
+impl ProvidesBoundGlobal<xdg_wm_base::XdgWmBase, 6> for WmBase {
+    fn bound_global(&self) -> Result<xdg_wm_base::XdgWmBase, GlobalError> {
+        Ok(self.0.clone())
+    }
+}
+
+impl ProvidesBoundGlobal<xdg_wm_base::XdgWmBase, 5> for WmBase {
+    fn bound_global(&self) -> Result<xdg_wm_base::XdgWmBase, GlobalError> {
+        Ok(self.0.clone())
+    }
+}
 
 /// One bar: a layer surface on one screen, and what belongs to that surface rather than to
 /// what is drawn on it.
@@ -177,6 +230,12 @@ pub struct App {
     shm: Shm,
     compositor: CompositorState,
     layer_shell: LayerShell,
+    /// The shell a menu's surface comes from.
+    ///
+    /// Only the popup half of it is used, and it is bound by hand rather than through
+    /// `XdgShell` so that dbar does not have to answer for window decorations it will
+    /// never ask for.
+    wm_base: WmBase,
     /// One per screen the config asks for, in the order the compositor announced them.
     bars: Vec<Bar>,
     conn: Connection,
@@ -229,6 +288,13 @@ pub struct App {
     tray: crate::tray::TrayState,
     /// The way into the tray thread, when a click has to reach an application.
     tray_commands: Option<crate::tray::Commands>,
+    /// The menu a tray icon has open, and any submenus below it, outermost first.
+    ///
+    /// A stack rather than one surface, because a menu that opens another has to keep the
+    /// first on screen: the second is anchored to a row of it.
+    menus: Vec<OpenMenu>,
+    /// The item whose menu is being opened, while its rows are still being read.
+    opening: Option<(usize, String, f32, f32)>,
     /// Set when the status provider itself has failed; shown in place of the groups.
     fault: Option<String>,
     /// Item names from the last "nothing matched" warning, so it is not repeated per redraw.
@@ -239,6 +305,11 @@ pub struct App {
     no_output_warned: bool,
 
     pointer: Option<wl_pointer::WlPointer>,
+    /// The seat the pointer belongs to, which is what a menu's grab is taken on.
+    seat: Option<wl_seat::WlSeat>,
+    /// The serial of the last button press, which is the only thing a grab is allowed to
+    /// be asked for with.
+    last_press: Option<u32>,
     pub exit: bool,
 }
 
@@ -254,6 +325,12 @@ impl App {
             CompositorState::bind(globals, qh).context("wl_compositor is not available")?;
         let layer_shell = LayerShell::bind(globals, qh)
             .context("zwlr_layer_shell_v1 is not available; is this a wlroots compositor?")?;
+        // Only a tray needs this, and a compositor without it simply gets no menus.
+        let wm_base = WmBase(
+            globals
+                .bind(qh, 1..=XdgShell::API_VERSION_MAX, GlobalData)
+                .context("xdg_wm_base is not available, so tray menus cannot be opened")?,
+        );
         let shm = Shm::bind(globals, qh).context("wl_shm is not available")?;
 
         let config_collectors = config.collectors();
@@ -268,6 +345,7 @@ impl App {
             shm,
             compositor,
             layer_shell,
+            wm_base,
             bars: Vec::new(),
             conn,
             qh: qh.clone(),
@@ -293,11 +371,15 @@ impl App {
             sway: SwayState::default(),
             tray: crate::tray::TrayState::default(),
             tray_commands: None,
+            menus: Vec::new(),
+            opening: None,
             fault: None,
             warned_names: None,
             name_count_warned: false,
             no_output_warned: false,
             pointer: None,
+            seat: None,
+            last_press: None,
             exit: false,
         })
     }
@@ -502,6 +584,7 @@ impl App {
                 self.tray = *state;
                 self.invalidate();
             }
+            crate::tray::Event::Menu { key, parent, rows } => self.open_menu(&key, parent, rows),
             crate::tray::Event::Stopped(reason) => {
                 // The rest of the bar is unaffected; only the tray goes quiet.
                 log::warn!("the tray has stopped: {reason}");
@@ -509,6 +592,16 @@ impl App {
                 self.invalidate();
             }
         }
+    }
+
+    /// Ask the tray thread for an item's menu, remembering where to hang it.
+    fn ask_for_menu(&mut self, bar: usize, key: String, x: f32, width: f32) {
+        let Some(commands) = &self.tray_commands else {
+            return;
+        };
+        self.menus.clear();
+        self.opening = Some((bar, key.clone(), x, width));
+        commands.send(crate::tray::Command::Menu { key, parent: 0 });
     }
 
     /// Pass a click on a tray icon to the application it belongs to.
@@ -527,6 +620,297 @@ impl App {
             Some(commands) => commands.send(command),
             None => log::debug!("no tray thread to tell"),
         }
+    }
+
+    /// Put a menu on screen, under the icon it belongs to or beside the row that opened it.
+    fn open_menu(&mut self, key: &str, parent: i32, rows: Vec<crate::tray::menu::Row>) {
+        if rows.is_empty() {
+            log::debug!("{key} has an empty menu, so there is nothing to open");
+            self.opening = None;
+            return;
+        }
+        // Where it hangs from: the module for an item's own menu, the row for a submenu.
+        let anchor = match parent {
+            0 => match self.opening.take() {
+                Some((bar, opening_key, x, width)) if opening_key == key => {
+                    Anchor2::Bar { bar, x, width }
+                }
+                // The click that asked for this is long gone, or was for something else.
+                _ => return,
+            },
+            row => match self
+                .menus
+                .iter()
+                .position(|m| m.key == key && m.rows.iter().any(|r| r.id == row && r.submenu))
+            {
+                Some(level) => Anchor2::Row { level, id: row },
+                None => return,
+            },
+        };
+
+        // A submenu replaces anything already open below the level it came from.
+        if let Anchor2::Row { level, .. } = anchor {
+            self.menus.truncate(level + 1);
+        } else {
+            self.menus.clear();
+        }
+
+        let (line, icon_size) = (
+            self.painter.text.line_height(),
+            self.config.bar.icon_size.min(20.0),
+        );
+        let frame = layout::menu(
+            &rows,
+            &self.config.menu,
+            icon_size,
+            line,
+            None,
+            &mut self.painter.text,
+        );
+        let (width, height) = (frame.width.ceil() as u32, frame.height.ceil() as u32);
+
+        let positioner = match XdgPositioner::new(&self.wm_base) {
+            Ok(positioner) => positioner,
+            Err(e) => {
+                log::warn!("a menu could not be positioned: {e}");
+                return;
+            }
+        };
+        positioner.set_size(width as i32, height as i32);
+        // Slide along the bar rather than hanging off the end of the screen, and flip to
+        // the other side of the anchor when there is no room the way it was asked for -
+        // which is what puts a menu above a bar that sits at the bottom.
+        positioner.set_constraint_adjustment(
+            xdg_positioner::ConstraintAdjustment::SlideX
+                | xdg_positioner::ConstraintAdjustment::FlipY
+                | xdg_positioner::ConstraintAdjustment::SlideY,
+        );
+
+        let (parent_surface, scale) = match &anchor {
+            Anchor2::Bar { bar, x, width: w } => {
+                let bar = &self.bars[*bar];
+                positioner.set_anchor_rect(*x as i32, 0, w.ceil() as i32, bar.height as i32);
+                let (anchor, gravity) = match self.config.bar.position {
+                    Edge::Top => (
+                        xdg_positioner::Anchor::BottomLeft,
+                        xdg_positioner::Gravity::BottomRight,
+                    ),
+                    Edge::Bottom => (
+                        xdg_positioner::Anchor::TopLeft,
+                        xdg_positioner::Gravity::TopRight,
+                    ),
+                };
+                positioner.set_anchor(anchor);
+                positioner.set_gravity(gravity);
+                (None, bar.scale)
+            }
+            Anchor2::Row { level, id } => {
+                let open = &self.menus[*level];
+                let row = open
+                    .rows
+                    .iter()
+                    .position(|r| r.id == *id)
+                    .and_then(|index| open.frame.rows.get(index));
+                let Some(row) = row else {
+                    return;
+                };
+                positioner.set_anchor_rect(
+                    0,
+                    row.y as i32,
+                    open.frame.width as i32,
+                    row.height.ceil() as i32,
+                );
+                positioner.set_anchor(xdg_positioner::Anchor::TopRight);
+                positioner.set_gravity(xdg_positioner::Gravity::BottomRight);
+                (Some(open.popup.xdg_surface().clone()), open.scale)
+            }
+        };
+
+        let surface = self.compositor.create_surface(&self.qh);
+        let popup = match Popup::from_surface(
+            parent_surface.as_ref(),
+            &positioner,
+            &self.qh,
+            surface,
+            &self.wm_base,
+        ) {
+            Ok(popup) => popup,
+            Err(e) => {
+                log::warn!("a menu surface could not be made: {e}");
+                return;
+            }
+        };
+
+        match &anchor {
+            // The item's own menu takes a grab, so a click anywhere else closes it. A
+            // submenu inherits that grab by being a child of the popup that holds it.
+            Anchor2::Bar { bar, .. } => {
+                self.bars[*bar].layer.get_popup(popup.xdg_popup());
+                if let (Some(seat), Some(serial)) = (&self.seat, self.last_press) {
+                    popup.xdg_popup().grab(seat, serial);
+                }
+            }
+            Anchor2::Row { .. } => {}
+        }
+        popup.wl_surface().commit();
+
+        let physical = scale.max(1) as usize;
+        let bytes = width as usize * height as usize * physical * physical * 4;
+        let pool = match SlotPool::new(bytes.max(4096), &self.shm) {
+            Ok(pool) => pool,
+            Err(e) => {
+                log::warn!("a menu could not be given a buffer: {e}");
+                return;
+            }
+        };
+
+        self.menus.push(OpenMenu {
+            key: key.to_string(),
+            rows,
+            popup,
+            pool,
+            frame,
+            hover: None,
+            width,
+            height,
+            scale: scale.max(1),
+            configured: false,
+            dirty: true,
+        });
+    }
+
+    /// Close every menu that is open.
+    fn close_menus(&mut self) {
+        self.menus.clear();
+        self.opening = None;
+    }
+
+    /// Which open menu a surface belongs to.
+    fn menu_of(&self, surface: &wl_surface::WlSurface) -> Option<usize> {
+        self.menus
+            .iter()
+            .position(|menu| menu.popup.wl_surface() == surface)
+    }
+
+    /// Draw the menus that have something to draw.
+    fn draw_menus(&mut self) {
+        let mut drawn = false;
+        for index in 0..self.menus.len() {
+            let menu = &self.menus[index];
+            if !menu.dirty || !menu.configured || menu.width == 0 {
+                continue;
+            }
+            match self.draw_menu(index) {
+                Ok(()) => {
+                    self.menus[index].dirty = false;
+                    drawn = true;
+                }
+                Err(e) => log::error!("drawing a menu failed: {e}"),
+            }
+        }
+        if drawn {
+            let _ = self.conn.flush();
+        }
+    }
+
+    fn draw_menu(&mut self, index: usize) -> Result<()> {
+        // Laid out again rather than only repainted: the highlight moves with the pointer,
+        // and a menu is small enough that measuring it again costs nothing worth saving.
+        let line = self.painter.text.line_height();
+        let icon_size = self.config.bar.icon_size.min(20.0);
+        let App {
+            menus,
+            painter,
+            config,
+            ..
+        } = self;
+        let menu = &mut menus[index];
+        painter.text.set_scale(menu.scale.max(1) as f32);
+        menu.frame = layout::menu(
+            &menu.rows,
+            &config.menu,
+            icon_size,
+            line,
+            menu.hover,
+            &mut painter.text,
+        );
+
+        let scale = menu.scale.max(1);
+        let pw = (menu.width * scale as u32) as i32;
+        let ph = (menu.height * scale as u32) as i32;
+        let (buffer, canvas) = menu
+            .pool
+            .create_buffer(pw, ph, pw * 4, wl_shm::Format::Argb8888)
+            .context("creating a buffer for a menu")?;
+
+        render::render_menu_to_buffer(
+            render::Target {
+                canvas,
+                width: pw as u32,
+                height: ph as u32,
+                clip: &mut render::Clip::default(),
+            },
+            &menu.frame,
+            scale as f32,
+            painter,
+        )?;
+
+        let surface = menu.popup.wl_surface();
+        surface.set_buffer_scale(scale);
+        surface.damage_buffer(0, 0, pw, ph);
+        buffer
+            .attach_to(surface)
+            .context("attaching a menu buffer")?;
+        surface.commit();
+        Ok(())
+    }
+
+    /// Follow the pointer across a menu, and redraw only when the row under it changes.
+    fn menu_pointer(&mut self, index: usize, at: Option<(f32, f32)>) {
+        let menu = &mut self.menus[index];
+        let was = menu.hover;
+        menu.hover = at.and_then(|(_, y)| menu.frame.row_at(y));
+        if menu.hover == was {
+            return;
+        }
+        menu.dirty = true;
+        // Moving onto a row that opens another menu opens it, and moving off it closes
+        // whatever it opened - which is what makes a menu feel like a menu.
+        let opening = menu
+            .hover
+            .and_then(|row| menu.rows.get(row))
+            .filter(|row| row.submenu)
+            .map(|row| row.id);
+        let key = menu.key.clone();
+        self.menus.truncate(index + 1);
+        if let Some(id) = opening
+            && let Some(commands) = &self.tray_commands
+        {
+            commands.send(crate::tray::Command::Menu { key, parent: id });
+        }
+        self.draw_menus();
+    }
+
+    /// Act on a click inside a menu.
+    fn menu_click(&mut self, index: usize, at: (f32, f32)) {
+        let menu = &self.menus[index];
+        let Some(row) = menu.frame.row_at(at.1).and_then(|row| menu.rows.get(row)) else {
+            return;
+        };
+        if !row.selectable() {
+            return;
+        }
+        // A row that opens another menu is opened by the pointer resting on it, so a click
+        // on one is not a choice.
+        if row.submenu {
+            return;
+        }
+        let (key, id) = (menu.key.clone(), row.id);
+        if let Some(commands) = &self.tray_commands {
+            commands.send(crate::tray::Command::Chose { key, id });
+        }
+        // The application acts on it; the menu has done its job either way.
+        self.close_menus();
     }
 
     fn tell_audio(&self, command: crate::collect::audio::Command) {
@@ -1045,7 +1429,19 @@ impl App {
                     ActionTarget::Control { what, step } => self.control(what, step, button),
                     // The application decides what a click means; the bar only says where
                     // it happened, in the coordinates the protocol asks for.
-                    ActionTarget::Tray { key } => self.tell_tray(key, button, x, y),
+                    ActionTarget::Tray { key } => {
+                        // A right click asks for the menu, and so does a left click on an
+                        // item that says it is one: several offer no activation at all and
+                        // that is how they say so.
+                        let item = self.tray.items.iter().find(|i| i.key == key);
+                        let wants_menu = item.is_some_and(|i| {
+                            i.has_menu && (button == 3 || (button == 1 && i.is_menu))
+                        });
+                        match wants_menu {
+                            true => self.ask_for_menu(i, key, mx, mw),
+                            false => self.tell_tray(key, button, x, y),
+                        }
+                    }
                     ActionTarget::I3Bar { name, instance } => {
                         let event = ClickEvent {
                             name: name.as_deref(),
@@ -1191,7 +1587,11 @@ impl SeatHandler for App {
     ) {
         if capability == Capability::Pointer && self.pointer.is_none() {
             match self.seat_state.get_pointer(qh, &seat) {
-                Ok(pointer) => self.pointer = Some(pointer),
+                Ok(pointer) => {
+                    self.pointer = Some(pointer);
+                    // Kept because a menu's grab is taken on the seat, not the pointer.
+                    self.seat = Some(seat);
+                }
                 Err(e) => log::warn!("could not get a pointer: {e}"),
             }
         }
@@ -1223,16 +1623,37 @@ impl PointerHandler for App {
         events: &[PointerEvent],
     ) {
         for event in events {
+            let (x, y) = event.position;
+            // A menu is a surface of its own, and while one is open it is where the
+            // pointer usually is.
+            if let Some(menu) = self.menu_of(&event.surface) {
+                match event.kind {
+                    PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                        self.menu_pointer(menu, Some((x as f32, y as f32)));
+                    }
+                    PointerEventKind::Leave { .. } => self.menu_pointer(menu, None),
+                    PointerEventKind::Press { serial, .. } => self.last_press = Some(serial),
+                    PointerEventKind::Release {
+                        button: BTN_LEFT, ..
+                    } => self.menu_click(menu, (x as f32, y as f32)),
+                    _ => {}
+                }
+                continue;
+            }
             let Some(i) = self.bar_of(&event.surface) else {
                 continue;
             };
-            let (x, y) = event.position;
             match event.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                     self.set_pointer(i, Some((x as f32, y as f32)));
                 }
                 PointerEventKind::Leave { .. } => self.set_pointer(i, None),
-                PointerEventKind::Press { button, .. } => self.on_click(i, x, y, button),
+                PointerEventKind::Press { button, serial, .. } => {
+                    // Kept because a menu may be about to be opened, and a grab can only
+                    // be asked for with the serial of the press that opened it.
+                    self.last_press = Some(serial);
+                    self.on_click(i, x, y, button);
+                }
                 PointerEventKind::Axis { vertical, .. } => {
                     let steps = steps_of(&vertical, &mut self.bars[i].scrolled);
                     // i3bar encodes scroll as buttons 4 (up) and 5 (down).
@@ -1290,6 +1711,38 @@ impl OutputHandler for App {
         output: wl_output::WlOutput,
     ) {
         self.drop_bar(&output);
+    }
+}
+
+impl PopupHandler for App {
+    fn configure(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        popup: &Popup,
+        configure: PopupConfigure,
+    ) {
+        let Some(index) = self.menu_of(popup.wl_surface()) else {
+            return;
+        };
+        let menu = &mut self.menus[index];
+        if configure.width > 0 {
+            menu.width = configure.width as u32;
+        }
+        if configure.height > 0 {
+            menu.height = configure.height as u32;
+        }
+        menu.configured = true;
+        menu.dirty = true;
+        self.draw_menus();
+    }
+
+    /// The compositor took the menu away, which is what a click anywhere else looks like.
+    fn done(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, popup: &Popup) {
+        if let Some(index) = self.menu_of(popup.wl_surface()) {
+            // Everything opened from it goes with it.
+            self.menus.truncate(index);
+        }
     }
 }
 

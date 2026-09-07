@@ -12,6 +12,7 @@
 //! pixels; nothing below this file knows the protocol exists.
 
 pub mod icon;
+pub mod menu;
 
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
@@ -85,6 +86,11 @@ impl Status {
 pub struct Item {
     /// What the bar calls this item, and what a click names when it comes back.
     pub key: String,
+    /// Whether the application says a plain click should open its menu rather than
+    /// activate it. Several offer no activation at all and say so this way.
+    pub is_menu: bool,
+    /// Whether it has a menu to open.
+    pub has_menu: bool,
     /// The application's own name for itself, for a format that wants words.
     pub id: String,
     pub title: String,
@@ -103,15 +109,43 @@ pub struct TrayState {
 #[derive(Debug)]
 pub enum Event {
     State(Box<TrayState>),
+    /// One level of an item's menu, ready to be drawn. `parent` is the row it hangs from,
+    /// or zero for the menu itself.
+    Menu {
+        key: String,
+        parent: i32,
+        rows: Vec<menu::Row>,
+    },
     Stopped(String),
 }
 
 /// What a click on an item asks of it.
 #[derive(Clone, Debug)]
 pub enum Command {
-    Activate { key: String, x: i32, y: i32 },
-    Secondary { key: String, x: i32, y: i32 },
-    Scroll { key: String, delta: i32 },
+    Activate {
+        key: String,
+        x: i32,
+        y: i32,
+    },
+    Secondary {
+        key: String,
+        x: i32,
+        y: i32,
+    },
+    Scroll {
+        key: String,
+        delta: i32,
+    },
+    /// Read an item's menu, or one level of it, and send it back to be drawn.
+    Menu {
+        key: String,
+        parent: i32,
+    },
+    /// Tell the application one of its menu rows was chosen.
+    Chose {
+        key: String,
+        id: i32,
+    },
 }
 
 /// The way into the tray thread, which is blocked on the bus and cannot be interrupted any
@@ -180,6 +214,8 @@ struct Tracked {
     service: String,
     /// The object inside that name, which is not always the one the spec suggests.
     path: String,
+    /// Where its menu lives, when it has one.
+    menu: Option<String>,
     item: Item,
     /// What its icon was resolved from, so a `NewIcon` that changes nothing changes
     /// nothing: applications announce an icon far more often than they change one.
@@ -300,7 +336,7 @@ fn run(
                     return Ok(());
                 }
                 while let Ok(command) = orders.try_recv() {
-                    act(&mut bus, &tray, &command);
+                    act(&mut bus, &tray, sender, &command);
                 }
             }
             if fds[0].revents == 0 {
@@ -523,8 +559,11 @@ fn add(bus: &mut Connection, tray: &mut Tray, service: &str, path: &str) -> bool
     tray.items.push(Tracked {
         service: service.to_string(),
         path: path.to_string(),
+        menu: None,
         item: Item {
             key,
+            is_menu: false,
+            has_menu: false,
             id: String::new(),
             title: String::new(),
             status: Status::Active,
@@ -592,6 +631,13 @@ fn read_item(bus: &mut Connection, tray: &mut Tray, at: usize) -> bool {
     };
     let status = Status::parse(&text("Status"));
 
+    let menu_path = properties
+        .get("Menu")
+        .and_then(Value::as_str)
+        .filter(|path| path.starts_with('/'))
+        .map(str::to_string);
+    let is_menu = matches!(properties.get("ItemIsMenu"), Some(Value::Bool(true)));
+
     let name = properties.get("IconName").and_then(Value::as_str);
     let theme_path = properties.get("IconThemePath").and_then(Value::as_str);
     let pixmaps = properties.get("IconPixmap");
@@ -609,7 +655,9 @@ fn read_item(bus: &mut Connection, tray: &mut Tray, at: usize) -> bool {
     let unchanged = same_icon
         && tracked.item.id == id
         && tracked.item.title == title
-        && tracked.item.status == status;
+        && tracked.item.status == status
+        && tracked.menu == menu_path
+        && tracked.item.is_menu == is_menu;
     if unchanged {
         return false;
     }
@@ -633,6 +681,9 @@ fn read_item(bus: &mut Connection, tray: &mut Tray, at: usize) -> bool {
     tracked.item.id = id;
     tracked.item.title = title;
     tracked.item.status = status;
+    tracked.item.is_menu = is_menu;
+    tracked.item.has_menu = menu_path.is_some();
+    tracked.menu = menu_path;
     if !same_icon {
         tracked.item.icon = match &wanted {
             Some(Seen::Named(name, theme_path)) => {
@@ -677,14 +728,50 @@ fn fingerprint(value: &Value) -> u64 {
 }
 
 /// Do what a click asked of the item it landed on.
-fn act(bus: &mut Connection, tray: &Tray, command: &Command) {
+fn act(
+    bus: &mut Connection,
+    tray: &Tray,
+    sender: &calloop::channel::Sender<Event>,
+    command: &Command,
+) {
     let key = match command {
         Command::Activate { key, .. } | Command::Secondary { key, .. } => key,
         Command::Scroll { key, .. } => key,
+        Command::Menu { key, .. } | Command::Chose { key, .. } => key,
     };
     let Some(tracked) = tray.items.iter().find(|t| &t.item.key == key) else {
         return;
     };
+
+    // The menu is a second object on the same application, and the one thing a host has to
+    // draw itself: the applications that keep their commands there do not answer
+    // `ContextMenu` at all.
+    if let Command::Menu { parent, .. } | Command::Chose { id: parent, .. } = command {
+        let Some(path) = tracked.menu.clone() else {
+            log::debug!("{key} has no menu to open");
+            return;
+        };
+        match command {
+            Command::Chose { id, .. } => menu::clicked(bus, &tracked.service, &path, *id),
+            _ => {
+                let rows = match *parent {
+                    0 => menu::layout(bus, &tracked.service, &path, tray.size),
+                    row => menu::submenu(bus, &tracked.service, &path, row, tray.size),
+                };
+                match rows {
+                    Some(rows) => {
+                        let _ = sender.send(Event::Menu {
+                            key: key.clone(),
+                            parent: *parent,
+                            rows,
+                        });
+                    }
+                    None => log::debug!("{key} did not answer for its menu"),
+                }
+            }
+        }
+        return;
+    }
 
     // The answer is a reply nobody reads: whatever the application does about it comes
     // back as a property change like any other, which is what the bar then draws.
@@ -692,6 +779,9 @@ fn act(bus: &mut Connection, tray: &Tray, command: &Command) {
         Command::Activate { x, y, .. } => ("Activate", vec![Arg::I32(*x), Arg::I32(*y)]),
         Command::Secondary { x, y, .. } => ("SecondaryActivate", vec![Arg::I32(*x), Arg::I32(*y)]),
         Command::Scroll { delta, .. } => ("Scroll", vec![Arg::I32(*delta), Arg::Str("vertical")]),
+        // Both were dealt with above, where the menu object rather than the item is what
+        // gets called.
+        Command::Menu { .. } | Command::Chose { .. } => return,
     };
     if let Err(e) = bus.send(
         &tracked.service,

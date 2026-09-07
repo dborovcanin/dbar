@@ -39,4 +39,16 @@ impl Color {
     pub fn is_transparent(self) -> bool {
         self.a == 0
     }
+
+    /// The same colour at a fraction of its opacity.
+    ///
+    /// What a menu wants for a row it will not let you choose and for the rule between two
+    /// groups of rows: the same ink, quieter, rather than a second colour the config has
+    /// to be told about.
+    pub fn faded(self, factor: f32) -> Color {
+        Color {
+            a: (self.a as f32 * factor.clamp(0.0, 1.0)).round() as u8,
+            ..self
+        }
+    }
 }

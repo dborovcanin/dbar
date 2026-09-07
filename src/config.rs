@@ -180,6 +180,8 @@ pub enum SeparatorColor {
 struct RawConfig {
     #[serde(default)]
     bar: RawBar,
+    #[serde(default)]
+    menu: RawMenu,
     #[serde(default, rename = "i3bar")]
     i3bar: RawI3Bar,
     #[serde(default)]
@@ -236,6 +238,57 @@ struct RawBar {
 
 fn default_icon_theme() -> String {
     "hicolor".to_string()
+}
+
+/// The menu a tray item opens, as written.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMenu {
+    /// What the menu is made of. Defaults to the bar's own background, so a menu looks
+    /// like the bar it came out of without being told to.
+    background: Option<String>,
+    foreground: Option<String>,
+    /// The row under the pointer.
+    highlight: Option<String>,
+    highlight_foreground: Option<String>,
+    /// What a row that cannot be chosen is written in.
+    disabled: Option<String>,
+    separator: Option<String>,
+    #[serde(default = "default_menu_padding")]
+    padding: f32,
+    #[serde(default = "default_menu_radius")]
+    radius: f32,
+    /// How wide a menu may get before its labels are cut short.
+    #[serde(default = "default_menu_width")]
+    max_width: f32,
+}
+
+impl Default for RawMenu {
+    fn default() -> Self {
+        RawMenu {
+            background: None,
+            foreground: None,
+            highlight: None,
+            highlight_foreground: None,
+            disabled: None,
+            separator: None,
+            padding: default_menu_padding(),
+            radius: default_menu_radius(),
+            max_width: default_menu_width(),
+        }
+    }
+}
+
+fn default_menu_padding() -> f32 {
+    8.0
+}
+
+fn default_menu_radius() -> f32 {
+    8.0
+}
+
+fn default_menu_width() -> f32 {
+    360.0
 }
 
 /// `on_click` as written: a program per button, each an argv.
@@ -548,6 +601,7 @@ impl Default for RawI3Bar {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bar: Bar,
+    pub menu: Menu,
     pub i3bar: I3Bar,
     /// Groups per position, in `POSITIONS` order.
     pub positions: [Vec<Group>; 3],
@@ -590,6 +644,20 @@ impl Bar {
         }
         name.is_some_and(|name| self.outputs.iter().any(|o| o == name))
     }
+}
+
+/// How the menu behind a tray icon is painted.
+#[derive(Debug, Clone)]
+pub struct Menu {
+    pub background: Color,
+    pub foreground: Color,
+    pub highlight: Color,
+    pub highlight_foreground: Color,
+    pub disabled: Color,
+    pub separator: Color,
+    pub padding: f32,
+    pub radius: f32,
+    pub max_width: f32,
 }
 
 /// How to start an external i3bar-protocol provider, when a module reads from one.
@@ -1320,8 +1388,31 @@ impl Config {
             }
         }
 
+        // A menu is not part of the bar's own surface, so it cannot inherit anything by
+        // sitting on it: what is not said here is taken from the bar and from the style
+        // every module starts out with.
+        let colour = |written: &Option<String>, fallback: Color| -> Result<Color> {
+            match written {
+                Some(name) => palette.get(name),
+                None => Ok(fallback),
+            }
+        };
+        let menu_background = colour(&raw.menu.background, bar.background)?;
+        let menu = Menu {
+            background: menu_background,
+            foreground: colour(&raw.menu.foreground, base.foreground)?,
+            highlight: colour(&raw.menu.highlight, base.foreground.faded(0.18))?,
+            highlight_foreground: colour(&raw.menu.highlight_foreground, base.foreground)?,
+            disabled: colour(&raw.menu.disabled, base.foreground.faded(0.45))?,
+            separator: colour(&raw.menu.separator, base.foreground.faded(0.25))?,
+            padding: raw.menu.padding.max(0.0),
+            radius: raw.menu.radius.max(0.0),
+            max_width: raw.menu.max_width.max(40.0),
+        };
+
         Ok(Config {
             bar,
+            menu,
             i3bar: I3Bar {
                 command: raw.i3bar.command.clone(),
                 args: raw.i3bar.args.clone(),
