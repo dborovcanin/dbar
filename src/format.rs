@@ -690,10 +690,11 @@ fn render_items(items: &[Item], fields: &crate::status::Fields, out: &mut String
     for item in items {
         match item {
             Item::Literal(text) => out.push_str(text),
-            Item::Chain(alts) => match render_chain(alts, fields) {
-                Some(text) => out.push_str(&text),
-                None => complete = false,
-            },
+            Item::Chain(alts) => {
+                if !render_chain(alts, fields, out) {
+                    complete = false;
+                }
+            }
             Item::Group(inner) => {
                 // A nested group answers for itself. Its absence is not the outer group's
                 // problem, so `{used {of $total}}` still shows what it knows.
@@ -707,40 +708,92 @@ fn render_items(items: &[Item], fields: &crate::status::Fields, out: &mut String
     complete
 }
 
-fn render_chain(alts: &[Alt], fields: &crate::status::Fields) -> Option<String> {
+/// Write the first alternative that has something to say, and report whether any did.
+///
+/// Written into the caller's buffer rather than handed back as a string of its own. This
+/// runs for every field of every module on every redraw, and the strings it would
+/// otherwise build are pushed onto that same buffer and dropped a moment later.
+fn render_chain(alts: &[Alt], fields: &crate::status::Fields, out: &mut String) -> bool {
     for alt in alts {
         match alt {
-            Alt::Literal(text) => return Some(text.clone()),
+            Alt::Literal(text) => {
+                out.push_str(text);
+                return true;
+            }
             Alt::Field { name, func } => {
                 let Some(value) = fields.get(name) else {
                     continue;
                 };
-                if let Some(text) = render_value(value, func.as_ref()) {
-                    return Some(text);
+                if render_value(value, func.as_ref(), out) {
+                    return true;
                 }
             }
         }
     }
-    None
+    false
 }
 
-fn render_value(value: &Value, func: Option<&Func>) -> Option<String> {
+/// Write one value, and say whether it had anything to write.
+///
+/// A value that says nothing writes nothing, so the caller has no cleaning up to do.
+fn render_value(value: &Value, func: Option<&Func>, out: &mut String) -> bool {
     match (value, func) {
-        (Value::Absent, _) => None,
-        (Value::Num { v, unit }, Some(Func::Num(args))) => Some(format_num(*v, *unit, args)),
-        (Value::Num { v, unit }, None) => Some(format_num(*v, *unit, &NumArgs::default())),
-        (Value::Text(text), Some(Func::Str(args))) => Some(format_str(text, args)),
-        (Value::Text(text), Some(Func::Upper)) => Some(text.to_uppercase()),
-        (Value::Text(text), Some(Func::Lower)) => Some(text.to_lowercase()),
-        (Value::Text(text), None) => Some(text.clone()),
-        (Value::Time(t), Some(Func::Time(args))) => format_time(*t, &args.pattern),
-        (Value::Time(t), None) => format_time(*t, "%H:%M"),
-        (Value::Dur(d), Some(Func::Dur(style))) => Some(format_dur(*d, *style)),
-        (Value::Dur(d), None) => Some(format_dur(*d, DurStyle::default())),
-        (Value::Flag(b), None) => Some(if *b { "yes" } else { "no" }.to_string()),
+        (Value::Absent, _) => false,
+        (Value::Num { v, unit }, Some(Func::Num(args))) => {
+            out.push_str(&format_num(*v, *unit, args));
+            true
+        }
+        (Value::Num { v, unit }, None) => {
+            out.push_str(&format_num(*v, *unit, &NumArgs::default()));
+            true
+        }
+        (Value::Text(text), Some(Func::Str(args))) => {
+            out.push_str(&format_str(text, args));
+            true
+        }
+        // The one case worth spelling out: text with no function is most of what a bar
+        // says, and it is a copy straight onto the end of what is already there.
+        (Value::Text(text), None) => {
+            out.push_str(text);
+            true
+        }
+        (Value::Text(text), Some(Func::Upper)) => {
+            out.extend(text.chars().flat_map(char::to_uppercase));
+            true
+        }
+        (Value::Text(text), Some(Func::Lower)) => {
+            out.extend(text.chars().flat_map(char::to_lowercase));
+            true
+        }
+        (Value::Time(t), Some(Func::Time(args))) => match format_time(*t, &args.pattern) {
+            Some(text) => {
+                out.push_str(&text);
+                true
+            }
+            None => false,
+        },
+        (Value::Time(t), None) => match format_time(*t, "%H:%M") {
+            Some(text) => {
+                out.push_str(&text);
+                true
+            }
+            None => false,
+        },
+        (Value::Dur(d), Some(Func::Dur(style))) => {
+            out.push_str(&format_dur(*d, *style));
+            true
+        }
+        (Value::Dur(d), None) => {
+            out.push_str(&format_dur(*d, DurStyle::default()));
+            true
+        }
+        (Value::Flag(b), None) => {
+            out.push_str(if *b { "yes" } else { "no" });
+            true
+        }
         // `check` rejects these when the config is read; a source that publishes a
         // different kind than it declared falls through to saying nothing.
-        _ => None,
+        _ => false,
     }
 }
 
