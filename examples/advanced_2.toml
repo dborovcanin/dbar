@@ -1,0 +1,405 @@
+# advanced_2 - Nord bottom rail.
+#
+# A continuous bottom panel with thin dividers. The focused window stays centered;
+# workspaces and playback live on the left, readings and the clock on the right.
+#
+# Run: dbar -c examples/advanced_2.toml
+# Inspiration: https://github.com/sejjy/mechabar (compact functional grouping)
+#
+# Same modules, readings, refresh intervals and controls as advanced.toml.
+# Weather and calendar retain its machine-specific script/key paths: adjust
+# module.weather.command, module.weather.params and module.clock.on_click locally.
+# Weather needs curl, jq and an OpenWeather key; see examples/weather.sh.
+# Font fallback is auto-detected. Text caps keep long titles, SSIDs and forecasts
+# from taking over the bar; alternate formats and weather paging still work.
+
+[bar]
+height = 28
+position = "bottom"
+layer = "bottom"
+margin = 0
+gap = 8
+font = "sans-serif 13"
+icon_size = 15
+
+[bar.background]
+color = "$background"
+radius = 0
+
+[colors]
+background = "#2e3440"
+surface = "#3b4252"
+raised = "#434c5e"
+text = "#eceff4"
+subtext = "#b7c2d4"
+accent = "#88c0d0"
+warning = "#ebcb8b"
+critical = "#bf616a"
+ink = "#242933"
+line = "#65738a"
+secondary = "#a3be8c"
+
+[left]
+groups = ["desktop", "playing"]
+
+[center]
+groups = ["window"]
+
+[right]
+groups = ["system", "connections", "controls", "world"]
+
+# Styles: alarms retain distinct fills in every palette. Hover never changes size.
+
+[style.panel]
+foreground = "$text"
+padding = 4
+icon_gap = 3
+
+[style.tile]
+background = "$surface"
+foreground = "$text"
+padding = 4
+icon_gap = 3
+
+[style.tile_alt]
+background = "$raised"
+foreground = "$text"
+padding = 4
+icon_gap = 3
+
+[style.warning]
+background = "$warning"
+foreground = "$ink"
+padding = 4
+icon_gap = 3
+
+[style.critical]
+background = "$critical"
+foreground = "$ink"
+padding = 4
+icon_gap = 3
+
+[style.pill]
+background = "$raised"
+foreground = "$text"
+padding = 7
+radius = 0
+
+[style.focused]
+background = "$accent"
+foreground = "$ink"
+padding = 7
+radius = 0
+
+[style.dim]
+foreground = "$subtext"
+padding = 7
+
+[style.hovered]
+background = "$raised"
+foreground = "$text"
+
+[style.accent]
+background = "$accent"
+foreground = "$ink"
+padding = 4
+icon_gap = 3
+
+# Groups: each module is placed exactly once. Empty dynamic groups disappear.
+
+[group.desktop]
+modules = ["workspaces", "mode"]
+background = "$background"
+radius = 0
+padding = 0
+spacing = 2
+
+[group.playing]
+modules = ["media"]
+background = "$background"
+radius = 0
+padding = 0
+spacing = 0
+
+[group.window]
+modules = ["title"]
+background = "$background"
+radius = 0
+padding = 0
+spacing = 0
+
+[group.system]
+modules = ["cpu", "memory", "temperature"]
+background = "$background"
+radius = 0
+padding = 0
+spacing = 0
+
+[group.system.separator]
+shape = "line"
+width = 7
+direction = "right"
+color = "$line"
+
+[group.connections]
+modules = ["language", "network", "tray"]
+background = "$background"
+radius = 0
+padding = 0
+spacing = 0
+
+[group.connections.separator]
+shape = "line"
+width = 7
+direction = "right"
+color = "$line"
+
+[group.controls]
+modules = ["volume", "brightness", "battery"]
+background = "$background"
+radius = 0
+padding = 0
+spacing = 0
+
+[group.controls.separator]
+shape = "line"
+width = 7
+direction = "right"
+color = "$line"
+
+[group.world]
+modules = ["weather", "clock"]
+background = "$background"
+radius = 0
+padding = 0
+spacing = 0
+
+[group.world.separator]
+shape = "line"
+width = 7
+direction = "right"
+color = "$line"
+
+[menu]
+background = "$surface"
+foreground = "$text"
+highlight = "$raised"
+disabled = "$subtext"
+separator = "$raised"
+radius = 0
+highlight_foreground = "$text"
+
+# Modules: formats, actions, state thresholds and source options come from advanced.toml.
+
+[module.workspaces]
+source = "sway:workspaces"
+style = "dim"
+min_width = 27
+
+[module.workspaces.states.focused]
+focused = true
+style = "focused"
+
+[module.workspaces.states.visible]
+visible = true
+style = "pill"
+
+[module.workspaces.states.urgent]
+urgent = true
+style = "critical"
+radius = 0
+
+[module.tray]
+source = "tray"
+style = "panel"
+padding = 6
+
+[module.tray.states.attention]
+field = "status"
+equals = "attention"
+background = "$critical"
+
+[module.media]
+source = "media"
+controls = true
+collapsible = true
+format = "{$artist  }$title"
+style = "panel"
+max_width = 180
+icon = "pause"
+
+[module.media.states.paused]
+field = "status"
+equals = "paused"
+foreground = "$subtext"
+icon = "play"
+
+[module.mode]
+source = "sway:mode"
+format = "$mode"
+style = "panel"
+foreground = "$ink"
+icon = "keyboard"
+background = "$warning"
+
+[module.title]
+source = "sway:window"
+style = "panel"
+max_width = 220
+
+[module.cpu]
+source = "cpu"
+interval = "2s"
+format = "$utilization.n(d:0)"
+min_width = 62
+style = "panel"
+icon = "cpu"
+
+[module.cpu.states.busy]
+above = 85
+style = "warning"
+
+[module.cpu.states.unreadable]
+state = "error"
+style = "critical"
+
+[module.memory]
+source = "memory"
+interval = "5s"
+format = "$percent.n(d:0)"
+format_alt = "$used.n(d:1) of $total.n(d:0){  swap $swap_percent}"
+min_width = 62
+style = "panel"
+icon = "memory"
+
+[module.memory.states.full]
+above = 90
+style = "warning"
+
+[module.temperature]
+source = "temperature"
+interval = "5s"
+format = "$temp.n(d:0)"
+format_alt = "$temp.n(d:0) $label"
+min_width = 62
+style = "panel"
+icon = "temperature"
+
+[module.temperature.states.warm]
+state = "warning"
+style = "warning"
+
+[module.temperature.states.hot]
+state = "critical"
+style = "critical"
+
+[module.language]
+source = "sway:language"
+format = "$short"
+format_alt = "$layout"
+style = "panel"
+icon = "keyboard"
+
+[module.language.layouts]
+"English (US)" = "EN"
+"Serbian (Latin)" = "SR"
+"Serbian" = "RS"
+
+[module.network]
+source = "network"
+interval = "2s"
+format = "$ssid|$device"
+format_alt = ["$down{  $up}", "$signal.n(d:0){  $dbm.n(d:0) dBm}"]
+style = "panel"
+icon = "wifi"
+max_width = 115
+
+[module.network.states.offline]
+field = "state"
+equals = "down"
+icon = "wifi-off"
+
+[module.volume]
+source = "audio"
+scroll = "5%"
+format = "$volume.n(d:0)"
+format_alt = "$volume.n(d:0)  $device"
+min_width = 62
+style = "panel"
+icon = "volume"
+
+[module.volume.states.headphones_muted]
+fields = { "muted" = "yes", "port" = "headphones" }
+foreground = "$subtext"
+icon = "headphones-muted"
+
+[module.volume.states.muted]
+field = "muted"
+equals = "yes"
+foreground = "$subtext"
+icon = "volume-muted"
+
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "headphones"
+
+[module.brightness]
+source = "backlight"
+scroll = "5%"
+format = "$brightness.n(d:0)"
+min_width = 62
+style = "panel"
+icon = "brightness"
+
+[module.battery]
+source = "battery"
+interval = "30s"
+format = "$percent.n(d:0)"
+format_alt = ["$percent.n(d:0)  $status{  $power.n(d:1)}  health $health.n(d:0)", "$percent.n(d:0){  $time.dur(style:short) left}"]
+min_width = 62
+style = "panel"
+icon = "battery"
+
+[module.battery.states.plugged]
+field = "supply"
+equals = "mains"
+icon = "battery-charging"
+
+[module.battery.states.warning]
+state = "warning"
+style = "warning"
+
+[module.battery.states.critical]
+state = "critical"
+style = "critical"
+
+# Middle click refreshes, right click changes wording, wheel changes location.
+[module.weather]
+source = "command"
+command = ["/home/dusan/dotfiles/scripts/dbar/weather.sh"]
+params = ["metric", "/home/dusan/.config/dbar/owm.key", "45.2517,19.8369", "44.8147,20.4143", "43.9365,18.7986"]
+interval = "once"
+pages = true
+refresh_button = "middle"
+alt_button = "right"
+fields = { "icon" = "text", "weather" = "text", "location" = "text", "temp" = "number", "wind" = "number", "direction" = "text", "forecast_icon" = "text", "forecast_avg" = "number", "forecast_min" = "number", "forecast_max" = "number" }
+format = "{$icon }$weather|'unavailable'{ ($location)}{ $temp.n(d:0) °C}{, $wind.n(d:1) m/s $direction}"
+format_alt = ["{$forecast_icon }{$location, }next 9 h: $forecast_avg.n(d:0)|'unavailable'{ °C ($forecast_min.n(d:0) to $forecast_max.n(d:0))}", "{$icon }$temp.n(d:0)|'unavailable'"]
+style = "panel"
+max_width = 130
+
+[module.weather.states.stale]
+state = "error"
+foreground = "$subtext"
+
+# Left click opens the same external calendar as advanced.toml.
+[module.clock]
+source = "time"
+interval = "1m"
+format = "$now.time(f:'%a %d %b  %H:%M')"
+on_click = { "left" = ["/home/dusan/dotfiles/scripts/dbar/sway_calendar.sh"] }
+style = "panel"
+foreground = "$accent"
+icon = "clock"
+
