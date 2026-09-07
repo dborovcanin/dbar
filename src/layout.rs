@@ -513,8 +513,15 @@ const ELLIPSIS: &str = "\u{2026}";
 ///
 /// Widths come from the text backend, so the search is over character boundaries by
 /// bisection rather than by counting bytes, which would cut multi-byte characters in half.
+///
+/// Only a window of the text is ever measured. Measuring means shaping, which is charged
+/// per character and cached by string, and what arrives here is somebody else's: a window
+/// title, a line from a script, a track name. A module a few hundred pixels wide can show
+/// a few hundred characters, so shaping a hundred thousand of them to find that out would
+/// be the sender deciding how much work the bar does, and how much memory the cache holds.
 fn truncate(text: &str, budget: f32, measure: &mut dyn Measure) -> String {
-    if measure.measure(text) <= budget {
+    let (text, whole) = window(text, budget, measure);
+    if whole && measure.measure(text) <= budget {
         return text.to_string();
     }
     let ellipsis = measure.measure(ELLIPSIS);
@@ -540,6 +547,31 @@ fn truncate(text: &str, budget: f32, measure: &mut dyn Measure) -> String {
         }
     }
     format!("{}{ELLIPSIS}", text[..cuts[best]].trim_end())
+}
+
+/// As much of `text` as could possibly be drawn in `budget`, and whether that is all of it.
+///
+/// Doubled from a small window until it overflows, so the work is proportional to what
+/// fits rather than to what was sent: at most twice the characters that can be shown are
+/// ever measured, whatever the font and whatever arrives.
+fn window<'a>(text: &'a str, budget: f32, measure: &mut dyn Measure) -> (&'a str, bool) {
+    const FIRST: usize = 32;
+    let mut take = FIRST;
+    loop {
+        let end = text
+            .char_indices()
+            .nth(take)
+            .map(|(i, _)| i)
+            .unwrap_or(text.len());
+        let head = &text[..end];
+        if end == text.len() {
+            return (head, true);
+        }
+        if measure.measure(head) > budget {
+            return (head, false);
+        }
+        take *= 2;
+    }
 }
 
 /// The wording a module is currently showing.
@@ -1914,6 +1946,39 @@ padding = 0
         assert!(frame.rows[0].arrow.is_none());
         // The labels start in the same place regardless.
         assert_eq!(frame.rows[0].text_x, frame.rows[2].text_x);
+    }
+
+    /// What a module is asked to draw is somebody else's: a window title, a line from a
+    /// script. Finding the few characters that fit must not cost what the sender sent, in
+    /// shaping or in what the cache then holds on to.
+    #[test]
+    fn a_very_long_line_is_not_measured_end_to_end() {
+        /// Records the longest string it was ever asked about.
+        struct Longest(usize);
+        impl Measure for Longest {
+            fn measure(&mut self, text: &str) -> f32 {
+                self.0 = self.0.max(text.chars().count());
+                text.chars().count() as f32
+            }
+        }
+
+        let long = "x".repeat(256 * 1024);
+        let mut measure = Longest(0);
+        let shown = truncate(&long, 20.0, &mut measure);
+        assert_eq!(shown.chars().count(), 20, "19 characters and an ellipsis");
+        assert!(
+            measure.0 <= 128,
+            "measured a string of {} characters to draw 20 of them",
+            measure.0
+        );
+
+        // A line that fits is still handed back whole, however close to the budget it is.
+        let mut measure = Longest(0);
+        assert_eq!(truncate("short", 20.0, &mut measure), "short");
+        assert_eq!(
+            truncate("exactly twenty chars", 20.0, &mut measure),
+            "exactly twenty chars"
+        );
     }
 
     /// The first frame has nothing on screen to compare against, so all of it is new.
