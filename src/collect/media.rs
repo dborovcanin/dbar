@@ -185,19 +185,25 @@ fn run(sender: calloop::channel::Sender<Reading>, commands: OwnedFd) -> Result<(
         ];
         // A read takes everything the socket had, which is often several messages, so a
         // message can be in hand while the socket itself has nothing more to report.
-        // Sleeping then would hold a track change until some other application spoke.
-        if !bus.has_message() {
-            // SAFETY: both descriptors are owned by this thread and outlive the call, and
-            // the length is the length of the array they are in.
-            let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
-            if ready < 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(error).context("waiting on the session bus");
+        // Sleeping then would hold a track change until some other application spoke; not
+        // asking at all would hold play and pause behind whatever backlog there is, so the
+        // wait is skipped rather than the question.
+        let in_hand = bus.has_message();
+        let timeout = match in_hand {
+            true => 0,
+            false => -1,
+        };
+        // SAFETY: both descriptors are owned by this thread and outlive the call, and the
+        // length is the length of the array they are in.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
             }
-        } else {
+            return Err(error).context("waiting on the session bus");
+        }
+        if in_hand {
             fds[0].revents = libc::POLLIN;
         }
 

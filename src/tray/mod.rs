@@ -313,48 +313,51 @@ fn run(
     publish(sender, &tray);
 
     loop {
+        let mut fds = [
+            libc::pollfd {
+                fd: bus.fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: wake.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            },
+        ];
         // Anything already in hand - set aside by a call, or read off the socket along
-        // with the message before it - must be dealt with before sleeping on a socket
-        // that has nothing left to say.
-        if !bus.has_message() {
-            let mut fds = [
-                libc::pollfd {
-                    fd: bus.fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: wake.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
-            // SAFETY: both descriptors are owned by this thread and outlive the call, and
-            // the length is the length of the array they are in.
-            let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
-            if ready < 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == std::io::ErrorKind::Interrupted {
-                    continue;
-                }
-                return Err(error).context("waiting on the session bus");
-            }
-            if fds[1].revents != 0 {
-                let mut buffer = [0u8; 64];
-                // SAFETY: the buffer is owned here and the length is its own.
-                let read = unsafe {
-                    libc::read(wake.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len())
-                };
-                if read <= 0 {
-                    return Ok(());
-                }
-                while let Ok(command) = orders.try_recv() {
-                    act(&mut bus, &tray, sender, &command);
-                }
-            }
-            if fds[0].revents == 0 {
+        // with the message before it - is dealt with without sleeping on a socket that has
+        // nothing left to say. The clicks are still asked about: a menu that is opening
+        // must not wait behind a backlog of somebody else's property changes.
+        let in_hand = bus.has_message();
+        let timeout = match in_hand {
+            true => 0,
+            false => -1,
+        };
+        // SAFETY: both descriptors are owned by this thread and outlive the call, and
+        // the length is the length of the array they are in.
+        let ready = unsafe { libc::poll(fds.as_mut_ptr(), 2, timeout) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
+            return Err(error).context("waiting on the session bus");
+        }
+        if fds[1].revents != 0 {
+            let mut buffer = [0u8; 64];
+            // SAFETY: the buffer is owned here and the length is its own.
+            let read =
+                unsafe { libc::read(wake.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
+            if read <= 0 {
+                return Ok(());
+            }
+            while let Ok(command) = orders.try_recv() {
+                act(&mut bus, &tray, sender, &command);
+            }
+        }
+        if !in_hand && fds[0].revents == 0 {
+            continue;
         }
 
         let message = bus.receive()?;
