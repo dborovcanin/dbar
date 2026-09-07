@@ -24,9 +24,19 @@ const LARGEST: i64 = 512;
 pub fn from_pixmaps(value: &Value, target: u32) -> Option<Raster> {
     let mut best: Option<(u32, u32, &[u8])> = None;
     for entry in value.items() {
+        // One entry that makes no sense is one size the application offered badly, not a
+        // reason to draw nothing: the others are still there, and one of them may be the
+        // one that would have been chosen anyway.
         let parts = entry.items();
-        let (width, height) = (parts.first()?.as_int()?, parts.get(1)?.as_int()?);
-        let pixels = parts.get(2)?.as_bytes()?;
+        let (Some(width), Some(height)) = (
+            parts.first().and_then(Value::as_int),
+            parts.get(1).and_then(Value::as_int),
+        ) else {
+            continue;
+        };
+        let Some(pixels) = parts.get(2).and_then(Value::as_bytes) else {
+            continue;
+        };
         if width <= 0 || height <= 0 || width > LARGEST || height > LARGEST {
             continue;
         }
@@ -401,6 +411,39 @@ mod tests {
             Value::Bytes(vec![0; 16]),
         ])]);
         assert_eq!(from_pixmaps(&value, 20), None);
+    }
+
+    /// An application that offers one unusable size alongside a good one still gets its
+    /// icon drawn. Giving up on the whole property at the first bad entry would lose an
+    /// icon that was already found.
+    #[test]
+    fn one_bad_entry_does_not_lose_the_good_ones() {
+        let good = Value::Seq(vec![
+            Value::Int(2),
+            Value::Int(2),
+            Value::Bytes(vec![255; 16]),
+        ]);
+        // Too few parts, then a size that is not a number, then bytes that are not bytes.
+        let stunted = Value::Seq(vec![Value::Int(2)]);
+        let wrong_kind = Value::Seq(vec![
+            Value::Str("two".into()),
+            Value::Int(2),
+            Value::Bytes(vec![255; 16]),
+        ]);
+        let not_bytes = Value::Seq(vec![Value::Int(2), Value::Int(2), Value::Int(0)]);
+
+        for bad in [stunted, wrong_kind, not_bytes] {
+            // Before the good one and after it: a bad entry must not end the search from
+            // either side.
+            for entries in [
+                vec![bad.clone(), good.clone()],
+                vec![good.clone(), bad.clone()],
+            ] {
+                let raster =
+                    from_pixmaps(&Value::Seq(entries), 2).expect("the good entry is still an icon");
+                assert_eq!((raster.width, raster.height), (2, 2));
+            }
+        }
     }
 
     /// A pixmap that says it is larger than the bytes it brought would be read past the
