@@ -85,6 +85,9 @@ enum Anchor2 {
 struct OpenMenu {
     /// The tray item this menu belongs to, so a choice can be sent back to it.
     key: String,
+    /// The screen the menu stack is hanging from, so it can be taken down with the bar
+    /// when that screen goes. Submenus inherit it from the menu that opened them.
+    output: wl_output::WlOutput,
     rows: Vec<crate::tray::menu::Row>,
     popup: Popup,
     pool: SlotPool,
@@ -294,7 +297,12 @@ pub struct App {
     /// first on screen: the second is anchored to a row of it.
     menus: Vec<OpenMenu>,
     /// The item whose menu is being opened, while its rows are still being read.
-    opening: Option<(usize, String, f32, f32)>,
+    ///
+    /// The screen is remembered as the output itself rather than a position in `bars`: a
+    /// monitor unplugged between the ask and the answer moves every bar after it along,
+    /// and an index kept across that would open the menu on the wrong screen or index
+    /// past the end.
+    opening: Option<(wl_output::WlOutput, String, f32, f32)>,
     /// Set when the status provider itself has failed; shown in place of the groups.
     fault: Option<String>,
     /// Item names from the last "nothing matched" warning, so it is not repeated per redraw.
@@ -599,8 +607,9 @@ impl App {
         let Some(commands) = &self.tray_commands else {
             return;
         };
+        let output = self.bars[bar].output.clone();
         self.menus.clear();
-        self.opening = Some((bar, key.clone(), x, width));
+        self.opening = Some((output, key.clone(), x, width));
         commands.send(crate::tray::Command::Menu { key, parent: 0 });
     }
 
@@ -632,8 +641,13 @@ impl App {
         // Where it hangs from: the module for an item's own menu, the row for a submenu.
         let anchor = match parent {
             0 => match self.opening.take() {
-                Some((bar, opening_key, x, width)) if opening_key == key => {
-                    Anchor2::Bar { bar, x, width }
+                Some((output, opening_key, x, width)) if opening_key == key => {
+                    // The screen may have gone while the rows were being read, in which
+                    // case there is nothing left to hang the menu from.
+                    match self.bars.iter().position(|b| b.output == output) {
+                        Some(bar) => Anchor2::Bar { bar, x, width },
+                        None => return,
+                    }
                 }
                 // The click that asked for this is long gone, or was for something else.
                 _ => return,
@@ -764,8 +778,13 @@ impl App {
             }
         };
 
+        let output = match &anchor {
+            Anchor2::Bar { bar, .. } => self.bars[*bar].output.clone(),
+            Anchor2::Row { level, .. } => self.menus[*level].output.clone(),
+        };
         self.menus.push(OpenMenu {
             key: key.to_string(),
+            output,
             rows,
             popup,
             pool,
@@ -1279,6 +1298,13 @@ impl App {
         let Some(i) = self.bars.iter().position(|b| &b.output == output) else {
             return;
         };
+        // A menu hangs from a bar's surface, and one being opened is waiting for a screen
+        // that will not be there when the rows arrive. Both go with the bar.
+        if self.menus.first().is_some_and(|m| &m.output == output)
+            || self.opening.as_ref().is_some_and(|(o, ..)| o == output)
+        {
+            self.close_menus();
+        }
         let bar = self.bars.remove(i);
         log::info!("bar off output {}", bar.name.as_deref().unwrap_or("?"));
         self.warn_if_nowhere();
