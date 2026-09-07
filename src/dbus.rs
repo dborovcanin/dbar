@@ -26,6 +26,20 @@ use anyhow::{Context as _, Result, bail};
 /// application would take the whole tray down with it.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long the message at the front of `bytes` is, once enough of its header is there.
+///
+/// The length of the fields array sits at the end of the fixed header, and the body
+/// follows it once padded to eight.
+fn message_length(bytes: &[u8]) -> Option<usize> {
+    const HEADER: usize = 16;
+    if bytes.len() < HEADER {
+        return None;
+    }
+    let fields_length = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
+    let body_length = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    Some((HEADER + fields_length).div_ceil(8) * 8 + body_length)
+}
+
 /// A value read off the bus.
 ///
 /// The numeric kinds are collapsed where nothing the bar reads tells them apart: what
@@ -398,8 +412,22 @@ impl Connection {
 
     /// Whether a message is already in hand, so a caller waiting on the socket knows to
     /// come back before sleeping on it again.
-    pub fn has_deferred(&self) -> bool {
-        !self.deferred.is_empty()
+    ///
+    /// A read takes whatever the socket has, which is often more than one message, so the
+    /// question is not only what a call set aside: the rest of that read is sitting in the
+    /// buffer and the socket has nothing left to report. Sleeping on it then is sleeping
+    /// through an answer that has already arrived - a tray icon that never updates until
+    /// some unrelated application says something.
+    pub fn has_message(&self) -> bool {
+        !self.deferred.is_empty() || self.buffered()
+    }
+
+    /// Whether the bytes already read hold a whole message.
+    ///
+    /// The header says how long the message is, so this is a length check: nothing is
+    /// parsed, and nothing is taken off the buffer.
+    fn buffered(&self) -> bool {
+        message_length(&self.pending).is_some_and(|total| self.pending.len() >= total)
     }
 
     /// Read one message, waiting for it if none has arrived.
@@ -475,25 +503,9 @@ impl Connection {
 
     /// One message out of what has already arrived, if a whole one is there.
     fn take_message(&mut self) -> Result<Option<Message>> {
-        const HEADER: usize = 16;
-        if self.pending.len() < HEADER {
+        let Some(total) = message_length(&self.pending) else {
             return Ok(None);
-        }
-        // The length of the fields array sits at the end of the fixed header, and the body
-        // follows it once padded to eight.
-        let fields_length = u32::from_le_bytes([
-            self.pending[12],
-            self.pending[13],
-            self.pending[14],
-            self.pending[15],
-        ]) as usize;
-        let body_length = u32::from_le_bytes([
-            self.pending[4],
-            self.pending[5],
-            self.pending[6],
-            self.pending[7],
-        ]) as usize;
-        let total = (HEADER + fields_length).div_ceil(8) * 8 + body_length;
+        };
         if self.pending.len() < total {
             return Ok(None);
         }
@@ -962,6 +974,57 @@ mod tests {
             Some("/tmp/bus")
         );
         assert_eq!(socket_path("tcp:host=localhost,port=1"), None);
+    }
+
+    /// One read takes whatever the socket had, which is regularly several messages. The
+    /// second of them is then in hand while the socket has nothing left to say, and a
+    /// thread that slept on readiness alone slept through it - a tray icon that changed
+    /// and did not redraw until some other application happened to speak.
+    #[test]
+    fn a_message_already_read_counts_as_one_to_deal_with() {
+        let signal = |member: &str| {
+            build_message(
+                1,
+                4,
+                0,
+                &[
+                    (1u8, Arg::Path("/org/example")),
+                    (2u8, Arg::Str("org.example.Thing")),
+                    (3u8, Arg::Str(member)),
+                ],
+                &[],
+            )
+        };
+
+        let (socket, _other) = UnixStream::pair().expect("a socket pair");
+        let mut bus = Connection {
+            socket,
+            serial: 0,
+            pending: Vec::new(),
+            deferred: std::collections::VecDeque::new(),
+        };
+        bus.pending.extend_from_slice(&signal("First"));
+        bus.pending.extend_from_slice(&signal("Second"));
+
+        assert!(bus.has_message(), "two whole messages are in hand");
+        assert_eq!(
+            bus.receive().expect("the first").member.as_deref(),
+            Some("First")
+        );
+        assert!(
+            bus.has_message(),
+            "the second is still buffered, and nothing more is coming over the socket"
+        );
+        assert_eq!(
+            bus.receive().expect("the second").member.as_deref(),
+            Some("Second")
+        );
+        assert!(!bus.has_message(), "and now there is nothing left");
+
+        // Half a message is not one to act on: waiting for the rest is the socket's job.
+        let whole = signal("Third");
+        bus.pending.extend_from_slice(&whole[..whole.len() - 1]);
+        assert!(!bus.has_message());
     }
 
     #[test]

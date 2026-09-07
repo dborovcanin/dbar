@@ -313,9 +313,10 @@ fn run(
     publish(sender, &tray);
 
     loop {
-        // Anything a call set aside is already in hand and must be dealt with before
-        // sleeping on a socket that may have nothing left to say.
-        if !bus.has_deferred() {
+        // Anything already in hand - set aside by a call, or read off the socket along
+        // with the message before it - must be dealt with before sleeping on a socket
+        // that has nothing left to say.
+        if !bus.has_message() {
             let mut fds = [
                 libc::pollfd {
                     fd: bus.fd(),
