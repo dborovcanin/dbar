@@ -59,6 +59,25 @@ pub enum Value {
 }
 
 impl Value {
+    /// Whether two values would draw the same thing.
+    ///
+    /// Numbers are compared by their bits rather than by `==`, so a source that reports a
+    /// NaN - a rate over no elapsed time, a sensor that answered nonsense - reports the
+    /// same NaN as unchanged instead of repainting the bar for ever.
+    pub fn same(&self, other: &Value) -> bool {
+        match (self, other) {
+            (Value::Num { v: a, unit: ua }, Value::Num { v: b, unit: ub }) => {
+                ua == ub && a.to_bits() == b.to_bits()
+            }
+            (Value::Text(a), Value::Text(b)) => a == b,
+            (Value::Time(a), Value::Time(b)) => a == b,
+            (Value::Dur(a), Value::Dur(b)) => a == b,
+            (Value::Flag(a), Value::Flag(b)) => a == b,
+            (Value::Absent, Value::Absent) => true,
+            _ => false,
+        }
+    }
+
     /// The number this holds, if it holds one.
     pub fn num(&self) -> Option<f64> {
         match *self {
@@ -115,6 +134,17 @@ pub struct Fields {
 }
 
 impl Fields {
+    /// Whether two sets of fields would draw the same thing, order and all.
+    ///
+    /// The order is part of it because a format may take fields as they come, and the
+    /// primary is because a state rule keys on it.
+    pub fn same(&self, other: &Fields) -> bool {
+        self.primary == other.primary
+            && self.entries.len() == other.entries.len()
+            && std::iter::zip(&self.entries, &other.entries)
+                .all(|((n, a), (m, b))| n == m && a.same(b))
+    }
+
     pub fn set(&mut self, name: &'static str, value: Value) {
         match self.entries.iter_mut().find(|(n, _)| *n == name) {
             Some(entry) => entry.1 = value,

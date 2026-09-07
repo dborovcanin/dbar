@@ -238,6 +238,13 @@ pub struct Reading {
     pub state: State,
 }
 
+impl Reading {
+    /// Whether this reading would draw the same as another.
+    pub fn same(&self, other: &Reading) -> bool {
+        self.state == other.state && self.fields.same(&other.fields)
+    }
+}
+
 pub trait Collector {
     fn read(&mut self) -> Result<Reading>;
 }
@@ -330,11 +337,20 @@ impl Registry {
                     }
                     entry.failures = 0;
                     entry.reported = false;
-                    entry.readings = vec![reading];
+                    // Most of what a bar shows changes rarely: a disk that is still 41%
+                    // full draws exactly what it drew a minute ago. Saying so lets the
+                    // whole redraw be skipped, and saves replacing the reading as well.
+                    if !matches!(entry.readings.as_slice(), [old] if old.same(&reading)) {
+                        entry.readings = vec![reading];
+                        changed = true;
+                    }
                 }
                 Err(e) => {
                     // The last good reading stays on screen, marked as stale, rather than
-                    // the module vanishing because a file was busy for one tick.
+                    // the module vanishing because a file was busy for one tick. A source
+                    // that stays broken is already drawn as stale, so only the first
+                    // failure is worth a redraw.
+                    changed |= entry.readings.iter().any(|r| r.state != State::Error);
                     for reading in &mut entry.readings {
                         reading.state = State::Error;
                     }
@@ -346,7 +362,6 @@ impl Registry {
                 }
             }
             entry.due = entry.next_due(now);
-            changed = true;
         }
         changed
     }
@@ -559,6 +574,60 @@ mod tests {
                 .check(which.fields())
                 .unwrap_or_else(|e| panic!("{} default format: {e:#}", which.name()));
         }
+    }
+
+    /// A source that reads the same value again has nothing for the bar to redraw, and
+    /// says so: a redraw repaints the whole surface, so a disk that is still 41% full
+    /// would otherwise cost a full frame every time its interval came round.
+    #[test]
+    fn a_reading_that_did_not_change_is_not_a_change() {
+        struct Fixed(Option<f64>);
+        impl Collector for Fixed {
+            fn read(&mut self) -> Result<Reading> {
+                let Some(v) = self.0 else {
+                    anyhow::bail!("nothing to read");
+                };
+                let mut fields = Fields::default();
+                fields.set(
+                    "used",
+                    crate::status::Value::Num {
+                        v,
+                        unit: crate::status::Unit::Percent,
+                    },
+                );
+                Ok(Reading {
+                    fields,
+                    state: State::Idle,
+                })
+            }
+        }
+
+        let entry = |collector: Box<dyn Collector>| Entry {
+            collector,
+            interval: Duration::from_secs(0),
+            readings: vec![Reading::default()],
+            due: Some(Instant::now()),
+            watched: false,
+            which: Which::Cpu,
+            failures: 0,
+            reported: false,
+        };
+
+        let mut registry = Registry {
+            entries: vec![entry(Box::new(Fixed(Some(41.0))))],
+        };
+        assert!(registry.tick(), "the first reading is new");
+        registry.entries[0].due = Some(Instant::now());
+        assert!(!registry.tick(), "the same reading again is not");
+
+        // A source that has gone is drawn as stale once, not repainted for as long as it
+        // stays broken.
+        let mut failing = Registry {
+            entries: vec![entry(Box::new(Fixed(None)))],
+        };
+        assert!(failing.tick(), "going stale is a change");
+        failing.entries[0].due = Some(Instant::now());
+        assert!(!failing.tick(), "staying stale is not");
     }
 
     #[test]

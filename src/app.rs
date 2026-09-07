@@ -150,6 +150,12 @@ struct Bar {
     configured: bool,
     dirty: bool,
     frame_pending: bool,
+    /// The size and scale of the last buffer actually put on screen, when there is one.
+    ///
+    /// A redraw whose frame paints the same as the one already up has nothing to send, and
+    /// this is what says so safely: the first draw, and the first after a resize or a
+    /// scale change, has to commit whatever the frame looks like.
+    presented: Option<(u32, u32, i32)>,
 }
 
 impl Bar {
@@ -222,6 +228,7 @@ impl Bar {
             configured: false,
             dirty: true,
             frame_pending: false,
+            presented: None,
         })
     }
 }
@@ -1144,6 +1151,18 @@ impl App {
         let damage = frame.damage(&self.bars[i].frame);
         self.bars[i].frame = frame;
 
+        // A source that came due and read the same value as last time invalidates the bar
+        // all the same, and most of what a bar shows changes rarely. Nothing having moved
+        // means the pixels on screen are already right, so the buffer is not painted, the
+        // surface is not committed, and the compositor is not woken: what a redraw costs
+        // then is one layout.
+        let bar = &self.bars[i];
+        if bar.presented == Some((bar.width, bar.height, bar.scale))
+            && matches!(&damage, layout::Damage::Rects(rects) if rects.is_empty())
+        {
+            return Ok(());
+        }
+
         let App {
             bars,
             painter,
@@ -1214,6 +1233,7 @@ impl App {
         bar.frame_pending = true;
         buffer.attach_to(surface).context("attaching the buffer")?;
         bar.layer.commit();
+        bar.presented = Some((bar.width, bar.height, bar.scale));
         Ok(())
     }
 
