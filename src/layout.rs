@@ -64,15 +64,15 @@ impl<'a> Inputs<'a> {
         }
     }
 
-    /// The window title this bar is about: the one on its own screen, or whichever has the
+    /// The window this bar is about: the one on its own screen, or whichever has the
     /// session's focus.
-    fn window(&self, scope: Scope) -> Option<&str> {
+    fn window(&self, scope: Scope) -> Option<&crate::sway::Window> {
         let sway = self.sway;
         let output = match scope {
             Scope::Output => self.output.or(sway.focused_output.as_deref()),
             Scope::Session => sway.focused_output.as_deref(),
         }?;
-        sway.windows.get(output).map(String::as_str)
+        sway.windows.get(output)
     }
 }
 
@@ -751,9 +751,19 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                 }
             }
             Source::SwayWindow(scope) => {
-                if let Some(title) = inputs.window(*scope) {
+                if let Some(window) = inputs.window(*scope) {
                     let mut fields = Fields::default();
-                    fields.set("title", Value::Text(title.to_string()));
+                    fields.set("title", Value::Text(window.title.clone()));
+                    // One or the other, never both: what a Wayland client calls itself, or
+                    // what an X11 one does. The one the window does not have is absent
+                    // rather than empty, so `{$app_id}` disappears instead of drawing a
+                    // gap, and `$app_id|$class` names whichever it is.
+                    for (name, value) in [("app_id", &window.app_id), ("class", &window.class)] {
+                        match value.is_empty() {
+                            true => fields.set(name, Value::Absent),
+                            false => fields.set(name, Value::Text(value.clone())),
+                        }
+                    }
                     out.push(Candidate {
                         art: None,
                         module,
@@ -1751,15 +1761,56 @@ padding = 0
                 workspace("2", "HDMI-A-1", false, true),
                 workspace("3", "DP-1", false, false),
             ],
-            windows: [
-                ("DP-1".to_string(), "vim".to_string()),
-                ("HDMI-A-1".to_string(), "a page".to_string()),
-            ]
-            .into_iter()
-            .collect(),
+            windows: [("DP-1", "vim", "foot"), ("HDMI-A-1", "a page", "firefox")]
+                .into_iter()
+                .map(|(output, title, app_id)| {
+                    (
+                        output.to_string(),
+                        crate::sway::Window {
+                            title: title.to_string(),
+                            app_id: app_id.to_string(),
+                            class: String::new(),
+                        },
+                    )
+                })
+                .collect(),
             focused_output: Some("DP-1".to_string()),
             ..SwayState::default()
         }
+    }
+
+    /// A window module can be written against what the window is, not only what it is
+    /// showing: a rule that gives one program its own colour must not key on a title that
+    /// changes with every tab.
+    #[test]
+    fn a_window_module_can_name_what_the_window_is() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["title"]
+
+[module.title]
+source = "sway:window"
+format = "$app_id|$class|'?': $title"
+"##;
+        let cfg = Config::parse(config).expect("test config parses");
+        let sway = two_screens();
+        let inputs = Inputs {
+            items: &[],
+            native: &Registry::new(&Default::default()),
+            sway: &sway,
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed: &Default::default(),
+            waiting: &Default::default(),
+            spin: 0,
+            tray: &Default::default(),
+            output: Some("HDMI-A-1"),
+        };
+        let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
+        assert_eq!(frame.groups[0].modules[0].text, "firefox: a page");
     }
 
     /// One module, one icon per application - the same expansion a workspace list gets.

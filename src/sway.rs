@@ -36,10 +36,36 @@ const EVENT_MODE: u32 = 0x8000_0002;
 pub const DEFAULT_MODE: &str = "default";
 
 /// What the focused-window module can offer a format.
-pub const WINDOW_FIELDS: &[FieldSpec] = &[FieldSpec {
-    name: "title",
-    kind: Kind::Text,
-}];
+///
+/// The title is what a window says it is showing, and changes as it does. The other two
+/// are what it *is*: `app_id` for a Wayland client, `class` for an X11 one through
+/// Xwayland, and an application sets one or the other rather than both. Together they are
+/// what a state rule keys on to give one program its own colour without matching on a
+/// title that changes every time a tab does.
+pub const WINDOW_FIELDS: &[FieldSpec] = &[
+    FieldSpec {
+        name: "title",
+        kind: Kind::Text,
+    },
+    FieldSpec {
+        name: "app_id",
+        kind: Kind::Text,
+    },
+    FieldSpec {
+        name: "class",
+        kind: Kind::Text,
+    },
+];
+
+/// A window, as much of it as a bar has any use for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Window {
+    pub title: String,
+    /// What a Wayland client calls itself. Empty for an X11 one.
+    pub app_id: String,
+    /// What an X11 client calls itself, through Xwayland. Empty for a Wayland one.
+    pub class: String,
+}
 
 /// What one workspace can offer a format.
 pub const WORKSPACE_FIELDS: &[FieldSpec] = &[FieldSpec {
@@ -104,7 +130,7 @@ pub struct SwayState {
     /// One per output rather than one altogether, because only one window in the session
     /// is focused and every other screen still has something on it: a bar that showed the
     /// focused title on all of them would be wrong everywhere but where the pointer is.
-    pub windows: HashMap<String, String>,
+    pub windows: HashMap<String, Window>,
     /// Which screen the compositor's focus is on, for a bar that does not know its own.
     pub focused_output: Option<String>,
     /// The layout of the keyboard last switched, or nothing while no module asks for one.
@@ -223,31 +249,44 @@ fn focus_head(node: &serde_json::Value) -> &serde_json::Value {
 ///
 /// The root's children are the outputs, so one pass over them covers every screen rather
 /// than only the one the keyboard is on.
-fn windows_by_output(tree: &serde_json::Value) -> HashMap<String, String> {
+fn windows_by_output(tree: &serde_json::Value) -> HashMap<String, Window> {
     let mut windows = HashMap::new();
     for output in children(tree) {
         let Some(name) = output.get("name").and_then(|v| v.as_str()) else {
             continue;
         };
-        if let Some(title) = title_of(focus_head(output)) {
-            windows.insert(name.to_string(), title);
+        if let Some(window) = window_of(focus_head(output)) {
+            windows.insert(name.to_string(), window);
         }
     }
     windows
 }
 
-/// The title a node carries, if it is a window at all.
+/// The window a node is, if it is one at all.
 ///
 /// The root, the outputs and the workspace containers all have a name and none of them is
 /// a window; an application id, or the properties an X11 client brings, is what tells them
-/// apart.
-fn title_of(node: &serde_json::Value) -> Option<String> {
-    if node.get("app_id").is_none() && node.get("window_properties").is_none() {
+/// apart - and is also what the window calls itself, so the test and the answer are the
+/// same two fields.
+fn window_of(node: &serde_json::Value) -> Option<Window> {
+    let text = |value: Option<&serde_json::Value>| {
+        value
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let app_id = node.get("app_id").filter(|v| !v.is_null());
+    let class = node
+        .get("window_properties")
+        .and_then(|properties| properties.get("class"));
+    if app_id.is_none() && class.is_none() {
         return None;
     }
-    node.get("name")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
+    Some(Window {
+        title: text(node.get("name")),
+        app_id: text(app_id),
+        class: text(class),
+    })
 }
 
 /// Re-read the two halves a workspace or window event can have changed.
@@ -621,8 +660,39 @@ mod tests {
     fn every_screen_reports_the_window_it_is_showing() {
         let tree: serde_json::Value = serde_json::from_str(TREE).expect("a tree parses");
         let windows = windows_by_output(&tree);
-        assert_eq!(windows.get("DP-1").map(String::as_str), Some("vim"));
-        assert_eq!(windows.get("HDMI-A-1").map(String::as_str), Some("a page"));
+        assert_eq!(windows.get("DP-1").map(|w| w.title.as_str()), Some("vim"));
+        assert_eq!(
+            windows.get("HDMI-A-1").map(|w| w.title.as_str()),
+            Some("a page")
+        );
+    }
+
+    /// A title changes every time a tab does; what the window *is* does not. A rule that
+    /// wants one program its own colour keys on that instead, so both names the window
+    /// could be known by are published - the Wayland one, and the X11 one that arrives
+    /// through Xwayland.
+    #[test]
+    fn a_window_says_what_it_is_as_well_as_what_it_shows() {
+        let tree: serde_json::Value = serde_json::from_str(TREE).expect("a tree parses");
+        let windows = windows_by_output(&tree);
+        let wayland = windows.get("DP-1").expect("a window on DP-1");
+        assert_eq!(wayland.app_id, "foot");
+        assert!(wayland.class.is_empty(), "a Wayland client has no class");
+
+        // What Xwayland reports instead: no app_id, and a class in the X11 properties.
+        let x11: serde_json::Value = serde_json::from_str(
+            r#"{"id":1,"focus":[3],"nodes":[
+                 {"id":3,"name":"DP-1","type":"output","focus":[6],"nodes":[
+                   {"id":6,"name":"1","type":"workspace","focus":[9],"nodes":[
+                     {"id":9,"name":"doc.pdf","app_id":null,"focus":[],
+                      "window_properties":{"class":"Zathura"}}]}]}]}"#,
+        )
+        .expect("a tree parses");
+        let window = windows_by_output(&x11);
+        let window = window.get("DP-1").expect("an X11 window on DP-1");
+        assert_eq!(window.class, "Zathura");
+        assert_eq!(window.title, "doc.pdf");
+        assert!(window.app_id.is_empty(), "an X11 client has no app_id");
     }
 
     /// The root, the outputs and the workspace containers all have names, and none of them

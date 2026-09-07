@@ -622,10 +622,20 @@ format = " $mode "
 # The window this screen is showing, which on one screen is the focused window
 # and on several is one title per bar. `scope = "session"` gives every bar the
 # focused one instead.
+#
+# A title changes every time a tab does; $app_id and $class are what the window
+# *is* - the first for a Wayland client, the second for an X11 one arriving
+# through Xwayland - and a window has one or the other, never both. A state rule
+# that wants one program its own colour keys on those rather than on the title.
 [module.title]
 source = "sway:window"
 style = "plain"
 max_width = 320
+
+[module.title.states.browser]
+field = "app_id"
+equals = "firefox"
+foreground = "$warning"
 
 # `source` says where a module's content comes from, and `format` is what it
 # says, written against the fields that source publishes:
@@ -638,7 +648,7 @@ max_width = 320
 #   media             $title $artist $album $status $player
 #   time              $now
 #   provider          $text $percent
-#   sway:window       $title
+#   sway:window       $title $app_id $class
 #   sway:workspaces   $name
 #   sway:language     $layout $short $index
 #   sway:mode         $mode
