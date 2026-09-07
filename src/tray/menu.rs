@@ -86,15 +86,19 @@ fn read_from(
     parent: i32,
     size: u32,
 ) -> Option<Vec<Row>> {
-    let reply = bus
-        .call(
-            service,
-            path,
-            MENU_INTERFACE,
-            "GetLayout",
-            &[Arg::I32(parent), Arg::I32(DEPTH), Arg::Array("s", &[])],
-        )
-        .ok()?;
+    let reply = match bus.call(
+        service,
+        path,
+        MENU_INTERFACE,
+        "GetLayout",
+        &[Arg::I32(parent), Arg::I32(DEPTH), Arg::Array("s", &[])],
+    ) {
+        Ok(reply) => reply,
+        Err(e) => {
+            log::debug!("reading the menu under {parent} of {service}: {e:#}");
+            return None;
+        }
+    };
     // The answer is a revision nobody here needs, then the root of what was asked for.
     let root = reply.get(1)?;
     Some(rows_of(root, size))
