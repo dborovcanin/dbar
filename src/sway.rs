@@ -343,8 +343,49 @@ fn read_mode(queries: &mut UnixStream) -> Result<Option<String>> {
     Ok(Some(state.name))
 }
 
+/// How many commands may be waiting for the compositor at once.
+///
+/// Clicking a workspace is one command, and a hand clicking as fast as it can is a few a
+/// second. Anything past this is a compositor that has stopped answering, and queueing
+/// for one of those only means switching to workspaces nobody wants any more.
+const QUEUED_COMMANDS: usize = 16;
+
+/// The way to run a Sway command without waiting for the compositor to answer.
+///
+/// Connecting, writing and reading a reply all block, and the thread a click arrives on
+/// is the one that draws: a compositor that is slow to answer would stop the bar
+/// redrawing and stop it dispatching Wayland, which is a bar that has frozen.
+pub struct Commands(std::sync::mpsc::SyncSender<String>);
+
+impl Commands {
+    pub fn send(&self, command: String) {
+        // A queue this full is a compositor that is not listening, and a click nobody is
+        // going to act on is better dropped than remembered.
+        if let Err(e) = self.0.try_send(command) {
+            log::debug!("the compositor is not keeping up with commands: {e}");
+        }
+    }
+}
+
+/// Start the thread that runs Sway commands, each on its own connection since the
+/// subscribed one cannot carry them.
+pub fn commands() -> Commands {
+    let (sender, receiver) = std::sync::mpsc::sync_channel::<String>(QUEUED_COMMANDS);
+    let started = std::thread::Builder::new()
+        .name("sway-commands".to_string())
+        .spawn(move || {
+            while let Ok(command) = receiver.recv() {
+                run_command(&command);
+            }
+        });
+    if let Err(e) = started {
+        log::warn!("no thread for compositor commands: {e}");
+    }
+    Commands(sender)
+}
+
 /// Run a Sway command on its own connection, since the subscribed one cannot carry it.
-pub fn run_command(command: &str) {
+fn run_command(command: &str) {
     let result = (|| -> Result<()> {
         let mut stream = connect()?;
         send(&mut stream, RUN_COMMAND, command.as_bytes())?;

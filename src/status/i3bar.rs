@@ -168,11 +168,22 @@ pub struct ClickEvent<'a> {
     pub height: i32,
 }
 
+/// How many clicks may be waiting for the provider at once.
+///
+/// A click is a hand on a mouse, so a queue this deep is already a provider that has
+/// stopped reading. Dropping what will not fit beats remembering clicks nobody is going
+/// to act on.
+const QUEUED_CLICKS: usize = 32;
+
 pub struct I3BarProvider {
     child: Child,
-    stdin: Option<ChildStdin>,
-    /// The protocol wants the click stream opened with a `[`, then comma-separated objects.
-    click_stream_open: bool,
+    /// The way to the thread that writes to the provider's standard input.
+    ///
+    /// Writing there blocks once the pipe is full, and a provider that has stopped
+    /// reading is exactly the case this has to survive: the thread a click arrives on is
+    /// the one that draws the bar and dispatches Wayland, so it may not wait on somebody
+    /// else's program.
+    clicks: Option<std::sync::mpsc::SyncSender<String>>,
     accepts_clicks: bool,
 }
 
@@ -199,10 +210,21 @@ impl I3BarProvider {
             .spawn(move || read_loop(stdout, sender))
             .context("spawning status reader thread")?;
 
+        let clicks = match stdin {
+            None => None,
+            Some(stdin) => {
+                let (sender, receiver) = std::sync::mpsc::sync_channel::<String>(QUEUED_CLICKS);
+                std::thread::Builder::new()
+                    .name("status-clicks".to_string())
+                    .spawn(move || click_loop(stdin, receiver))
+                    .context("spawning status click thread")?;
+                Some(sender)
+            }
+        };
+
         Ok(I3BarProvider {
             child,
-            stdin,
-            click_stream_open: false,
+            clicks,
             accepts_clicks: false,
         })
     }
@@ -211,13 +233,14 @@ impl I3BarProvider {
         self.accepts_clicks = yes;
     }
 
-    /// Forward a click to the provider. Errors are logged rather than fatal: a provider that
-    /// ignores clicks should not take the bar down.
+    /// Hand a click to the thread that writes to the provider. Nothing here waits: a
+    /// provider that ignores clicks should not take the bar down, and must not slow it
+    /// down either.
     pub fn send_click(&mut self, event: &ClickEvent<'_>) {
         if !self.accepts_clicks {
             return;
         }
-        let Some(stdin) = self.stdin.as_mut() else {
+        let Some(clicks) = self.clicks.as_ref() else {
             return;
         };
         let json = match serde_json::to_string(event) {
@@ -227,12 +250,36 @@ impl I3BarProvider {
                 return;
             }
         };
+        match clicks.try_send(json) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                log::debug!("the status provider is not reading its clicks; one was dropped");
+            }
+            // The writer has gone, which means the pipe broke and will not heal.
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                log::warn!("the status provider is no longer taking clicks");
+                self.clicks = None;
+            }
+        }
+    }
+}
+
+/// Write clicks to the provider, in the frame the protocol asks for: an opening `[`, then
+/// one comma-separated object per click.
+///
+/// This is where the waiting happens. The thread ends when the bar stops sending or the
+/// pipe breaks, and dropping the standard input it owns is what tells a well-behaved
+/// provider that the click stream is over.
+fn click_loop(mut stdin: ChildStdin, clicks: std::sync::mpsc::Receiver<String>) {
+    let mut opened = false;
+    while let Ok(json) = clicks.recv() {
         let result = (|| -> std::io::Result<()> {
-            if !self.click_stream_open {
-                stdin.write_all(b"[\n")?;
-                self.click_stream_open = true;
-            } else {
-                stdin.write_all(b",")?;
+            match opened {
+                false => {
+                    stdin.write_all(b"[\n")?;
+                    opened = true;
+                }
+                true => stdin.write_all(b",")?,
             }
             stdin.write_all(json.as_bytes())?;
             stdin.write_all(b"\n")?;
@@ -240,16 +287,16 @@ impl I3BarProvider {
         })();
         if let Err(e) = result {
             log::warn!("sending click event: {e}");
-            // A broken pipe will not heal; stop trying.
-            self.stdin = None;
+            return;
         }
     }
 }
 
 impl Drop for I3BarProvider {
     fn drop(&mut self) {
-        // Close stdin first so a well-behaved provider exits on its own.
-        self.stdin = None;
+        // Close stdin first so a well-behaved provider exits on its own: the writer thread
+        // ends when this sender goes, and the pipe closes with it.
+        self.clicks = None;
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

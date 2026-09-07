@@ -291,6 +291,8 @@ pub struct App {
     tray: crate::tray::TrayState,
     /// The way into the tray thread, when a click has to reach an application.
     tray_commands: Option<crate::tray::Commands>,
+    /// The way to run a compositor command, when there is a compositor to run one.
+    sway_commands: Option<sway::Commands>,
     /// The menu a tray icon has open, and any submenus below it, outermost first.
     ///
     /// A stack rather than one surface, because a menu that opens another has to keep the
@@ -379,6 +381,7 @@ impl App {
             sway: SwayState::default(),
             tray: crate::tray::TrayState::default(),
             tray_commands: None,
+            sway_commands: None,
             menus: Vec::new(),
             opening: None,
             fault: None,
@@ -583,6 +586,11 @@ impl App {
     /// Where to send what a click on a tray item asks for.
     pub fn set_tray(&mut self, commands: crate::tray::Commands) {
         self.tray_commands = Some(commands);
+    }
+
+    /// Where to send what a click on a workspace asks the compositor for.
+    pub fn set_sway_commands(&mut self, commands: sway::Commands) {
+        self.sway_commands = Some(commands);
     }
 
     /// Take what the tray thread says is on the bus.
@@ -1471,7 +1479,10 @@ impl App {
                     // forwarding.
                     ActionTarget::Sway(command) => {
                         if button == Button::Left.number() {
-                            sway::run_command(&command);
+                            match &self.sway_commands {
+                                Some(commands) => commands.send(command),
+                                None => log::debug!("no compositor to run {command:?}"),
+                            }
                         }
                     }
                     ActionTarget::Control { what, step } => self.control(what, step, button),

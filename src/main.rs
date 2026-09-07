@@ -318,6 +318,9 @@ fn main() -> Result<()> {
     let (sway_tx, sway_rx) = calloop::channel::channel();
     match crate::sway::spawn(sway_tx, watching) {
         Ok(()) => {
+            // Commands go out on a thread of their own: a click must not wait on the
+            // compositor, because the thread it arrives on is the one that draws.
+            app.set_sway_commands(crate::sway::commands());
             handle
                 .insert_source(sway_rx, |event, _, app: &mut App| {
                     if let calloop::channel::Event::Msg(event) = event {
