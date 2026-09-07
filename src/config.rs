@@ -209,7 +209,7 @@ fn kind_word(kind: crate::status::Kind) -> &'static str {
 ///
 /// A name two of them disagree about the kind of is a config error rather than a silent
 /// choice between the two, and says which modules to look at.
-fn share_command_fields(positions: &mut [Vec<Group>; 3]) -> Result<()> {
+fn share_command_fields(positions: &mut [Position; 3]) -> Result<()> {
     use crate::collect::{CommandSpec, Which};
 
     // `mixed` says whether the modules on one command declared the same schema, which is
@@ -221,7 +221,11 @@ fn share_command_fields(positions: &mut [Vec<Group>; 3]) -> Result<()> {
     }
 
     let mut shared: HashMap<CommandSpec, Union> = HashMap::new();
-    for module in positions.iter().flatten().flat_map(|g| &g.modules) {
+    for module in positions
+        .iter()
+        .flat_map(|p| &p.groups)
+        .flat_map(|g| &g.modules)
+    {
         let Source::Native(Which::Command(spec)) = &module.source else {
             continue;
         };
@@ -265,7 +269,11 @@ fn share_command_fields(positions: &mut [Vec<Group>; 3]) -> Result<()> {
         })
         .collect();
 
-    for module in positions.iter_mut().flatten().flat_map(|g| &mut g.modules) {
+    for module in positions
+        .iter_mut()
+        .flat_map(|p| &mut p.groups)
+        .flat_map(|g| &mut g.modules)
+    {
         let Source::Native(Which::Command(spec)) = &mut module.source else {
             continue;
         };
@@ -456,6 +464,7 @@ struct RawI3Bar {
 struct RawPosition {
     #[serde(default)]
     groups: Vec<String>,
+    separator: Option<RawSeparator>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -502,6 +511,8 @@ struct RawEnds {
     /// Falls back to the width of the group's own separators.
     width: Option<f32>,
     overlap: Option<f32>,
+    /// Optional orientation for caps, independent of the internal separators.
+    direction: Option<Direction>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -740,7 +751,14 @@ pub struct Config {
     pub menu: Menu,
     pub i3bar: I3Bar,
     /// Groups per position, in `POSITIONS` order.
-    pub positions: [Vec<Group>; 3],
+    pub positions: [Position; 3],
+}
+
+/// One alignment: independent groups, optionally connected by shared separators.
+#[derive(Debug, Clone, Default)]
+pub struct Position {
+    pub groups: Vec<Group>,
+    pub separator: Option<Separator>,
 }
 
 #[derive(Debug, Clone)]
@@ -857,13 +875,14 @@ impl Default for Separator {
 ///
 /// A separator is a transition between two modules; this is the same transition between a
 /// module and nothing, which is what turns a run of blocks into a ribbon with a point on
-/// the end. The shapes face the way the group's separators do.
+/// the end. Shapes inherit the group's separator direction unless overridden.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Ends {
     pub left: SeparatorShape,
     pub right: SeparatorShape,
     pub width: f32,
     pub overlap: f32,
+    pub direction: Option<Direction>,
 }
 
 impl Ends {
@@ -1381,7 +1400,10 @@ fn parse_font(s: &str) -> (String, f32) {
 impl Config {
     /// Every module in the config, wherever it sits.
     pub fn modules(&self) -> impl Iterator<Item = &Module> {
-        self.positions.iter().flatten().flat_map(|g| &g.modules)
+        self.positions
+            .iter()
+            .flat_map(|p| &p.groups)
+            .flat_map(|g| &g.modules)
     }
 
     /// The collectors this config needs, each at the shortest interval any module asked
@@ -1476,7 +1498,7 @@ impl Config {
     ///
     /// Nothing does on a native configuration, and then there is no child process to run.
     pub fn needs_provider(&self) -> bool {
-        self.positions.iter().flatten().any(|group| {
+        self.positions.iter().flat_map(|p| &p.groups).any(|group| {
             group.wildcard || group.modules.iter().any(|m| m.source == Source::Provider)
         })
     }
@@ -1520,19 +1542,38 @@ impl Config {
             styles.insert(name.clone(), style);
         }
 
-        let mut positions = [Vec::new(), Vec::new(), Vec::new()];
-        for (slot, raw_pos) in positions
+        let mut positions = std::array::from_fn(|_| Position::default());
+        for ((slot, raw_pos), name) in positions
             .iter_mut()
             .zip([&raw.left, &raw.center, &raw.right])
+            .zip(["left", "center", "right"])
         {
+            slot.separator = raw_pos
+                .separator
+                .as_ref()
+                .map(|s| resolve_separator(s, &palette))
+                .transpose()
+                .with_context(|| format!("in [{name}.separator]"))?
+                .filter(|s| !s.shape.is_none());
+            if let Some(sep) = slot.separator
+                && (!sep.width.is_finite() || sep.width <= 0.0 || !sep.overlap.is_finite())
+            {
+                bail!(
+                    "in [{name}.separator]: width must be finite and positive, and overlap finite"
+                );
+            }
             for group_name in &raw_pos.groups {
                 let raw_group = raw
                     .groups
                     .get(group_name)
                     .ok_or_else(|| anyhow!("group {group_name:?} is used but not defined"))?;
-                slot.push(resolve_group(
-                    group_name, raw_group, &raw, &palette, &styles, base,
-                )?);
+                let group = resolve_group(group_name, raw_group, &raw, &palette, &styles, base)?;
+                if slot.separator.is_some() && (group.opacity != 1.0 || group.padding != 0.0) {
+                    bail!(
+                        "[{name}.separator] joins group {group_name:?}, which must have opacity = 1 and padding = 0"
+                    );
+                }
+                slot.groups.push(group);
             }
         }
 
@@ -2199,17 +2240,13 @@ fn resolve_group(
     // Wildcard groups need a style for blocks that have no `[module.*]` table.
     let fallback = styles.get("default").copied().unwrap_or(base);
 
-    let separator = match &raw_group.separator {
-        Some(raw) => Separator {
-            shape: raw.shape,
-            width: raw.width.max(0.0),
-            direction: raw.direction,
-            color: parse_separator_color(&raw.color, palette)
-                .with_context(|| format!("in [group.{name}.separator]"))?,
-            overlap: raw.overlap.max(0.0),
-        },
-        None => Separator::default(),
-    };
+    let separator = raw_group
+        .separator
+        .as_ref()
+        .map(|s| resolve_separator(s, palette))
+        .transpose()
+        .with_context(|| format!("in [group.{name}.separator]"))?
+        .unwrap_or_default();
 
     let ends = match &raw_group.ends {
         Some(raw) => Ends {
@@ -2217,6 +2254,7 @@ fn resolve_group(
             right: raw.right,
             width: raw.width.unwrap_or(separator.width).max(0.0),
             overlap: raw.overlap.unwrap_or(separator.overlap).max(0.0),
+            direction: raw.direction,
         },
         None => Ends::default(),
     };
@@ -2275,6 +2313,16 @@ fn resolve_group(
         } else {
             modules
         },
+    })
+}
+
+fn resolve_separator(raw: &RawSeparator, palette: &Palette) -> Result<Separator> {
+    Ok(Separator {
+        shape: raw.shape,
+        width: raw.width.max(0.0),
+        direction: raw.direction,
+        color: parse_separator_color(&raw.color, palette)?,
+        overlap: raw.overlap.max(0.0),
     })
 }
 
@@ -3502,7 +3550,7 @@ signal = 8
             Config::parse(toml).map(|c| {
                 c.positions
                     .iter()
-                    .flatten()
+                    .flat_map(|p| &p.groups)
                     .next()
                     .expect("the group was placed")
                     .opacity
@@ -3552,7 +3600,14 @@ equals = "headphones"
 icon = "headphones"
 "##;
         let cfg = Config::parse(config).expect("parses");
-        let module = cfg.positions.iter().flatten().next().unwrap().modules[0].clone();
+        let module = cfg
+            .positions
+            .iter()
+            .flat_map(|p| &p.groups)
+            .next()
+            .unwrap()
+            .modules[0]
+            .clone();
 
         let says = |muted: &str, port: &str| {
             let mut fields = crate::status::Fields::default();
@@ -3608,6 +3663,59 @@ fields = { muted = "yes", jack = "in" }
             if let Err(e) = Config::parse(&text) {
                 panic!("{} does not parse: {e:#}", path.display());
             }
+        }
+    }
+    #[test]
+    fn group_joins_are_opt_in_and_validate_their_groups() {
+        let config = |separator: &str, group: &str| {
+            format!(
+                r#"
+[right]
+groups = ["g"]
+{separator}
+[group.g]
+modules = ["cpu"]
+{group}
+[module.cpu]
+source = "cpu"
+"#
+            )
+        };
+        for separator in ["", "[right.separator]\nshape = 'none'"] {
+            let cfg = Config::parse(&config(separator, "opacity = 0.5\npadding = 3")).unwrap();
+            assert!(cfg.positions[2].separator.is_none());
+            assert_eq!(cfg.positions[2].groups[0].opacity, 0.5);
+        }
+        let joined = "[right.separator]\nshape = 'slant'\nwidth = 6";
+        let cfg = Config::parse(&config(joined, "")).unwrap();
+        assert_eq!(cfg.positions[2].separator.unwrap().width, 6.0);
+        assert!(cfg.positions[..2].iter().all(|p| p.separator.is_none()));
+        for group in ["opacity = 0.5", "padding = 3"] {
+            let error = Config::parse(&config(joined, group))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("right.separator") && error.contains("group \"g\""),
+                "{error}"
+            );
+        }
+        for bad in [
+            "width = 0",
+            "width = -1",
+            "width = inf",
+            "overlap = inf",
+            "color = '$missing'",
+            "shape = 'unknown'",
+        ] {
+            let separator = format!(
+                "[right.separator]\n{}\n{bad}",
+                if bad.starts_with("shape") {
+                    ""
+                } else {
+                    "shape = 'slant'"
+                }
+            );
+            assert!(Config::parse(&config(&separator, "")).is_err(), "{bad}");
         }
     }
 }

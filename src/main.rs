@@ -70,7 +70,7 @@ struct Args {
 fn check_config(path: Option<&PathBuf>) -> Result<()> {
     let config = Config::load(path.map(PathBuf::as_path))?;
     let modules = config.modules().count();
-    let groups: usize = config.positions.iter().map(Vec::len).sum();
+    let groups: usize = config.positions.iter().map(|p| p.groups.len()).sum();
     println!("the config is good: {modules} modules in {groups} groups");
     Ok(())
 }

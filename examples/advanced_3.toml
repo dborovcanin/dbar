@@ -1,8 +1,8 @@
 # advanced_3 - Gruvbox signal ribbon.
 #
-# Two continuous ribbons with slanted transitions between every block.
-# Desktop and playback share the left ribbon; all status blocks share the right.
-# There are no intermediate group caps or gaps to interrupt either ribbon.
+# Separate functional groups, joined into two continuous ribbons.
+# Alignment separators blend their neighboring block colors, so warning states
+# and disappearing groups keep the same transitions as blocks inside a group.
 #
 # Run: dbar -c examples/advanced_3.toml
 # Inspiration: https://github.com/sejjy/mechabar (stepped backgrounds and vector-like dividers)
@@ -41,13 +41,25 @@ line = "#7c6f64"
 secondary = "#b8bb26"
 
 [left]
-groups = ["desktop"]
+groups = ["desktop", "playing"]
+
+[left.separator]
+shape = "slant"
+width = 6
+direction = "right"
+color = "previous"
 
 [center]
 groups = []
 
 [right]
-groups = ["status"]
+groups = ["world", "system", "connections", "power"]
+
+[right.separator]
+shape = "slant"
+width = 6
+direction = "right"
+color = "previous"
 
 # Styles: alarms retain distinct fills in every palette. Hover never changes size.
 
@@ -107,12 +119,12 @@ foreground = "$ink"
 padding = 5
 icon_gap = 3
 
-# One group per alignment lets each separator blend the actual neighboring fills,
-# including warning colors and changes when media or tray items appear/disappear.
-# Only the outer trailing edge has a cap. Modules provide all background fills.
+# Groups retain their own modules and internal separators. The alignment joins
+# visible neighbors and suppresses their facing caps; only outer caps remain.
+# Joined groups use opacity = 1 and padding = 0. Modules supply the background.
 
 [group.desktop]
-modules = ["workspaces", "mode", "title", "media"]
+modules = ["workspaces", "mode", "title"]
 background = "#00000000"
 radius = 0
 padding = 0
@@ -129,22 +141,97 @@ left = "none"
 right = "slant"
 width = 6
 
-[group.status]
-modules = ["weather", "clock", "cpu", "memory", "temperature", "language", "network", "tray", "volume", "brightness", "battery"]
+[group.playing]
+modules = ["media"]
 background = "#00000000"
 radius = 0
 padding = 0
 spacing = 0
 
-[group.status.separator]
+[group.playing.separator]
 shape = "slant"
 width = 6
 direction = "right"
 color = "previous"
 
-[group.status.ends]
+[group.playing.ends]
 left = "none"
 right = "slant"
+width = 6
+
+[group.world]
+modules = ["weather", "clock"]
+background = "#00000000"
+radius = 0
+padding = 0
+spacing = 0
+
+[group.world.separator]
+shape = "slant"
+width = 6
+direction = "right"
+color = "previous"
+
+# The leading edge follows the same diagonal as the internal joins.
+[group.world.ends]
+left = "slant"
+right = "none"
+width = 6
+direction = "right"
+
+[group.system]
+modules = ["cpu", "memory", "temperature"]
+background = "#00000000"
+radius = 0
+padding = 0
+spacing = 0
+
+[group.system.separator]
+shape = "slant"
+width = 6
+direction = "right"
+color = "previous"
+
+[group.system.ends]
+left = "none"
+right = "slant"
+width = 6
+
+[group.connections]
+modules = ["language", "network", "tray"]
+background = "#00000000"
+radius = 0
+padding = 0
+spacing = 0
+
+[group.connections.separator]
+shape = "slant"
+width = 6
+direction = "right"
+color = "previous"
+
+[group.connections.ends]
+left = "none"
+right = "slant"
+width = 6
+
+[group.power]
+modules = ["volume", "brightness", "battery"]
+background = "#00000000"
+radius = 0
+padding = 0
+spacing = 0
+
+[group.power.separator]
+shape = "slant"
+width = 6
+direction = "right"
+color = "previous"
+
+# The last block meets the screen edge without a trailing wedge.
+[group.power.ends]
+left = "none"
+right = "none"
 width = 6
 
 [menu]

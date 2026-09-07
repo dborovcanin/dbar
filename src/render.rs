@@ -210,6 +210,22 @@ fn draw_separator(
     let Some(path) = separator_path(sep.shape, x0, y0, x1, y1) else {
         return;
     };
+    // Outer caps occupy the side of the boundary adjacent to their module. Build
+    // a single even-odd path for the complement, preserving transparent bar backgrounds.
+    let path = if sep.inverted {
+        let mut builder = PathBuilder::new();
+        let Some(rect) = Rect::from_xywh(x0, y0, x1 - x0, y1 - y0) else {
+            return;
+        };
+        builder.push_rect(rect);
+        builder.push_path(&path);
+        let Some(complement) = builder.finish() else {
+            return;
+        };
+        complement
+    } else {
+        path
+    };
     let path = if mirrored {
         // Reflect about the gap's vertical centre line.
         match path.transform(Transform::from_row(-1.0, 0.0, 0.0, 1.0, x0 + x1, 0.0)) {
@@ -220,7 +236,14 @@ fn draw_separator(
         path
     };
 
-    fill_path(pixmap, &path, over, transform, clip);
+    if sep.inverted {
+        let mut paint = Paint::default();
+        paint.set_color(skia_color(over));
+        paint.anti_alias = true;
+        pixmap.fill_path(&path, &paint, FillRule::EvenOdd, transform, clip);
+    } else {
+        fill_path(pixmap, &path, over, transform, clip);
+    }
 }
 
 /// Draw one icon, tinted with the module's foreground.
@@ -924,6 +947,12 @@ fn render(
         None,
     );
 
+    // Joined groups remain independent islands. Draw their shared transitions first,
+    // so the neighbouring groups cover the overlap just as modules do inside an island.
+    for separator in &frame.group_separators {
+        draw_separator(pixmap, separator, scale, transform, None);
+    }
+
     // Split up front: drawing an island needs the text backend and the layer at the same
     // time, and they are two independent halves of the painter.
     let Painter {
@@ -1626,6 +1655,7 @@ format = "$text"
             shape: SeparatorShape::Curve,
             direction: Direction::Right,
             overlap: 0.0,
+            inverted: false,
             fill: A,
             under: B,
         };
@@ -1714,6 +1744,7 @@ format = "$text"
             shape: SeparatorShape::Slant,
             direction,
             overlap: 0.0,
+            inverted: false,
             fill,
             under,
         };
@@ -1756,6 +1787,7 @@ format = "$text"
                 shape: SeparatorShape::Line,
                 direction,
                 overlap: 0.0,
+                inverted: false,
                 fill: TILE,
                 under: TILE_ALT,
             };
@@ -1836,6 +1868,7 @@ format = "$text"
                     shape: SeparatorShape::Curve,
                     direction: Direction::Right,
                     overlap: 0.0,
+                    inverted: false,
                     fill: TILE,
                     under: TILE_ALT,
                 }],
@@ -2079,6 +2112,264 @@ format = "$text"
             }
             group.separators[0].x += shift;
             shot(&frame, 1.0);
+        }
+    }
+    /// Twelve blocks, either one ribbon or four independently configured groups.
+    fn ribbon_config(joined: bool, shape: &str, direction: &str, color: &str) -> Config {
+        let separator = format!(
+            "{{ shape = '{shape}', width = 6, direction = '{direction}', color = '{color}', overlap = 1 }}"
+        );
+        let names: Vec<_> = (0..12).map(|n| format!("\"m{n}\"")).collect();
+        let mut config =
+            "[bar]\nheight = 20\ngap = 19\nbackground = { color = '#282828' }\n".to_string();
+        if joined {
+            config +=
+                &format!("[right]\ngroups = ['g0','g1','g2','g3']\nseparator = {separator}\n");
+            for (n, chunk) in names.chunks(3).enumerate() {
+                config += &format!(
+                    "[group.g{n}]\nmodules = [{}]\nbackground = '#282828'\nradius = 5\nseparator = {separator}\n",
+                    chunk.join(",")
+                );
+            }
+        } else {
+            config += &format!(
+                "[right]\ngroups = ['g']\n[group.g]\nmodules = [{}]\nbackground = '#282828'\nradius = 5\nseparator = {separator}\n",
+                names.join(",")
+            );
+        }
+        for n in 0..12 {
+            let background = if n % 2 == 0 { "#3c3836" } else { "#504945" };
+            config += &format!(
+                "[module.m{n}]\nformat = '$text'\npadding = 3\nbackground = '{background}'\nforeground = '#ebdbb2'\n"
+            );
+        }
+        config += "[module.m3.states.hover]\nhover = true\nbackground = '#ffee00'\nforeground = '#000000'\n";
+        config += "[module.m8.states.warning]\nstate = 'warning'\nbackground = '#ff7700'\nforeground = '#000000'\n";
+        Config::parse(&config).unwrap()
+    }
+
+    fn ribbon_items() -> Vec<crate::status::StatusItem> {
+        use crate::status::{Fields, StatusItem, Value};
+        (0..12)
+            .map(|n| {
+                let mut fields = Fields::default();
+                fields.set("text", Value::Text(format!("{n:02}")));
+                StatusItem {
+                    id: Some(format!("m{n}")),
+                    fields,
+                    state: Default::default(),
+                    urgent: false,
+                    foreground: None,
+                    background: None,
+                    action: None,
+                }
+            })
+            .collect()
+    }
+
+    fn ribbon_frame(
+        cfg: &Config,
+        items: &[crate::status::StatusItem],
+        text: &mut impl crate::layout::Measure,
+        width: f32,
+        pointer: Option<(f32, f32)>,
+    ) -> Frame {
+        let inputs = crate::layout::Inputs {
+            items,
+            native: &crate::collect::Registry::new(&Default::default()),
+            sway: &Default::default(),
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed: &Default::default(),
+            waiting: &Default::default(),
+            spin: 0,
+            tray: &Default::default(),
+            output: None,
+        };
+        crate::layout::compute(cfg, &inputs, width, 20.0, text, pointer)
+    }
+
+    #[test]
+    fn joined_groups_paint_exactly_like_one_ribbon() {
+        for shape in ["line", "slant", "chevron", "notch", "round", "curve"] {
+            for direction in ["left", "right"] {
+                for color in ["previous", "next", "foreground", "background", "#83a598"] {
+                    let merged = ribbon_config(false, shape, direction, color);
+                    let joined = ribbon_config(true, shape, direction, color);
+                    for mode in 0..3 {
+                        let mut items = ribbon_items();
+                        items[8].state = crate::status::State::Warning;
+                        if mode == 2 {
+                            for item in &mut items[3..6] {
+                                item.fields
+                                    .set("text", crate::status::Value::Text(String::new()));
+                            }
+                        }
+                        let mut text = Blocks {
+                            scale: 1.0,
+                            run: None,
+                        };
+                        let reference = ribbon_frame(&merged, &items, &mut text, 480.0, None);
+                        let pointer = if mode == 1 {
+                            Some((reference.groups[0].modules[3].x + 1.0, 10.0))
+                        } else {
+                            None
+                        };
+                        let reference = ribbon_frame(&merged, &items, &mut text, 480.0, pointer);
+                        let actual = ribbon_frame(&joined, &items, &mut text, 480.0, pointer);
+                        assert_eq!(actual.groups.len(), if mode == 2 { 3 } else { 4 });
+                        for scale in [1.0, 1.5, 2.0] {
+                            assert!(
+                                shot(&reference, scale).data() == shot(&actual, scale).data(),
+                                "{shape} {direction} {color}, mode {mode}, scale {scale}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "release timing probe; run with --release --ignored --nocapture"]
+    fn benchmark_joined_ribbon() {
+        use crate::status::Value;
+        use std::time::{Duration, Instant};
+        let mut painter =
+            Painter::new(crate::text::TextRenderer::new("sans-serif", 13.0, &[]).unwrap());
+        let mut items = ribbon_items();
+        for (case, radius, background) in [
+            ("square", 0.0, Color::TRANSPARENT),
+            ("rounded", 5.0, Color::parse("#282828").unwrap()),
+        ] {
+            let mut configs = [
+                ribbon_config(false, "slant", "right", "previous"),
+                ribbon_config(true, "slant", "right", "previous"),
+            ];
+            for cfg in &mut configs {
+                for group in cfg.positions.iter_mut().flat_map(|p| &mut p.groups) {
+                    group.edges.radius = radius;
+                    group.background = background;
+                }
+            }
+            for width in [1920u32, 3840] {
+                for scale in [1.0, 2.0] {
+                    painter.text.set_scale(scale);
+                    let (pw, ph) = ((width as f32 * scale) as u32, (20.0 * scale) as u32);
+                    let mut pixels = vec![0; pw as usize * ph as usize * 4];
+                    let mut clip = Clip::default();
+                    let mut times = [(Duration::ZERO, Duration::ZERO); 2];
+                    // Interleave both paths to reduce drift from cache warming and CPU frequency.
+                    for n in 0..1200 {
+                        items[3]
+                            .fields
+                            .set("text", Value::Text(format!("CPU {}%", n % 100)));
+                        for index in [n % 2, 1 - n % 2] {
+                            let start = Instant::now();
+                            let frame = ribbon_frame(
+                                &configs[index],
+                                &items,
+                                &mut painter.text,
+                                width as f32,
+                                None,
+                            );
+                            let layout = start.elapsed();
+                            let start = Instant::now();
+                            render_to_buffer(
+                                Target {
+                                    canvas: &mut pixels,
+                                    width: pw,
+                                    height: ph,
+                                    clip: &mut clip,
+                                    pixels: Pixels::AsWritten,
+                                },
+                                &frame,
+                                scale,
+                                &mut painter,
+                            )
+                            .unwrap();
+                            let paint = start.elapsed();
+                            if n >= 200 {
+                                times[index].0 += layout;
+                                times[index].1 += paint;
+                            }
+                        }
+                    }
+                    for (index, (layout, paint)) in times.into_iter().enumerate() {
+                        println!(
+                            "{case} width={width} scale={scale} {} layout={:.2}us paint={:.2}us",
+                            if index == 0 { "merged" } else { "joined" },
+                            layout.as_secs_f64() * 1000.0,
+                            paint.as_secs_f64() * 1000.0
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn slanted_caps_follow_the_requested_slope_and_stay_attached() {
+        for direction in ["left", "right"] {
+            for leading in [false, true] {
+                let (left, right) = if leading {
+                    ("slant", "none")
+                } else {
+                    ("none", "slant")
+                };
+                let cfg = Config::parse(&format!(
+                    r##"
+[bar]
+height = 20
+[right]
+groups = ["g"]
+[group.g]
+modules = ["m0"]
+ends = {{ left = "{left}", right = "{right}", direction = "{direction}", width = 12 }}
+[module.m0]
+format = "$text"
+padding = 0
+min_width = 24
+background = "#83a598"
+"##
+                ))
+                .unwrap();
+                let frame = ribbon_frame(
+                    &cfg,
+                    &ribbon_items(),
+                    &mut Blocks {
+                        scale: 1.0,
+                        run: None,
+                    },
+                    480.0,
+                    None,
+                );
+                let cap = &frame.groups[0].separators[0];
+                for scale in [1.0, 2.0] {
+                    let image = shot(&frame, scale);
+                    let alpha = |x: f32, y: f32| {
+                        image
+                            .pixel(((cap.x + x) * scale) as u32, (y * scale) as u32)
+                            .unwrap()
+                            .alpha()
+                    };
+                    let top_filled = leading == (direction == "left");
+                    assert_eq!(
+                        alpha(3.0, 3.0),
+                        if top_filled { 255 } else { 0 },
+                        "{leading} {direction}"
+                    );
+                    assert_eq!(
+                        alpha(3.0, 16.0),
+                        if top_filled { 0 } else { 255 },
+                        "{leading} {direction}"
+                    );
+                    // Both ends of the edge touching the module are solid: no detached wedge.
+                    let touching = if leading { 11.0 } else { 0.0 };
+                    assert_eq!(alpha(touching, 5.0), 255);
+                    assert_eq!(alpha(touching, 14.0), 255);
+                }
+            }
         }
     }
 }

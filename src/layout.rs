@@ -298,6 +298,8 @@ pub struct PlacedSeparator {
     pub shape: SeparatorShape,
     pub direction: Direction,
     pub overlap: f32,
+    /// Fill the complement of the shape, keeping an outer cap attached to its module.
+    pub inverted: bool,
     /// Colour of the region on the leading side of the boundary.
     pub fill: Color,
     /// Colour behind it, on the trailing side.
@@ -321,6 +323,8 @@ pub struct PlacedGroup {
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub groups: Vec<PlacedGroup>,
+    /// Shared transitions between groups; their colours depend on both neighbours.
+    pub group_separators: Vec<PlacedSeparator>,
     /// The bar's own ground, under everything the groups draw.
     ///
     /// Here rather than read from the config while painting, so that nothing below this
@@ -335,6 +339,7 @@ impl Default for Frame {
     fn default() -> Frame {
         Frame {
             groups: Vec::new(),
+            group_separators: Vec::new(),
             background: Color::TRANSPARENT,
             radius: 0.0,
         }
@@ -421,6 +426,7 @@ impl SamePaint for PlacedSeparator {
             && self.shape == other.shape
             && self.direction == other.direction
             && self.overlap == other.overlap
+            && self.inverted == other.inverted
             && self.fill == other.fill
             && self.under == other.under
     }
@@ -477,6 +483,7 @@ impl Frame {
 
     pub fn damage(&self, on_screen: &Frame) -> Damage {
         if self.groups.len() != on_screen.groups.len()
+            || self.group_separators.len() != on_screen.group_separators.len()
             || self.background != on_screen.background
             || self.radius != on_screen.radius
         {
@@ -491,6 +498,22 @@ impl Frame {
             // well as cover where it is now.
             rects.push((old.x, old.y, old.width, old.height));
             rects.push((new.x, new.y, new.width, new.height));
+        }
+        for (new, old) in self
+            .group_separators
+            .iter()
+            .zip(&on_screen.group_separators)
+        {
+            if !new.same_paint(old) {
+                for sep in [old, new] {
+                    rects.push((
+                        sep.x - sep.overlap,
+                        sep.y,
+                        sep.width + sep.overlap * 2.0,
+                        sep.height,
+                    ));
+                }
+            }
         }
         Damage::Rects(rects)
     }
@@ -939,10 +962,20 @@ fn size_group(
     height: f32,
     text: &mut dyn Measure,
     budget: f32,
+    joined_ends: Option<Ends>,
 ) -> Option<SizedGroup> {
+    let ends = joined_ends.unwrap_or(group.ends);
+    let advance = if group.separator.shape.is_none() {
+        group.spacing
+    } else {
+        group.separator.width
+    };
     // What is left for the modules once the group's own padding is paid for. A run with
     // nothing else beside it gets infinity, and nothing below has to think about it.
     let mut left = budget - group.padding * 2.0;
+    if joined_ends.is_some() {
+        left -= ends.left_width() + ends.right_width();
+    }
     let mut modules = Vec::new();
     for candidate in collect(group, inputs) {
         let Candidate {
@@ -1064,10 +1097,19 @@ fn size_group(
         // A module that would outgrow max_width, or the room its run has left, loses text
         // rather than pushing its neighbours aside: a window title has no length limit of
         // its own, and a bar can run out of width whatever the config says.
+        let available = if joined_ends.is_some() && !modules.is_empty() {
+            left - if group.separator.shape.is_none() {
+                group.spacing
+            } else {
+                group.separator.width
+            }
+        } else {
+            left
+        };
         let fixed = advance(&content) + style.padding * 2.0;
         let cap = match style.max_width > 0.0 {
-            true => style.max_width.min(left),
-            false => left,
+            true => style.max_width.min(available),
+            false => available,
         };
         let content = if cap.is_finite() {
             truncate(&content, cap - fixed, text)
@@ -1089,10 +1131,14 @@ fn size_group(
         let width = (text_width + fixed).max(style.min_width);
         // A module with nothing left to draw in is left out entirely, rather than drawn
         // over whatever the run was making room for.
-        if width > left {
+        if width > available {
             continue;
         }
-        left -= width + group.spacing;
+        left = if joined_ends.is_some() {
+            available - width
+        } else {
+            left - width - group.spacing
+        };
         modules.push(SizedModule {
             width,
             text_width,
@@ -1129,18 +1175,10 @@ fn size_group(
         return None;
     }
 
-    // A configured separator owns the space between modules; otherwise `spacing` does.
-    let advance = if group.separator.shape.is_none() {
-        group.spacing
-    } else {
-        group.separator.width
-    };
-
     let content: f32 = modules.iter().map(|m| m.width).sum();
     let gaps = advance * (modules.len() - 1) as f32;
     // A shaped end needs room of its own: it is drawn beside the modules, not over them.
-    let ends = group.ends.left_width() + group.ends.right_width();
-    let width = content + gaps + ends + group.padding * 2.0;
+    let width = content + gaps + ends.left_width() + ends.right_width() + group.padding * 2.0;
     let _ = height;
 
     Some(SizedGroup {
@@ -1151,7 +1189,7 @@ fn size_group(
         padding: group.padding,
         advance,
         separator: group.separator,
-        ends: group.ends,
+        ends,
         modules,
     })
 }
@@ -1168,53 +1206,12 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     let mut modules: Vec<PlacedModule> = Vec::with_capacity(sized.modules.len());
     let mut separators = Vec::new();
 
-    // The left end is drawn before the first module, in space reserved for it.
     let ends = sized.ends;
     let lead = ends.left_width();
-    if lead > 0.0
-        && let Some(first) = sized.modules.first()
-    {
-        separators.push(end_separator(
-            ends.left,
-            x,
-            inner_y,
-            lead,
-            inner_h,
-            &ends,
-            separator.direction,
-            first.background,
-        ));
-    }
     x += lead;
 
     for (i, m) in sized.modules.into_iter().enumerate() {
         if i > 0 {
-            if draw_separators {
-                let previous = &modules[i - 1];
-                separators.push(PlacedSeparator {
-                    x,
-                    y: inner_y,
-                    width: sized.advance,
-                    height: inner_h,
-                    shape: separator.shape,
-                    direction: separator.direction,
-                    overlap: separator.overlap,
-                    fill: match separator.color {
-                        SeparatorColor::Previous => previous.background,
-                        SeparatorColor::Next => m.background,
-                        SeparatorColor::Foreground => previous.foreground,
-                        SeparatorColor::Background => sized.background,
-                        SeparatorColor::Fixed(c) => c,
-                    },
-                    // The ground the shape is drawn over: the neighbour whose colour the
-                    // shape did not take. Taking the same one twice would paint the gap in
-                    // a single colour and leave the boundary invisible.
-                    under: match separator.color {
-                        SeparatorColor::Next => previous.background,
-                        _ => m.background,
-                    },
-                });
-            }
             x += sized.advance;
         }
         // Icon and text are centred together inside the module box.
@@ -1267,6 +1264,32 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         x += m.width;
     }
 
+    if lead > 0.0
+        && let Some(first) = modules.first()
+    {
+        separators.push(end_separator(
+            ends.left,
+            group_x + sized.padding,
+            inner_y,
+            lead,
+            inner_h,
+            &ends,
+            separator.direction,
+            first.background,
+            true,
+        ));
+    }
+    if draw_separators {
+        for pair in modules.windows(2) {
+            separators.push(separator_between(
+                separator,
+                &pair[0],
+                &pair[1],
+                sized.background,
+            ));
+        }
+    }
+
     let trail = ends.right_width();
     if trail > 0.0
         && let Some(last) = modules.last()
@@ -1280,6 +1303,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             &ends,
             separator.direction,
             last.background,
+            false,
         ));
     }
 
@@ -1294,6 +1318,74 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         modules,
         separators,
     }
+}
+
+/// The same colour rule serves internal separators and joins between groups.
+fn separator_between(
+    separator: Separator,
+    previous: &PlacedModule,
+    next: &PlacedModule,
+    ground: Color,
+) -> PlacedSeparator {
+    PlacedSeparator {
+        x: previous.x + previous.width,
+        y: previous.y,
+        width: separator.width,
+        height: previous.height,
+        shape: separator.shape,
+        direction: separator.direction,
+        overlap: separator.overlap,
+        inverted: false,
+        fill: match separator.color {
+            SeparatorColor::Previous => previous.background,
+            SeparatorColor::Next => next.background,
+            SeparatorColor::Foreground => previous.foreground,
+            SeparatorColor::Background => ground,
+            SeparatorColor::Fixed(c) => c,
+        },
+        under: match separator.color {
+            SeparatorColor::Next => previous.background,
+            _ => next.background,
+        },
+    }
+}
+
+/// Fit connected groups in one pass. The last accepted group provisionally owns its
+/// trailing cap; accepting another group replaces that cap with a shared separator.
+/// Empty or truncated-away groups never consume a join or change the outer edges.
+fn size_joined_run(
+    groups: &[GroupCfg],
+    separator: Separator,
+    inputs: &Inputs<'_>,
+    height: f32,
+    text: &mut dyn Measure,
+    budget: f32,
+) -> Vec<SizedGroup> {
+    let mut out: Vec<SizedGroup> = Vec::new();
+    let mut left = budget;
+    for group in groups {
+        let mut ends = group.ends;
+        let (reclaimed, gap) = match out.last() {
+            Some(previous) => {
+                ends.left = SeparatorShape::None;
+                (previous.ends.right_width(), separator.width)
+            }
+            None => (0.0, 0.0),
+        };
+        let room = left + reclaimed - gap;
+        let Some(mut sized) = size_group(group, inputs, height, text, room, Some(ends)) else {
+            continue;
+        };
+        if let Some(previous) = out.last_mut() {
+            previous.width -= reclaimed;
+            previous.ends.right = SeparatorShape::None;
+            previous.edges.right = EdgeShape::None;
+            sized.edges.left = EdgeShape::None;
+        }
+        left = room - sized.width;
+        out.push(sized);
+    }
+    out
 }
 
 /// The transition between a module at the edge of a group and the bar behind it.
@@ -1312,7 +1404,9 @@ fn end_separator(
     ends: &Ends,
     direction: Direction,
     module: Color,
+    leading: bool,
 ) -> PlacedSeparator {
+    let direction = ends.direction.unwrap_or(direction);
     let (fill, under) = match direction {
         Direction::Left => (Color::TRANSPARENT, module),
         Direction::Right => (module, Color::TRANSPARENT),
@@ -1325,6 +1419,9 @@ fn end_separator(
         shape,
         direction,
         overlap: ends.overlap,
+        // Only slants need a complementary triangle to change slope while staying
+        // attached. Other cap shapes retain their established pointing behavior.
+        inverted: shape == SeparatorShape::Slant && leading == (direction == Direction::Right),
         fill,
         under,
     }
@@ -1346,22 +1443,29 @@ pub fn compute(
         ..Frame::default()
     };
 
-    let run_width = |groups: &Vec<SizedGroup>| -> f32 {
+    let run_width = |groups: &Vec<SizedGroup>, separator: Option<Separator>| -> f32 {
         if groups.is_empty() {
             return 0.0;
         }
-        groups.iter().map(|g| g.width).sum::<f32>() + gap * (groups.len() - 1) as f32
+        groups.iter().map(|g| g.width).sum::<f32>()
+            + separator.map_or(gap, |s| s.width) * (groups.len() - 1) as f32
     };
 
     // Sized in the order they get to keep their width: the right run says what it needs,
     // the left run takes what is left, and the centre lives in the gap between them. A run
     // that runs out of room truncates the module it is in the middle of and drops the rest,
     // rather than drawing over its neighbour.
-    let size_run = |groups: &[GroupCfg], budget: f32, text: &mut dyn Measure| -> Vec<SizedGroup> {
+    let size_run = |position: &crate::config::Position,
+                    budget: f32,
+                    text: &mut dyn Measure|
+     -> Vec<SizedGroup> {
+        if let Some(separator) = position.separator {
+            return size_joined_run(&position.groups, separator, inputs, height, text, budget);
+        }
         let mut left = budget;
         let mut out = Vec::new();
-        for group in groups {
-            let Some(sized) = size_group(group, inputs, height, text, left) else {
+        for group in &position.groups {
+            let Some(sized) = size_group(group, inputs, height, text, left, None) else {
                 continue;
             };
             left -= sized.width + gap;
@@ -1371,16 +1475,16 @@ pub fn compute(
     };
 
     let right = size_run(&cfg.positions[2], width, text);
-    let right_width = run_width(&right);
+    let right_width = run_width(&right, cfg.positions[2].separator);
     let left = size_run(
         &cfg.positions[0],
         (width - right_width - gap).max(0.0),
         text,
     );
-    let left_width = run_width(&left);
+    let left_width = run_width(&left, cfg.positions[0].separator);
     let between = (width - right_width - left_width - gap * 2.0).max(0.0);
     let centre = size_run(&cfg.positions[1], between, text);
-    let centre_width = run_width(&centre);
+    let centre_width = run_width(&centre, cfg.positions[1].separator);
     let sized = [left, centre, right];
 
     // The centre run is centred on the bar, but pushed aside rather than allowed to sit on
@@ -1399,11 +1503,25 @@ pub fn compute(
 
     let starts = [0.0, centre_start, right_start];
 
-    for (groups, mut x) in sized.into_iter().zip(starts) {
+    for ((groups, mut x), position) in sized.into_iter().zip(starts).zip(&cfg.positions) {
+        let first = frame.groups.len();
         for group in groups {
             let w = group.width;
-            frame.groups.push(place(group, x, height, pointer));
-            x += w + gap;
+            let placed = place(group, x, height, pointer);
+            if let Some(separator) = position.separator
+                && frame.groups.len() > first
+                && let Some(previous) = frame.groups.last().and_then(|g| g.modules.last())
+                && let Some(next) = placed.modules.first()
+            {
+                frame.group_separators.push(separator_between(
+                    separator,
+                    previous,
+                    next,
+                    frame.background,
+                ));
+            }
+            frame.groups.push(placed);
+            x += w + position.separator.map_or(gap, |s| s.width);
         }
     }
 
@@ -3320,5 +3438,204 @@ padding = 0
         assert_eq!(frame.module_at(1.0, 5.0).unwrap().text, "abc");
         assert_eq!(frame.module_at(4.0, 5.0).unwrap().text, "de");
         assert!(frame.module_at(50.0, 5.0).is_none());
+    }
+    const JOINED: &str = r##"
+[bar]
+height = 20
+gap = 17
+[right]
+groups = ["a", "b", "c"]
+[right.separator]
+shape = "slant"
+width = 5
+overlap = 1
+[group.a]
+modules = ["a"]
+radius = 4
+ends = { left = "slant", right = "slant", width = 2 }
+[group.b]
+modules = ["b"]
+radius = 4
+ends = { left = "slant", right = "slant", width = 2 }
+[group.c]
+modules = ["c"]
+radius = 4
+ends = { left = "slant", right = "slant", width = 2 }
+[module.a]
+format = "$text"
+padding = 0
+background = "#aa0000"
+[module.b]
+format = "$text"
+padding = 0
+background = "#00aa00"
+[module.b.states.hover]
+hover = true
+background = "#ffff00"
+[module.c]
+format = "$text"
+padding = 0
+background = "#0000aa"
+"##;
+
+    fn joined_frame(
+        config: &str,
+        items: &[StatusItem],
+        width: f32,
+        pointer: Option<(f32, f32)>,
+    ) -> Frame {
+        let cfg = Config::parse(config).unwrap();
+        let inputs = Inputs {
+            items,
+            native: &Registry::new(&Default::default()),
+            sway: &SwayState::default(),
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed: &Default::default(),
+            waiting: &Default::default(),
+            spin: 0,
+            tray: &Default::default(),
+            output: None,
+        };
+        compute(&cfg, &inputs, width, 20.0, &mut Fixed, pointer)
+    }
+
+    #[test]
+    fn joined_groups_skip_empty_neighbors_and_keep_only_outer_caps() {
+        let items = [item("a", "aaa"), item("b", ""), item("c", "ccc")];
+        let frame = joined_frame(JOINED, &items, 100.0, None);
+        assert_eq!(frame.groups.len(), 2);
+        assert_eq!(frame.group_separators.len(), 1);
+        let (a, c) = (&frame.groups[0], &frame.groups[1]);
+        assert_eq!((a.width, c.width), (5.0, 5.0)); // three letters, one outer cap
+        assert_eq!(c.x - (a.x + a.width), 5.0); // join, not bar.gap or facing caps
+        assert_eq!(
+            (a.edges.left, a.edges.right),
+            (EdgeShape::Round, EdgeShape::None)
+        );
+        assert_eq!(
+            (c.edges.left, c.edges.right),
+            (EdgeShape::None, EdgeShape::Round)
+        );
+        assert_eq!((a.separators.len(), c.separators.len()), (1, 1));
+        let join = &frame.group_separators[0];
+        assert_eq!(join.fill, a.modules[0].background);
+        assert_eq!(join.under, c.modules[0].background);
+        assert!(frame.module_at(join.x + 2.0, 10.0).is_none());
+        let single = joined_frame(JOINED, &[item("b", "bbb")], 100.0, None);
+        assert!(single.group_separators.is_empty());
+        assert_eq!(single.groups[0].width, 7.0);
+        assert_eq!(single.groups[0].separators.len(), 2);
+        let empty = joined_frame(JOINED, &[], 100.0, None);
+        assert!(empty.groups.is_empty() && empty.group_separators.is_empty());
+    }
+
+    #[test]
+    fn joined_groups_fit_caps_and_internal_separators_in_the_width_budget() {
+        let config = JOINED.replace(
+            "modules = [\"a\"]",
+            "modules = [\"a\", \"b\"]\nseparator = { shape = 'slant', width = 9 }",
+        );
+        let items = [
+            item("a", "aaaaaaaaaa"),
+            item("b", "bbbbbbbbbb"),
+            item("c", "cccccccccc"),
+        ];
+        for width in 1..90 {
+            let frame = joined_frame(&config, &items, width as f32, None);
+            for group in &frame.groups {
+                assert!(
+                    group.x >= 0.0 && group.x + group.width <= width as f32,
+                    "width {width}: {group:?}"
+                );
+                for m in &group.modules {
+                    assert!(m.x >= group.x && m.x + m.width <= group.x + group.width);
+                }
+            }
+            assert_eq!(
+                frame.group_separators.len(),
+                frame.groups.len().saturating_sub(1)
+            );
+        }
+    }
+
+    #[test]
+    fn joins_use_hover_and_source_colors_and_damage_both_old_and_new_bounds() {
+        let mut items = [item("a", "aaa"), item("b", "bbb"), item("c", "ccc")];
+        let old = joined_frame(JOINED, &items, 100.0, None);
+        let b = &old.groups[1].modules[0];
+        let hovered = joined_frame(JOINED, &items, 100.0, Some((b.x + 1.0, 10.0)));
+        let yellow = Color::parse("#ffff00").unwrap();
+        assert_eq!(hovered.group_separators[0].under, yellow);
+        assert_eq!(hovered.group_separators[1].fill, yellow);
+        let Damage::Rects(rects) = hovered.damage(&old) else {
+            panic!("hover keeps geometry");
+        };
+        for join in &hovered.group_separators {
+            assert!(rects.contains(&(join.x - 1.0, 0.0, 7.0, 20.0)));
+        }
+        items[1].background = Some(Color::parse("#ff7700").unwrap());
+        let changed = joined_frame(JOINED, &items, 100.0, None);
+        assert_eq!(
+            changed.group_separators[0].under,
+            items[1].background.unwrap()
+        );
+        assert_eq!(
+            changed.group_separators[1].fill,
+            items[1].background.unwrap()
+        );
+        assert!(matches!(changed.damage(&changed),Damage::Rects(r) if r.is_empty()));
+        let resized = joined_frame(JOINED, &items, 110.0, None);
+        let Damage::Rects(rects) = resized.damage(&changed) else {
+            panic!("same groups");
+        };
+        for join in changed
+            .group_separators
+            .iter()
+            .chain(&resized.group_separators)
+        {
+            assert!(rects.contains(&(join.x - 1.0, 0.0, 7.0, 20.0)));
+        }
+        assert!(matches!(
+            joined_frame(JOINED, &items[..1], 100.0, None).damage(&old),
+            Damage::All
+        ));
+    }
+
+    #[test]
+    fn absent_or_disabled_group_separator_preserves_independent_layout() {
+        let disabled = JOINED.replace(
+            "shape = \"slant\"\nwidth = 5",
+            "shape = \"none\"\nwidth = 5",
+        );
+        let omitted = disabled.replace(
+            "[right.separator]\nshape = \"none\"\nwidth = 5\noverlap = 1\n",
+            "",
+        );
+        let items = [item("a", "aaa"), item("b", "bbb"), item("c", "ccc")];
+        let a = joined_frame(&disabled, &items, 100.0, None);
+        let b = joined_frame(&omitted, &items, 100.0, None);
+        assert!(a.group_separators.is_empty());
+        assert!(matches!(a.damage(&b),Damage::Rects(r) if r.is_empty()));
+        assert_eq!(a.groups[1].x - a.groups[0].x - a.groups[0].width, 17.0);
+    }
+    #[test]
+    fn outer_caps_can_face_left_without_reversing_group_joins() {
+        let config = JOINED.replacen(
+            "ends = { left = \"slant\", right = \"slant\", width = 2 }",
+            "ends = { left = \"slant\", right = \"slant\", width = 2, direction = \"left\" }",
+            1,
+        );
+        let items = [item("a", "aaa"), item("b", "bbb")];
+        let frame = joined_frame(&config, &items, 100.0, None);
+        let leading = &frame.groups[0].separators[0];
+        assert_eq!(leading.direction, Direction::Left);
+        assert_eq!(leading.fill, Color::TRANSPARENT);
+        assert_eq!(leading.under, frame.groups[0].modules[0].background);
+        assert_eq!(frame.group_separators[0].direction, Direction::Right);
+        // The next group's outer cap still inherits its own separator direction.
+        assert_eq!(frame.groups[1].separators[0].direction, Direction::Right);
+        let original = joined_frame(JOINED, &items, 100.0, None);
+        assert_eq!(original.groups[0].separators[0].direction, Direction::Right);
     }
 }

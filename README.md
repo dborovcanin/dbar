@@ -591,6 +591,40 @@ overlap = 1           # bleed past each side, hiding antialiasing seams
 region, which is what gives the classic Powerline wedge. A group without a
 separator falls back to its `spacing` for the gap between modules.
 
+Groups in one alignment can also share transitions, without merging their module
+lists. This is opt-in independently for `left`, `center`, and `right`:
+
+```toml
+[right]
+groups = ["world", "system", "connections", "power"]
+
+[right.separator]
+shape = "slant"
+width = 6
+direction = "right"
+color = "previous"
+overlap = 0
+```
+
+The separator replaces `bar.gap` between visible groups in that alignment, plus
+their facing end caps and rounded group corners. Internal separators and outer
+caps/corners keep their own settings. Empty groups contribute no gap; their
+remaining neighbors join directly. The space between alignments still uses
+`bar.gap`. Omitting the table, or setting `shape = "none"`, preserves independent
+groups and their original gaps, opacity and padding.
+
+Joined groups currently require `opacity = 1` and `padding = 0`; configuration
+validation reports incompatible groups. Use opaque block fills for continuous
+filled transitions, just as for separators inside a group. The join reads the
+last visible block on the left and the first on the right, including their state
+and hover colors. `color = "background"` refers to the bar background here, and
+`line` leaves that background visible around the stroke. Width must be finite
+and positive. Joins do not receive clicks. See
+[advanced_3.toml](examples/advanced_3.toml) for a complete example. Groups remain
+independently drawn: transparent group backgrounds and square block fills are
+the cheapest ribbon style; separate filled, rounded group backgrounds add paint
+work compared with a merged group.
+
 Outer corners are a separate concept:
 
 ```toml
@@ -633,9 +667,13 @@ overlap = 1
 ```
 
 An end is the same transition as between two modules, drawn between a module
-and whatever is behind the bar. The shapes face the way the group's separators
-do, and the space they need is reserved beside the modules rather than taken
-from them.
+and whatever is behind the bar. The shapes inherit the group's separator
+direction; set `direction = "left"` or `"right"` in the `ends` table to orient
+caps independently of internal transitions. The space they need is reserved
+beside the modules rather than taken from them. Use `left = "slant"` for an
+angled leading cap and `right = "none"` to finish flush with the screen edge.
+Slanted caps fill the side adjacent to their module: `direction = "right"`
+gives a `/` diagonal and `"left"` gives a `\` diagonal.
 
 Instead of `"*"`, a group may list block names to select and order them
 explicitly:
