@@ -1561,6 +1561,7 @@ format = "$text"
                         sway: &Default::default(),
                         alt: &Default::default(),
                         pages: &Default::default(),
+                        collapsed_groups: &Default::default(),
                         collapsed: &Default::default(),
                         waiting: &Default::default(),
                         spin: 0,
@@ -1845,6 +1846,7 @@ format = "$text"
         let (first, gap, second) = (60.0, 12.0, 60.0);
         Frame {
             groups: vec![PlacedGroup {
+                collapse: None,
                 x,
                 y: 0.0,
                 width: first + gap + second,
@@ -2180,6 +2182,7 @@ format = "$text"
             sway: &Default::default(),
             alt: &Default::default(),
             pages: &Default::default(),
+            collapsed_groups: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -2368,6 +2371,119 @@ background = "#83a598"
                     let touching = if leading { 11.0 } else { 0.0 };
                     assert_eq!(alpha(touching, 5.0), 255);
                     assert_eq!(alpha(touching, 14.0), 255);
+                }
+            }
+        }
+    }
+    #[test]
+    fn collapsed_groups_keep_islands_caps_and_damage_every_changed_pixel() {
+        use crate::{
+            collect::Registry,
+            layout::{Damage, Inputs},
+            status::{Fields, StatusItem, Value},
+        };
+        for joined in [false, true] {
+            for direction in ["left", "right"] {
+                let sep = "{ shape = 'slant', width = 6, overlap = 1 }";
+                let mut config = format!(
+                    "[left]\ngroups = ['a', 'b', 'c']\n{}",
+                    if joined {
+                        format!("separator = {sep}\n")
+                    } else {
+                        String::new()
+                    }
+                );
+                for (name, color) in [("a", "#cc241d"), ("b", "#98971a"), ("c", "#458588")] {
+                    config += &format!(
+                        "[group.{name}]\nmodules = ['{name}']\ncollapsible = true\ncollapse_button = 'right'\nbackground = '#3c3836'\nradius = 8\npadding = {}\nopacity = {}\nends = {{ left = 'slant', right = 'slant', direction = '{direction}', width = 6 }}\ncollapsed = {{ icon = 'cpu', icon_size = 10, padding = 3, background = '#83a598' }}\n[module.{name}]\nbackground = '{color}'\npadding = 12\nformat = '$text'\n",
+                        if joined { 0 } else { 2 },
+                        if joined { 1.0 } else { 0.8 }
+                    );
+                }
+                let cfg = Config::parse(&config).unwrap();
+                let items: Vec<_> = ["a", "b", "c"]
+                    .into_iter()
+                    .map(|name| {
+                        let mut fields = Fields::default();
+                        fields.set("text", Value::Text("example".into()));
+                        StatusItem {
+                            id: Some(name.into()),
+                            fields,
+                            state: Default::default(),
+                            urgent: false,
+                            foreground: None,
+                            background: None,
+                            action: None,
+                        }
+                    })
+                    .collect();
+                let native = Registry::new(&Default::default());
+                for name in ["a", "b", "c"] {
+                    let empty = Default::default();
+                    let folded = [name.to_string()].into();
+                    let frame = |groups| {
+                        let inputs = Inputs {
+                            items: &items,
+                            native: &native,
+                            sway: &Default::default(),
+                            alt: &Default::default(),
+                            pages: &Default::default(),
+                            collapsed: &Default::default(),
+                            collapsed_groups: groups,
+                            waiting: &Default::default(),
+                            spin: 0,
+                            tray: &Default::default(),
+                            output: None,
+                        };
+                        crate::layout::compute(
+                            &cfg,
+                            &inputs,
+                            480.0,
+                            20.0,
+                            &mut Blocks {
+                                scale: 1.0,
+                                run: None,
+                            },
+                            None,
+                        )
+                    };
+                    let open = frame(&empty);
+                    let closed = frame(&folded);
+                    assert_eq!(closed.groups.len(), 3);
+                    for group in &closed.groups {
+                        assert_eq!(group.opacity, if joined { 1.0 } else { 0.8 });
+                    }
+                    for scale in [1.0, 1.5, 2.0] {
+                        let before = shot(&open, scale);
+                        let after = shot(&closed, scale);
+                        assert_ne!(before.data(), after.data());
+                        for (old, new) in [(&open, &closed), (&closed, &open)] {
+                            let Damage::Rects(rects) = new.damage(old) else {
+                                panic!("same groups")
+                            };
+                            for (n, (a, b)) in
+                                before.pixels().iter().zip(after.pixels()).enumerate()
+                            {
+                                if a == b {
+                                    continue;
+                                }
+                                let (x, y) = (
+                                    (n as u32 % before.width()) as f32,
+                                    (n as u32 / before.width()) as f32,
+                                );
+                                assert!(
+                                    rects
+                                        .iter()
+                                        .any(|(rx, ry, rw, rh)| x >= (rx * scale).floor()
+                                            && x < ((rx + rw) * scale).ceil()
+                                            && y >= (ry * scale).floor()
+                                            && y < ((ry + rh) * scale).ceil()),
+                                    "undamaged pixel {x},{y}; joined={joined} name={name} direction={direction} scale={scale}"
+                                );
+                            }
+                        }
+                    }
+                    assert_eq!(shot(&frame(&empty), 1.0).data(), shot(&open, 1.0).data());
                 }
             }
         }

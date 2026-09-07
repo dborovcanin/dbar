@@ -277,6 +277,8 @@ pub struct App {
     children: Vec<std::process::Child>,
     /// Modules a right click has folded down to their icon, by name.
     collapsed: std::collections::HashSet<String>,
+    /// Group state is shared by all outputs and independent of child gestures.
+    collapsed_groups: std::collections::HashSet<String>,
     /// Which sources each realtime signal reads again.
     signals: std::collections::HashMap<i32, Vec<Which>>,
     /// The way to ask a command module's program for another reading, by source.
@@ -388,6 +390,7 @@ impl App {
             pages: std::collections::HashMap::new(),
             children: Vec::new(),
             collapsed: std::collections::HashSet::new(),
+            collapsed_groups: std::collections::HashSet::new(),
             signals: config_signals,
             triggers: std::collections::HashMap::new(),
             running: std::collections::HashMap::new(),
@@ -1346,6 +1349,7 @@ impl App {
             alt,
             pages,
             collapsed,
+            collapsed_groups,
             waiting,
             spin,
             tray,
@@ -1364,6 +1368,7 @@ impl App {
             alt,
             pages,
             collapsed,
+            collapsed_groups,
             waiting,
             spin: *spin,
             tray,
@@ -1511,8 +1516,17 @@ impl App {
     }
 
     fn dispatch_click(&mut self, i: usize, x: f64, y: f64, button: u32) {
-        let Some(module) = self.bars[i].frame.module_at(x as f32, y as f32) else {
-            return;
+        let module = match self.bars[i].frame.click_at(x as f32, y as f32, button) {
+            Some(layout::ClickTarget::Group(name)) => {
+                let name = name.to_string();
+                if !self.collapsed_groups.remove(&name) {
+                    self.collapsed_groups.insert(name);
+                }
+                self.invalidate();
+                return;
+            }
+            Some(layout::ClickTarget::Module(module)) => module,
+            None => return,
         };
         // Everything the module has to say about this press, taken before anything is
         // done about it: the module is borrowed out of the frame, and acting needs the
@@ -2265,5 +2279,117 @@ mod tests {
             0,
             "carried across a stop"
         );
+    }
+
+    #[test]
+    fn group_button_precedes_every_child_gesture_and_forwarded_action() {
+        use crate::layout::{ClickTarget, PlacedGroup};
+        use crate::status::Control;
+        let actions = [
+            None,
+            Some(ActionTarget::Control {
+                what: Control::Volume,
+                step: 5.0,
+            }),
+            Some(ActionTarget::Control {
+                what: Control::Brightness,
+                step: 5.0,
+            }),
+            Some(ActionTarget::Control {
+                what: Control::Media,
+                step: 0.0,
+            }),
+            Some(ActionTarget::Tray { key: "tray".into() }),
+            Some(ActionTarget::I3Bar {
+                name: Some("block".into()),
+                instance: None,
+            }),
+            Some(ActionTarget::Sway("workspace 1".into())),
+        ];
+        let modules = [
+            PlacedModule {
+                on_click: Some(std::sync::Arc::new(ClickActions {
+                    left: Some(vec!["true".into()]),
+                    middle: Some(vec!["true".into()]),
+                    right: Some(vec!["true".into()]),
+                })),
+                ..placed()
+            },
+            PlacedModule {
+                collapsible: true,
+                ..placed()
+            },
+            PlacedModule {
+                alt: Some(3),
+                ..placed()
+            },
+            PlacedModule {
+                refresh: Some(Button::Left),
+                ..placed()
+            },
+            PlacedModule {
+                mute: Some(Button::Middle),
+                ..placed()
+            },
+            PlacedModule {
+                paged: Some(3),
+                ..placed()
+            },
+            placed(),
+        ];
+        for reserved in [Button::Left, Button::Middle, Button::Right] {
+            for module in &modules {
+                for action in &actions {
+                    let mut child = module.clone();
+                    child.x = 5.0;
+                    child.y = 2.0;
+                    child.action = action.clone();
+                    let mut next = child.clone();
+                    next.x = 20.0;
+                    let group = PlacedGroup {
+                        collapse: Some(("system".into(), reserved)),
+                        x: 0.0,
+                        y: 0.0,
+                        width: 40.0,
+                        height: 16.0,
+                        background: crate::color::Color::TRANSPARENT,
+                        opacity: 1.0,
+                        edges: crate::config::Edges {
+                            left: crate::config::EdgeShape::Round,
+                            right: crate::config::EdgeShape::Round,
+                            radius: 4.0,
+                        },
+                        modules: vec![child, next],
+                        separators: vec![],
+                    };
+                    let frame = Frame {
+                        groups: vec![group],
+                        ..Frame::default()
+                    };
+                    // Both children, horizontal/vertical padding, and the internal gap.
+                    for x in [0.0, 6.0, 16.0, 21.0, 39.0] {
+                        for y in [0.0, 5.0, 15.0] {
+                            assert!(matches!(
+                                frame.click_at(x, y, reserved.number()),
+                                Some(ClickTarget::Group("system"))
+                            ));
+                        }
+                    }
+                    for button in 1..=5 {
+                        if button == reserved.number() {
+                            continue;
+                        }
+                        let Some(ClickTarget::Module(hit)) = frame.click_at(6.0, 5.0, button)
+                        else {
+                            panic!("lost child button {button}")
+                        };
+                        assert!(std::ptr::eq(hit, &frame.groups[0].modules[0]));
+                        assert_eq!(gesture(hit, button), gesture(module, button));
+                        assert!(frame.click_at(16.0, 5.0, button).is_none());
+                    }
+                    assert!(frame.click_at(40.0, 5.0, reserved.number()).is_none());
+                }
+            }
+        }
     }
 }

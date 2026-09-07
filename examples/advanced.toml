@@ -254,9 +254,16 @@ right = "round"
 # holding, and how hot that is making it. Three readings of one thing, so they
 # share one island and run into each other rather than being ruled apart.
 [group.system]
+# Right click anywhere in this island to fold it; right click Tux to expand again.
+collapsible = true
+collapse_button = "right"
 modules = ["cpu", "memory", "temperature"]
 radius = 16
 # opacity = 0.8
+
+[group.system.collapsed]
+style = "tile"
+icon = "tux"
 
 [group.system.separator]
 shape = "curve"

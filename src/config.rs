@@ -484,7 +484,19 @@ struct RawStyle {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct RawCollapsedGroup {
+    style: Option<String>,
+    #[serde(flatten)]
+    overrides: RawStyle,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawGroup {
+    #[serde(default)]
+    collapsible: bool,
+    collapse_button: Option<Button>,
+    collapsed: Option<RawCollapsedGroup>,
     #[serde(default)]
     modules: Vec<String>,
     background: Option<String>,
@@ -828,7 +840,15 @@ pub struct I3Bar {
 }
 
 #[derive(Debug, Clone)]
+pub struct GroupCollapse {
+    pub button: Button,
+    pub style: Style,
+}
+
+#[derive(Debug, Clone)]
 pub struct Group {
+    pub name: String,
+    pub collapse: Option<GroupCollapse>,
     pub background: Color,
     /// How much of the finished island reaches the screen, 0.0 to 1.0.
     ///
@@ -1342,44 +1362,72 @@ struct Claims {
     mute: Button,
 }
 
-/// Reject a module where two things want the same button.
+/// Every button this module has given a job, and the key that gave it.
 ///
-/// A button does one thing. Silently letting the first claimant win would make the loser
-/// a key that is present, spelled correctly and simply ignored, which is the kind of
-/// mistake a config file should not be able to express.
-fn claim_buttons(module: &str, claims: &Claims, on_click: Option<&ClickActions>) -> Result<()> {
+/// One list, so the two places that care - a module against itself, and a module against
+/// the group it sits in - are asking the same question of the same answer.
+fn buttons_claimed(claims: &Claims, on_click: Option<&ClickActions>) -> Vec<(Button, String)> {
     let mut claimed: Vec<(Button, String)> = Vec::new();
-    let mut claim = |button: Button, by: String| -> Result<()> {
-        if let Some((_, first)) = claimed.iter().find(|(b, _)| *b == button) {
-            bail!(
-                "[module.{module}] gives the {} button to both {first} and {by}",
-                button.name()
-            );
-        }
-        claimed.push((button, by));
-        Ok(())
-    };
-
     if let Some(button) = claims.alt {
-        claim(button, "format_alt".to_string())?;
+        claimed.push((button, "format_alt".to_string()));
     }
     if let Some(button) = claims.collapse {
-        claim(button, "collapsible".to_string())?;
+        claimed.push((button, "collapsible".to_string()));
     }
     if let Some(button) = claims.refresh {
-        claim(button, "refresh_button".to_string())?;
+        claimed.push((button, "refresh_button".to_string()));
     }
     // What `controls` and `scroll` bind, for the sources dbar can operate as well as read.
     // Only the presses are listed: a scroll notch is not a button and collides with
     // nothing here.
     match claims.control {
-        Some(Control::Media) => claim(Button::Left, "controls".to_string())?,
-        Some(Control::Volume) => claim(claims.mute, "mute_button".to_string())?,
+        Some(Control::Media) => claimed.push((Button::Left, "controls".to_string())),
+        Some(Control::Volume) => claimed.push((claims.mute, "mute_button".to_string())),
         Some(Control::Brightness) | None => {}
     }
     if let Some(actions) = on_click {
         for button in actions.buttons() {
-            claim(button, format!("on_click.{}", button.name()))?;
+            claimed.push((button, format!("on_click.{}", button.name())));
+        }
+    }
+    claimed
+}
+
+/// Reject a module where two things want the same button.
+///
+/// A button does one thing. Silently letting the first claimant win would make the loser
+/// a key that is present, spelled correctly and simply ignored, which is the kind of
+/// mistake a config file should not be able to express.
+fn claim_buttons(module: &str, claimed: &[(Button, String)]) -> Result<()> {
+    for (at, (button, by)) in claimed.iter().enumerate() {
+        if let Some((_, first)) = claimed[..at].iter().find(|(b, _)| b == button) {
+            bail!(
+                "[module.{module}] gives the {} button to both {first} and {by}",
+                button.name()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Reject a group that reserves a button one of its own modules is already using.
+///
+/// The group wins at the pointer - it has to, since it answers for its whole island - so
+/// the module's key would still be there, still spelled correctly, and never again do
+/// anything. That is the same mistake `claim_buttons` refuses one level down.
+fn claim_group_button(
+    group: &str,
+    reserved: Button,
+    modules: &[(String, Vec<(Button, String)>)],
+) -> Result<()> {
+    for (module, claimed) in modules {
+        if let Some((_, by)) = claimed.iter().find(|(b, _)| *b == reserved) {
+            bail!(
+                "[group.{group}] reserves the {} button, but module {module:?} gives it to \
+                 {by}; a group answers for its whole island, so the module would never see \
+                 that press",
+                reserved.name()
+            );
         }
     }
     Ok(())
@@ -1933,8 +1981,39 @@ fn resolve_group(
     styles: &HashMap<String, Style>,
     base: Style,
 ) -> Result<Group> {
+    let collapsed_style = raw_group
+        .collapsed
+        .as_ref()
+        .map(|collapsed| {
+            let start = match &collapsed.style {
+                Some(style) => *styles
+                    .get(style)
+                    .ok_or_else(|| anyhow!("unknown style {style:?}"))?,
+                None => base,
+            };
+            start.overlay(&collapsed.overrides, palette)
+        })
+        .transpose()
+        .with_context(|| format!("in [group.{name}.collapsed]"))?;
+    let collapse = if raw_group.collapsible {
+        let button = raw_group.collapse_button.ok_or_else(|| {
+            anyhow!("[group.{name}]: collapsible requires an explicit collapse_button")
+        })?;
+        let style = collapsed_style.unwrap_or(base);
+        if style.icon.is_none() || !style.icon_size.is_finite() || style.icon_size <= 0.0 {
+            bail!(
+                "[group.{name}.collapsed]: collapsible requires an icon with positive finite icon_size"
+            );
+        }
+        Some(GroupCollapse { button, style })
+    } else {
+        None
+    };
     let wildcard = raw_group.modules.iter().any(|m| m == "*");
     let mut modules = Vec::new();
+    // What each module in this group has given its buttons to do, kept until the group's
+    // own reservation can be checked against all of them.
+    let mut claimed_here: Vec<(String, Vec<(Button, String)>)> = Vec::new();
     for module_name in raw_group.modules.iter().filter(|m| *m != "*") {
         let raw_module = raw.modules.get(module_name);
         let source = resolve_source(module_name, raw_module)?;
@@ -2214,7 +2293,9 @@ fn resolve_group(
             control: control.map(|(what, _)| what),
             mute: mute_button,
         };
-        claim_buttons(module_name, &claims, on_click.as_ref())?;
+        let claimed = buttons_claimed(&claims, on_click.as_ref());
+        claim_buttons(module_name, &claimed)?;
+        claimed_here.push((module_name.clone(), claimed));
 
         modules.push(Module {
             name: module_name.clone(),
@@ -2235,6 +2316,10 @@ fn resolve_group(
             style,
             states,
         });
+    }
+
+    if let Some(collapse) = &collapse {
+        claim_group_button(name, collapse.button, &claimed_here)?;
     }
 
     // Wildcard groups need a style for blocks that have no `[module.*]` table.
@@ -2279,6 +2364,8 @@ fn resolve_group(
     }
 
     Ok(Group {
+        name: name.to_string(),
+        collapse,
         background: match &raw_group.background {
             Some(c) => palette
                 .get(c)
@@ -3717,5 +3804,123 @@ source = "cpu"
             );
             assert!(Config::parse(&config(&separator, "")).is_err(), "{bad}");
         }
+    }
+
+    /// A group answers for its whole island, so a button it reserves never reaches the
+    /// modules inside it. dbar refuses to let a module hand one button two jobs; a group
+    /// taking a button a module is already using is the same mistake one level up, and the
+    /// module's key would be there, spelled correctly, and dead.
+    #[test]
+    fn a_group_may_not_reserve_a_button_one_of_its_modules_uses() {
+        let config = |group: &str, module: &str| {
+            format!(
+                "[left]\ngroups = ['g']\n[group.g]\nmodules = ['m']\ncollapsible = true\n\
+                 collapse_button = '{group}'\ncollapsed = {{ icon = 'cpu' }}\n\
+                 [module.m]\nsource = 'cpu'\n{module}\n"
+            )
+        };
+
+        for (button, module, by) in [
+            (
+                "right",
+                "collapsible = true
+icon = 'cpu'",
+                "collapsible",
+            ),
+            ("left", "format_alt = '$utilization'", "format_alt"),
+            ("middle", "refresh_button = 'middle'", "refresh_button"),
+            ("left", "on_click = { left = ['true'] }", "on_click.left"),
+        ] {
+            let e = Config::parse(&config(button, module))
+                .expect_err("the group and the module both want that button");
+            let message = format!("{e:#}");
+            assert!(message.contains(by), "{message}");
+            assert!(message.contains("\"m\""), "{message}");
+            assert!(message.contains(button), "{message}");
+        }
+
+        // A module operating the volume claims the button that mutes it.
+        let volume = "[left]\ngroups = ['g']\n[group.g]\nmodules = ['m']\ncollapsible = true\n\
+             collapse_button = 'middle'\ncollapsed = { icon = 'cpu' }\n\
+             [module.m]\nsource = 'audio'\nscroll = '5%'\n";
+        let e = Config::parse(volume).expect_err("middle mutes");
+        assert!(format!("{e:#}").contains("mute_button"), "{e:#}");
+
+        // And a module that leaves the reserved button alone is fine, however much else
+        // it does with the other two.
+        Config::parse(&config(
+            "right",
+            "format_alt = '$utilization'\nrefresh_button = 'middle'",
+        ))
+        .expect("nothing here wants the right button");
+    }
+
+    #[test]
+    fn group_collapse_defaults_requirements_and_style_cascade() {
+        let prefix = "[left]\ngroups = ['system']\n[group.system]\nmodules = []\n";
+        let parse = |extra: &str| Config::parse(&format!("{prefix}{extra}"));
+        let cfg = parse("").unwrap();
+        assert_eq!(cfg.positions[0].groups[0].name, "system");
+        assert!(cfg.positions[0].groups[0].collapse.is_none());
+        for (extra, message) in [
+            ("collapsible = true", "collapse_button"),
+            ("collapsible = true\ncollapse_button = 'right'", "icon"),
+            ("collapsible = true\ncollapse_button = 'wheel'", "wheel"),
+            (
+                "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'bogus' }",
+                "unknown icon",
+            ),
+            (
+                "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'none' }",
+                "icon",
+            ),
+            (
+                "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'cpu', icon_size = 0 }",
+                "icon_size",
+            ),
+            (
+                "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'cpu', icon_size = -1 }",
+                "icon_size",
+            ),
+            (
+                "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'cpu', icon_size = inf }",
+                "icon_size",
+            ),
+            (
+                "collapsible = true\ncollapse_button = 'right'\ncollapsed = { style = 'missing' }",
+                "unknown style",
+            ),
+            ("collapsed = { typo = 1 }", "unknown field"),
+        ] {
+            let error = format!("{:#}", parse(extra).unwrap_err());
+            assert!(error.contains(message), "{error}");
+        }
+        for button in ["left", "middle", "right"] {
+            let cfg = parse(&format!(
+                "collapsible = true\ncollapse_button = '{button}'\ncollapsed = {{ icon = 'cpu' }}"
+            ))
+            .unwrap();
+            let collapse = cfg.positions[0].groups[0].collapse.as_ref().unwrap();
+            assert_eq!(collapse.button.name(), button);
+            assert_eq!(collapse.style.padding, Style::default().padding);
+            assert_eq!(collapse.style.icon_size, cfg.bar.icon_size);
+        }
+        let cfg = parse("collapsible = true\ncollapse_button = 'middle'\ncollapsed = { style = 'tile', icon = 'cpu', padding = 7 }\n[style.tile]\nbackground = '#123456'\nicon = 'memory'\nicon_size = 12\npadding = 3").unwrap();
+        let style = cfg.positions[0].groups[0].collapse.as_ref().unwrap().style;
+        assert_eq!(style.icon, Icon::parse("cpu"));
+        assert_eq!(style.icon_size, 12.0);
+        assert_eq!(style.padding, 7.0);
+        assert_eq!(style.background, Color::parse("#123456").unwrap());
+        assert!(
+            parse("collapsible = false\ncollapse_button = 'right'\ncollapsed = { icon = 'cpu' }")
+                .unwrap()
+                .positions[0]
+                .groups[0]
+                .collapse
+                .is_none()
+        );
+        // Group reservation must not relax conflicting bindings inside the child.
+        let error = Config::parse("[left]\ngroups = ['g']\n[group.g]\nmodules = ['m']\ncollapsible = true\ncollapse_button = 'left'\ncollapsed = { icon = 'cpu' }\n[module.m]\nformat_alt = 'alt'\non_click = { left = ['true'] }").unwrap_err();
+        assert!(format!("{error:#}").contains("on_click.left"));
     }
 }

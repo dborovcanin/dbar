@@ -333,7 +333,7 @@ bar.
 out, it is a quarter of the icon size, so a bigger icon keeps its breathing room
 without being told; set it to tighten a busy bar.
 
-Fixed: `cpu`, `memory`, `disk`, `clock`, `ethernet`, `headphones`, `wifi-off`,
+Fixed: `tux` (penguin), `cpu`, `memory`, `disk`, `clock`, `ethernet`, `headphones`, `wifi-off`,
 `volume-muted`, `play`, `pause`.
 
 Graded: `battery`, `battery-charging`, `wifi`, `volume`, `brightness`,
@@ -590,6 +590,43 @@ overlap = 1           # bleed past each side, hiding antialiasing seams
 `color = "previous"` takes the preceding module's background for the leading
 region, which is what gives the classic Powerline wedge. A group without a
 separator falls back to its `spacing` for the gap between modules.
+
+A group can fold down to a single icon:
+
+```toml
+[group.system]
+modules = ["cpu", "memory", "temperature"]
+collapsible = true
+collapse_button = "right"
+
+[group.system.collapsed]
+style = "tile"        # optional named style
+icon = "cpu"
+```
+
+Groups default to collapse disabled and start expanded when enabled. Enabling it
+requires an explicit `collapse_button` (`left`, `middle`, or `right`) and an icon
+with positive `icon_size`. The collapsed appearance uses built-in style defaults,
+then the optional named style, then inline style overrides, just like a module.
+Use the reserved button anywhere inside the group, including padding, caps and
+internal separators, to collapse it; use that button on the icon to expand again.
+
+The group gets its reserved button before tray actions and provider forwarding.
+Configuration rejects a child binding that claims the same button: custom commands,
+individual block collapse, alternate formats, refresh and native controls must use
+other buttons. Conflicting actions within an individual block are also configuration
+errors. Other buttons and scrolling over expanded blocks keep their usual behavior.
+The collapsed icon only toggles its group; it forwards no child actions. Separators
+between groups remain noninteractive.
+
+Child collapse, alternate-format and paging states survive a group toggle. Group
+state is shared across outputs and resets on restart. Sources continue updating
+while hidden, so expansion shows current data. A collapsed group stays visible
+even if its children become empty, provided the icon fits the available width;
+an expanded empty group disappears as usual. Group background, opacity, padding,
+edges and caps remain in effect, and neighboring joins use the icon's style.
+[advanced.toml](examples/advanced.toml) uses right click to fold CPU, RAM and
+temperature into a Tux penguin.
 
 Groups in one alignment can also share transitions, without merging their module
 lists. This is opt-in independently for `left`, `center`, and `right`:

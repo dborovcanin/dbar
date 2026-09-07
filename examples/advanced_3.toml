@@ -180,11 +180,18 @@ width = 6
 direction = "right"
 
 [group.system]
+# Reserve right click throughout this group; click the CPU icon with right to expand.
+collapsible = true
+collapse_button = "right"
 modules = ["cpu", "memory", "temperature"]
 background = "#00000000"
 radius = 0
 padding = 0
 spacing = 0
+
+[group.system.collapsed]
+style = "tile"
+icon = "cpu"
 
 [group.system.separator]
 shape = "slant"

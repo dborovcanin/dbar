@@ -131,6 +131,7 @@ pub enum Icon {
     /// asked to hold something that is already pixels.
     Raster,
     Cpu,
+    Tux,
     Memory,
     Disk,
     Clock,
@@ -159,6 +160,7 @@ impl Icon {
     pub fn parse(name: &str) -> Option<Icon> {
         Some(match name {
             "cpu" => Icon::Cpu,
+            "tux" => Icon::Tux,
             "memory" | "ram" => Icon::Memory,
             "disk" => Icon::Disk,
             "clock" | "time" => Icon::Clock,
@@ -293,6 +295,7 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
         // Its pixels are carried on the placed icon, so there is no outline to build.
         Icon::Raster => {}
         Icon::Cpu => cpu(&mut out),
+        Icon::Tux => tux(&mut out),
         Icon::Memory => memory(&mut out),
         Icon::Disk => disk(&mut out),
         Icon::Clock => clock(&mut out),
@@ -333,6 +336,51 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
         Icon::Keyboard => keyboard(&mut out),
     }
     IconArt::Paths(out)
+}
+
+/// A seated penguin in the same single foreground colour as the other icons.
+/// The belly, eyes and beak are cutouts so they work on any group background.
+fn tux(out: &mut Vec<IconPath>) {
+    let mut body = Outline::new();
+    body.move_to(0.50, 0.06);
+    body.cubic_to(0.34, 0.06, 0.31, 0.18, 0.31, 0.32);
+    body.cubic_to(0.30, 0.43, 0.14, 0.51, 0.10, 0.72);
+    body.cubic_to(0.08, 0.80, 0.17, 0.81, 0.25, 0.70);
+    body.cubic_to(0.23, 0.88, 0.35, 0.91, 0.50, 0.91);
+    body.cubic_to(0.65, 0.91, 0.77, 0.88, 0.75, 0.70);
+    body.cubic_to(0.83, 0.81, 0.92, 0.80, 0.90, 0.72);
+    body.cubic_to(0.86, 0.51, 0.70, 0.43, 0.69, 0.32);
+    body.cubic_to(0.69, 0.18, 0.66, 0.06, 0.50, 0.06);
+    body.close();
+    // Broad belly, narrowing below the beak.
+    body.move_to(0.50, 0.47);
+    body.cubic_to(0.39, 0.43, 0.31, 0.60, 0.32, 0.75);
+    body.cubic_to(0.33, 0.86, 0.67, 0.86, 0.68, 0.75);
+    body.cubic_to(0.69, 0.60, 0.61, 0.43, 0.50, 0.47);
+    body.close();
+    rounded(&mut body, 0.365, 0.225, 0.475, 0.35, 0.055);
+    rounded(&mut body, 0.525, 0.225, 0.635, 0.35, 0.055);
+    body.move_to(0.39, 0.38);
+    body.cubic_to(0.44, 0.34, 0.56, 0.34, 0.61, 0.38);
+    body.line_to(0.50, 0.445);
+    body.close();
+    finish(body, Ink::FillEvenOdd, out);
+
+    let mut details = Outline::new();
+    details.push_circle(0.435, 0.29, 0.023);
+    details.push_circle(0.565, 0.29, 0.023);
+    // Splayed feet, kept apart to preserve the seated silhouette at bar sizes.
+    details.move_to(0.26, 0.80);
+    details.cubic_to(0.18, 0.79, 0.15, 0.87, 0.08, 0.91);
+    details.cubic_to(0.08, 0.97, 0.29, 0.98, 0.43, 0.94);
+    details.cubic_to(0.46, 0.91, 0.34, 0.80, 0.26, 0.80);
+    details.close();
+    details.move_to(0.74, 0.80);
+    details.cubic_to(0.82, 0.79, 0.85, 0.87, 0.92, 0.91);
+    details.cubic_to(0.92, 0.97, 0.71, 0.98, 0.57, 0.94);
+    details.cubic_to(0.54, 0.91, 0.66, 0.80, 0.74, 0.80);
+    details.close();
+    finish(details, Ink::Fill, out);
 }
 
 fn cpu(out: &mut Vec<IconPath>) {

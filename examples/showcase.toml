@@ -285,11 +285,25 @@ right = "round"
 radius = 12
 
 [group.system]
+# Reserve right click throughout this group; click the CPU icon with right to expand.
+collapsible = true
+collapse_button = "right"
 modules = ["cpu", "memory", "load", "temperature", "disk"]
 background = "$surface"
 radius = 12
 padding = 0
 spacing = 0                         # only used when the group has no separator
+
+# Collapse is disabled by default and starts expanded when enabled. The button is
+# required (left, middle, right), and reserves padding and internal separators too.
+# Child bindings must use other buttons; a conflict is a configuration error.
+# The reserved button takes precedence over tray/provider actions. Other buttons
+# and scrolling keep working.
+# Appearance: built-in defaults, named style, then any inline style overrides.
+# A visible icon with positive icon_size is required; the icon only toggles the group.
+[group.system.collapsed]
+style = "cool"
+icon = "cpu"
 
 [group.system.separator]
 shape = "slant"

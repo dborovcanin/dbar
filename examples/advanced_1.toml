@@ -162,11 +162,18 @@ left = "round"
 right = "round"
 
 [group.system]
+# Reserve middle click throughout this group; click the CPU icon with middle to expand.
+collapsible = true
+collapse_button = "middle"
 modules = ["cpu", "memory", "temperature"]
 background = "$surface"
 radius = 16
 padding = 2
 spacing = 2
+
+[group.system.collapsed]
+style = "panel"
+icon = "cpu"
 
 [group.system.edges]
 left = "round"

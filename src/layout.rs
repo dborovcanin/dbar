@@ -32,7 +32,9 @@ pub struct Inputs<'a> {
     /// Which page each module is scrolled to, by name, for a source that published
     /// several readings at once.
     pub pages: &'a std::collections::HashMap<String, usize>,
-    /// Modules folded down to their icon.
+    /// Groups folded down to one icon, shared across outputs.
+    pub collapsed_groups: &'a std::collections::HashSet<String>,
+    /// Modules folded down to their icon, preserved while their group is hidden.
     pub collapsed: &'a std::collections::HashSet<String>,
     /// Command sources with a run on its way that has been out long enough to say so.
     ///
@@ -308,6 +310,8 @@ pub struct PlacedSeparator {
 
 #[derive(Clone, Debug)]
 pub struct PlacedGroup {
+    /// Stable group name and the button reserved throughout its bounds.
+    pub collapse: Option<(String, Button)>,
     pub x: f32,
     pub y: f32,
     pub width: f32,
@@ -519,7 +523,25 @@ impl Frame {
     }
 }
 
+/// A group reserves its button before any child can act on it.
+pub enum ClickTarget<'a> {
+    Group(&'a str),
+    Module(&'a PlacedModule),
+}
+
 impl Frame {
+    pub fn click_at(&self, x: f32, y: f32, button: u32) -> Option<ClickTarget<'_>> {
+        for group in &self.groups {
+            if contains(x, y, group.x, group.y, group.width, group.height)
+                && let Some((name, reserved)) = &group.collapse
+                && button == reserved.number()
+            {
+                return Some(ClickTarget::Group(name));
+            }
+        }
+        self.module_at(x, y).map(ClickTarget::Module)
+    }
+
     /// Identity of the module under a point, for spotting a hover change without laying
     /// the bar out again. Motion within one module leaves this unchanged.
     pub fn hover_key(&self, at: Option<(f32, f32)>) -> Option<(u32, u32)> {
@@ -548,6 +570,7 @@ impl Frame {
 
 /// A group before it has been given an x position.
 struct SizedGroup {
+    collapse: Option<(String, Button)>,
     width: f32,
     background: Color,
     opacity: f32,
@@ -716,6 +739,8 @@ struct Candidate<'g> {
 /// A module drawn from the compositor expands here: `sway:workspaces` becomes one candidate
 /// per workspace, so each is its own rectangle with its own state and click target.
 fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
+    #[cfg(test)]
+    tests::COLLECTIONS.with(|count| count.set(count.get() + 1));
     let mut out = Vec::new();
 
     let from_item = |module: &'g ModuleCfg, item: &StatusItem| Candidate {
@@ -979,6 +1004,42 @@ fn size_group(
     // and nothing below has to think about it.
     let mut left = budget - group.padding * 2.0 - ends.left_width() - ends.right_width();
     let mut modules = Vec::new();
+    if let Some(collapse) = &group.collapse
+        && inputs.collapsed_groups.contains(&group.name)
+    {
+        // Do not even collect candidates: that would format hidden children and copy
+        // provider/tray data. The source registry continues updating independently.
+        let style = collapse.style;
+        let icon = style.icon.expect("validated collapsed icon");
+        let icon_advance = style.icon_size * icon.width();
+        let width = (icon_advance + style.padding * 2.0).max(style.min_width);
+        if width > left || (style.max_width > 0.0 && width > style.max_width) {
+            return None;
+        }
+        modules.push(SizedModule {
+            width,
+            text_width: 0.0,
+            name: None,
+            collapsible: false,
+            hover_style: None,
+            icon_advance,
+            icon: Some((icon, 0)),
+            art: None,
+            text: String::new(),
+            style,
+            foreground: style.foreground,
+            background: style.background,
+            action: None,
+            alt: None,
+            alt_button: Button::Left,
+            collapse_button: Button::Right,
+            refresh: None,
+            mute: None,
+            paged: None,
+            on_click: None,
+        });
+        return finish_group(group, ends, between, modules);
+    }
     for candidate in collect(group, inputs) {
         let Candidate {
             module,
@@ -1167,6 +1228,16 @@ fn size_group(
             on_click: module.on_click.clone(),
         });
     }
+    let _ = height;
+    finish_group(group, ends, between, modules)
+}
+
+fn finish_group(
+    group: &GroupCfg,
+    ends: Ends,
+    between: f32,
+    modules: Vec<SizedModule>,
+) -> Option<SizedGroup> {
     if modules.is_empty() {
         return None;
     }
@@ -1175,9 +1246,11 @@ fn size_group(
     let gaps = between * (modules.len() - 1) as f32;
     // A shaped end needs room of its own: it is drawn beside the modules, not over them.
     let width = content + gaps + ends.left_width() + ends.right_width() + group.padding * 2.0;
-    let _ = height;
-
     Some(SizedGroup {
+        collapse: group
+            .collapse
+            .as_ref()
+            .map(|c| (group.name.clone(), c.button)),
         width,
         background: group.background,
         opacity: group.opacity,
@@ -1304,6 +1377,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     }
 
     PlacedGroup {
+        collapse: sized.collapse,
         x: group_x,
         y: 0.0,
         width: sized.width,
@@ -1542,6 +1616,7 @@ pub fn fault(
 
     Frame {
         groups: vec![PlacedGroup {
+            collapse: None,
             x,
             y: 0.0,
             width: module_width,
@@ -1693,6 +1768,7 @@ mod tests {
             alt,
             pages,
             collapsed,
+            collapsed_groups: &Default::default(),
             waiting,
             spin: 3,
             tray: &Default::default(),
@@ -1740,6 +1816,7 @@ padding = 0
                 sway,
                 alt: &Default::default(),
                 pages: &Default::default(),
+                collapsed_groups: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
@@ -1793,6 +1870,7 @@ padding = 0
                 sway: &sway,
                 alt: &Default::default(),
                 pages: &Default::default(),
+                collapsed_groups: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
@@ -1839,6 +1917,7 @@ padding = 0
             sway: &sway,
             alt: &Default::default(),
             pages: &Default::default(),
+            collapsed_groups: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -1878,6 +1957,7 @@ padding = 0
                 sway: &sway,
                 alt: &Default::default(),
                 pages: &Default::default(),
+                collapsed_groups: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
@@ -1953,6 +2033,7 @@ format = "$app_id|$class|'?': $title"
             sway: &sway,
             alt: &Default::default(),
             pages: &Default::default(),
+            collapsed_groups: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -2114,6 +2195,7 @@ padding = 0
             sway: &SwayState::default(),
             alt: &Default::default(),
             pages: &Default::default(),
+            collapsed_groups: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -2491,6 +2573,7 @@ padding = 0
                 sway,
                 alt: &Default::default(),
                 pages: &Default::default(),
+                collapsed_groups: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
@@ -3518,6 +3601,7 @@ background = "#0000aa"
             sway: &SwayState::default(),
             alt: &Default::default(),
             pages: &Default::default(),
+            collapsed_groups: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -3712,5 +3796,332 @@ padding = 0
         assert_eq!(frame.groups[1].separators[0].direction, Direction::Right);
         let original = joined_frame(JOINED, &items, 100.0, None);
         assert_eq!(original.groups[0].separators[0].direction, Direction::Right);
+    }
+    thread_local! {
+        pub(super) static COLLECTIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    fn collapse_config() -> String {
+        let mut config = JOINED.to_string();
+        for name in ["a", "b", "c"] {
+            config = config.replace(&format!("[group.{name}]"), &format!(
+                "[group.{name}]\ncollapsible = true\ncollapse_button = 'right'\ncollapsed = {{ icon = 'cpu', icon_size = 8, padding = 2, background = '#83a598' }}"
+            ));
+        }
+        config
+    }
+
+    fn group_inputs<'a>(
+        items: &'a [StatusItem],
+        native: &'a Registry,
+        groups: &'a std::collections::HashSet<String>,
+    ) -> Inputs<'a> {
+        // Empty shared fixtures live for the duration of each test thread.
+        static EMPTY_SET: std::sync::LazyLock<std::collections::HashSet<String>> =
+            std::sync::LazyLock::new(Default::default);
+        static EMPTY_MAP: std::sync::LazyLock<std::collections::HashMap<String, usize>> =
+            std::sync::LazyLock::new(Default::default);
+        static SWAY: std::sync::LazyLock<SwayState> = std::sync::LazyLock::new(Default::default);
+        static TRAY: std::sync::LazyLock<crate::tray::TrayState> =
+            std::sync::LazyLock::new(Default::default);
+        static WAITING: std::sync::LazyLock<std::collections::HashSet<Which>> =
+            std::sync::LazyLock::new(Default::default);
+        Inputs {
+            items,
+            native,
+            sway: &SWAY,
+            alt: &EMPTY_MAP,
+            pages: &EMPTY_MAP,
+            collapsed: &EMPTY_SET,
+            collapsed_groups: groups,
+            waiting: &WAITING,
+            spin: 0,
+            tray: &TRAY,
+            output: None,
+        }
+    }
+
+    #[test]
+    fn group_collapse_keeps_empty_children_and_never_measures_hidden_text() {
+        struct NoMeasure;
+        impl Measure for NoMeasure {
+            fn measure(&mut self, _: &str) -> f32 {
+                panic!("collapsed group measured text");
+            }
+        }
+        let cfg = Config::parse(&collapse_config()).unwrap();
+        let native = Registry::new(&Default::default());
+        let groups = ["a", "b", "c"].map(str::to_string).into();
+        let items = [
+            item("a", &"hidden ".repeat(10_000)),
+            item("b", ""),
+            item("c", "hidden"),
+        ];
+        let mut inputs = group_inputs(&items, &native, &groups);
+        COLLECTIONS.with(|count| count.set(0));
+        let frame = compute(&cfg, &inputs, 200.0, 20.0, &mut NoMeasure, None);
+        COLLECTIONS
+            .with(|count| assert_eq!(count.get(), 0, "hidden children were collected/formatted"));
+        assert_eq!(frame.groups.len(), 3);
+        assert!(
+            frame
+                .groups
+                .iter()
+                .all(|g| g.modules.len() == 1 && g.modules[0].text.is_empty())
+        );
+        for group in &frame.groups {
+            let icon = &group.modules[0];
+            assert!(icon.action.is_none() && icon.on_click.is_none() && icon.name.is_none());
+            assert!(
+                icon.alt.is_none()
+                    && icon.refresh.is_none()
+                    && icon.mute.is_none()
+                    && icon.paged.is_none()
+                    && !icon.collapsible
+            );
+            assert!(matches!(
+                frame.click_at(icon.x + 1.0, 10.0, 3),
+                Some(ClickTarget::Group(_))
+            ));
+        }
+        inputs.items = &[];
+        let empty = compute(&cfg, &inputs, 200.0, 20.0, &mut NoMeasure, None);
+        assert_eq!(empty.damage(&frame), Damage::Rects(vec![]));
+        let expanded = Default::default();
+        inputs.collapsed_groups = &expanded;
+        assert!(
+            compute(&cfg, &inputs, 200.0, 20.0, &mut NoMeasure, None)
+                .groups
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn group_toggle_restores_child_views_pages_and_collapse_on_every_output() {
+        let cfg = Config::parse(
+            r#"
+[left]
+groups = ['g', 'other']
+[group.g]
+modules = ['folded', 'weather']
+collapsible = true
+collapse_button = 'right'
+collapsed = { icon = 'cpu', icon_size = 8 }
+[group.other]
+modules = ['other']
+collapsible = true
+collapse_button = 'middle'
+collapsed = { icon = 'memory', icon_size = 8 }
+[module.folded]
+icon = 'cpu'
+collapsible = true
+# Not the group's own button: a group answers for its whole island, so a child
+# claiming the reserved one is a config error rather than a key that does nothing.
+collapse_button = 'middle'
+format_alt = 'alt $text'
+[module.weather]
+source = 'command'
+command = ['weather']
+interval = 'once'
+pages = true
+format = '$text'
+format_alt = 'alt $text'
+"#,
+        )
+        .unwrap();
+        let Source::Native(which) = &cfg.positions[0].groups[0].modules[1].source else {
+            panic!()
+        };
+        let reading = |value: &str| Reading {
+            fields: item("", value).fields,
+            state: Default::default(),
+        };
+        let mut native =
+            Registry::fixture_pages(which.clone(), vec![reading("first"), reading("second")]);
+        let items = [item("folded", "value"), item("other", "visible")];
+        let mut groups = Default::default();
+        let alt = [("weather".to_string(), 1), ("folded".to_string(), 1)].into();
+        let pages = [("weather".to_string(), 1)].into();
+        let child = ["folded".to_string()].into();
+        let build = |native: &Registry, groups: &std::collections::HashSet<String>, output| {
+            let mut inputs = group_inputs(&items, native, groups);
+            inputs.alt = &alt;
+            inputs.pages = &pages;
+            inputs.collapsed = &child;
+            inputs.output = output;
+            compute(&cfg, &inputs, 400.0, 30.0, &mut Fixed, None)
+        };
+        let before = build(&native, &groups, Some("DP-1"));
+        assert_eq!(before.groups[0].modules[0].text, "");
+        assert_eq!(before.groups[0].modules[1].text, "alt second");
+        groups.insert("g".to_string());
+        let folded = build(&native, &groups, Some("DP-1"));
+        let other_output = build(&native, &groups, Some("HDMI-A-1"));
+        assert_eq!(folded.damage(&other_output), Damage::Rects(vec![]));
+        assert_eq!(folded.groups[0].modules.len(), 1);
+        assert_eq!(folded.groups[1].modules[0].text, "visible");
+        native = Registry::fixture_pages(
+            which.clone(),
+            vec![reading("new first"), reading("new second")],
+        );
+        assert_eq!(
+            build(&native, &groups, None).damage(&folded),
+            Damage::Rects(vec![])
+        );
+        groups.remove("g");
+        let after = build(&native, &groups, Some("HDMI-A-1"));
+        assert_eq!(after.groups[0].modules[0].text, "");
+        assert_eq!(after.groups[0].modules[1].text, "alt new second");
+        assert_eq!(after.groups[0].modules[1].paged, Some(2));
+        assert_eq!(alt["weather"], 1);
+        assert_eq!(pages["weather"], 1);
+        assert!(child.contains("folded"));
+    }
+
+    #[test]
+    fn group_collapse_joins_caps_damage_and_width_limits() {
+        let cfg = Config::parse(&collapse_config()).unwrap();
+        let items = [
+            item("a", "aaaaaaaaaaaaaaaaaaaa"),
+            item("b", "bbbbbbbbbbbbbbbbbbbb"),
+            item("c", "cccccccccccccccccccc"),
+        ];
+        let native = Registry::new(&Default::default());
+        let empty = Default::default();
+        let open = compute(
+            &cfg,
+            &group_inputs(&items, &native, &empty),
+            200.0,
+            20.0,
+            &mut Fixed,
+            None,
+        );
+        for name in ["a", "b", "c"] {
+            let groups = [name.to_string()].into();
+            let inputs = group_inputs(&items, &native, &groups);
+            let folded = compute(&cfg, &inputs, 200.0, 20.0, &mut Fixed, None);
+            assert_eq!(folded.groups.len(), 3);
+            assert_eq!(folded.group_separators.len(), 2);
+            assert_eq!(folded.groups[0].separators.len(), 1);
+            assert!(folded.groups[1].separators.is_empty());
+            assert_eq!(folded.groups[2].separators.len(), 1);
+            for (join, pair) in folded.group_separators.iter().zip(folded.groups.windows(2)) {
+                assert_eq!(join.fill, pair[0].modules.last().unwrap().background);
+                assert_eq!(join.under, pair[1].modules[0].background);
+                assert!(
+                    folded
+                        .click_at(join.x + join.width / 2.0, 10.0, 3)
+                        .is_none()
+                );
+            }
+            for (old, new) in [(&open, &folded), (&folded, &open)] {
+                let Damage::Rects(rects) = new.damage(old) else {
+                    panic!("same groups")
+                };
+                assert!(!rects.is_empty());
+                for (before, after) in old.group_separators.iter().zip(&new.group_separators) {
+                    if before.same_paint(after) {
+                        continue;
+                    }
+                    for join in [before, after] {
+                        assert!(rects.iter().any(|(x, _, w, _)| *x <= join.x - join.overlap
+                            && x + w >= join.x + join.width + join.overlap));
+                    }
+                }
+            }
+            for width in 0..100 {
+                let frame = compute(&cfg, &inputs, width as f32, 20.0, &mut Fixed, None);
+                for group in &frame.groups {
+                    assert!(group.x >= 0.0 && group.x + group.width <= width as f32);
+                    for module in &group.modules {
+                        assert!(
+                            module.x >= group.x && module.x + module.width <= group.x + group.width
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "release layout timing probe; run with --release --ignored --nocapture"]
+    fn benchmark_group_collapse_layout() {
+        use std::{hint::black_box, time::Instant};
+        let enabled = Config::parse(&collapse_config()).unwrap();
+        let mut disabled = enabled.clone();
+        for group in &mut disabled.positions[2].groups {
+            group.collapse = None;
+        }
+        let items = [
+            item("a", "CPU 12%"),
+            item("b", "Memory 34%"),
+            item("c", "Temperature 45°C"),
+        ];
+        let native = Registry::new(&Default::default());
+        let empty = Default::default();
+        let groups = ["a", "b", "c"].map(str::to_string).into();
+        let mut text = crate::text::TextRenderer::new(
+            &enabled.bar.font_family,
+            enabled.bar.font_size,
+            &enabled.bar.font_fallback,
+        )
+        .unwrap();
+        for (label, cfg, groups) in [
+            ("disabled", &disabled, &empty),
+            ("expanded", &enabled, &empty),
+            ("collapsed", &enabled, &groups),
+        ] {
+            let inputs = group_inputs(&items, &native, groups);
+            for _ in 0..100 {
+                black_box(compute(cfg, &inputs, 1920.0, 30.0, &mut text, None));
+            }
+            let start = Instant::now();
+            for _ in 0..20_000 {
+                black_box(compute(cfg, &inputs, 1920.0, 30.0, &mut text, None));
+            }
+            println!(
+                "group layout {label}: {:.2} us/frame",
+                start.elapsed().as_secs_f64() * 1e6 / 20_000.0
+            );
+        }
+    }
+
+    #[test]
+    fn collapsed_island_respects_padding_caps_and_icon_width_limits() {
+        let config = "[bar]\ngap = 0\n[left]\ngroups = ['g']\n[group.g]\nmodules = ['*']\ncollapsible = true\ncollapse_button = 'right'\npadding = 2\nradius = 8\nopacity = 0.7\nends = { left = 'slant', right = 'slant', width = 3 }\ncollapsed = { icon = 'tux', icon_size = 10, padding = 4, min_width = 22 }";
+        let cfg = Config::parse(config).unwrap();
+        let native = Registry::new(&Default::default());
+        let groups = ["g".to_string()].into();
+        let inputs = group_inputs(&[], &native, &groups);
+        for width in 0..70 {
+            let frame = compute(&cfg, &inputs, width as f32, 30.0, &mut Fixed, None);
+            if width < 32 {
+                assert!(frame.groups.is_empty());
+            } else {
+                let group = &frame.groups[0];
+                assert_eq!(group.width, 32.0);
+                assert_eq!(group.opacity, 0.7);
+                assert_eq!(group.edges.radius, 8.0);
+                assert_eq!(group.separators.len(), 2);
+                let icon = group.modules[0].icon.as_ref().unwrap();
+                assert_eq!(icon.icon, Icon::Tux);
+                assert_eq!(icon.x, 11.0);
+                assert_eq!(icon.y, 10.0);
+            }
+        }
+        let capped = Config::parse(&config.replace("min_width = 22", "max_width = 17")).unwrap();
+        assert!(
+            compute(&capped, &inputs, 100.0, 30.0, &mut Fixed, None)
+                .groups
+                .is_empty()
+        );
+        let items = [item("a", "first"), item("b", "second")];
+        let empty = Default::default();
+        let expanded = group_inputs(&items, &native, &empty);
+        let mut disabled = cfg.clone();
+        disabled.positions[0].groups[0].collapse = None;
+        let before = compute(&disabled, &expanded, 200.0, 30.0, &mut Fixed, None);
+        let enabled = compute(&cfg, &expanded, 200.0, 30.0, &mut Fixed, None);
+        assert_eq!(enabled.damage(&before), Damage::Rects(vec![]));
     }
 }
