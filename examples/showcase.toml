@@ -42,6 +42,11 @@ exclusive = true       # default: true; reserve the space so windows do not sit 
 # -t get_outputs` lists them. Left out, or a single "*", is every screen there
 # is and every one plugged in later, each getting a bar of its own.
 # outputs = ["DP-1", "HDMI-A-1"]
+# Which icon theme a tray item's named icon is looked for in. An application
+# usually ships its own into `hicolor`, which is where dbar looks when the theme
+# named here does not have it. Only PNG is read: an icon a theme has only as SVG
+# is one dbar cannot draw, and it falls through to whatever else it can find.
+icon_theme = "hicolor"
 
 # ---------------------------------------------------------------------------
 # External status provider
@@ -90,7 +95,7 @@ groups = ["desktop", "window"]
 groups = ["time"]
 
 [right]
-groups = ["system", "media", "power"]
+groups = ["system", "media", "tray", "power"]
 
 # ---------------------------------------------------------------------------
 # Reusable styles
@@ -322,6 +327,20 @@ left = "round"
 right = "round"
 radius = 12
 
+# One island holding one module that becomes many: the tray is empty on most
+# machines, and a group with nothing in it is not drawn at all, so this costs a
+# line of config and no pixels until something registers.
+[group.tray]
+modules = ["tray"]
+background = "$surface"
+radius = 12
+spacing = 2
+
+[group.tray.edges]
+left = "round"
+right = "round"
+radius = 12
+
 [group.power]
 modules = ["battery"]
 background = "$surface"
@@ -342,7 +361,7 @@ overlap = 1
 # Every key a [style.*] takes is also valid directly on a module, plus:
 #
 #   style      name of a [style.*] to start from        default: built-in defaults
-#   source     "provider" | "command" | "sway:window" |
+#   source     "provider" | "command" | "tray" | "sway:window" |
 #              "sway:mode" | "sway:workspaces" |
 #              "sway:language"                          default: "provider"
 #   command    argv of a command module, run directly
@@ -528,6 +547,30 @@ format = "{$branch }{· $queued queued}"
 above = 5
 style = "warning"
 
+# Whatever else is running and wants somewhere to put an icon. One module becomes
+# one icon per application, the way a workspace list becomes one per workspace,
+# and the group holding it disappears entirely while the tray is empty.
+#
+# There is no `format` here on purpose: a tray item is a picture, and the default
+# wording is nothing at all. `$title`, `$id` and `$status` are there for a bar
+# that wants words beside the artwork.
+#
+# dbar provides the tray watcher itself when nothing else on the session does,
+# which is why none of it is started unless a module like this asks for one:
+# taking that name without drawing anything would leave applications registered
+# with a bar that never shows them.
+[module.tray]
+source = "tray"
+padding = 6
+
+# An application asking to be noticed is the one piece of state a tray item has.
+# The icon itself is left alone - recolouring artwork dbar did not draw would be
+# guessing at what it is a picture of.
+[module.tray.states.attention]
+field = "status"
+equals = "attention"
+background = "$critical"
+
 # The compositor's binding mode. Nothing is drawn while it is `default`, so the
 # module is on the bar exactly while a mode is being held.
 [module.mode]
@@ -557,6 +600,7 @@ max_width = 320
 #   sway:workspaces   $name
 #   sway:language     $layout $short $index
 #   sway:mode         $mode
+#   tray              $title $id $status
 #   command           $text, or whatever `fields` declares
 #
 # The first four are read by dbar itself and take an `interval`, which needs a

@@ -15,7 +15,7 @@ use std::os::fd::{AsRawFd as _, OwnedFd};
 use anyhow::{Context as _, Result};
 
 use super::Reading;
-use crate::dbus::{Connection, Value};
+use crate::dbus::{Arg, Connection, Value};
 use crate::status::{FieldSpec, Fields, Kind, State, Value as Field};
 
 pub const FIELDS: &[FieldSpec] = &[
@@ -318,7 +318,7 @@ fn look(bus: &mut Connection) -> Result<(Option<String>, Option<Playing>)> {
 
 /// What one player says about itself.
 fn ask(bus: &mut Connection, name: &str) -> Result<Playing> {
-    let reply = bus.call(name, OBJECT, PROPERTIES, "GetAll", &[PLAYER])?;
+    let reply = bus.call(name, OBJECT, PROPERTIES, "GetAll", &[Arg::Str(PLAYER)])?;
     let properties = reply.first().context("a player that answered nothing")?;
     let metadata = properties.get("Metadata");
 
@@ -350,7 +350,7 @@ fn identity(bus: &mut Connection, name: &str) -> Option<String> {
             OBJECT,
             PROPERTIES,
             "Get",
-            &["org.mpris.MediaPlayer2", "Identity"],
+            &[Arg::Str("org.mpris.MediaPlayer2"), Arg::Str("Identity")],
         )
         .ok()?;
     reply.first()?.as_str().map(str::to_string)

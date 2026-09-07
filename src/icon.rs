@@ -43,16 +43,24 @@ pub struct IconPath {
     pub ink: Ink,
 }
 
-/// Artwork for one icon. Built-ins are vector; the raster arm is what SVG and
-/// application icons will arrive as later, as premultiplied RGBA at a size.
+/// Artwork for one icon. Built-ins are vector; the raster arm is what an application's own
+/// icon arrives as, already premultiplied RGBA at a size.
 pub enum IconArt {
     Paths(Vec<IconPath>),
     #[allow(dead_code)]
-    Raster {
-        width: u32,
-        height: u32,
-        pixels: Vec<u8>,
-    },
+    Raster(std::sync::Arc<Raster>),
+}
+
+/// An icon that is already pixels: premultiplied RGBA, row-major.
+///
+/// What a tray item hands over is a picture rather than an outline, and this is where it
+/// stops being anything else. Nothing here knows where the pixels came from, which is what
+/// keeps the protocol above `Frame` and out of the renderer.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Raster {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
 }
 
 /// Collects the commands that make up one outline.
@@ -116,6 +124,12 @@ impl Outline {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Icon {
+    /// An icon that is a picture rather than an outline, whose pixels travel beside it.
+    ///
+    /// It has a variant of its own so that layout can size and place it like any other
+    /// icon without knowing what it is, and so the cache of rasterised outlines is never
+    /// asked to hold something that is already pixels.
+    Raster,
     Cpu,
     Memory,
     Disk,
@@ -276,6 +290,8 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
     let level = level.min(icon.frames() - 1);
     let mut out = Vec::new();
     match icon {
+        // Its pixels are carried on the placed icon, so there is no outline to build.
+        Icon::Raster => {}
         Icon::Cpu => cpu(&mut out),
         Icon::Memory => memory(&mut out),
         Icon::Disk => disk(&mut out),

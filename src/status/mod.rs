@@ -182,6 +182,11 @@ pub enum ActionTarget {
     /// how a person expects to change it, and having to bind a key to a helper that then
     /// signals the bar is a worse version of the same thing.
     Control { what: Control, step: f64 },
+    /// Ask a tray application to act on a click on its own icon.
+    ///
+    /// The item is named rather than pointed at: a frame outlives nothing, and the tray's
+    /// list is the thread's, so what travels back is the key the tray gave it.
+    Tray { key: String },
 }
 
 /// Something the bar can change, as well as show.

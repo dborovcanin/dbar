@@ -86,7 +86,7 @@ groups = ["desktop", "mode", "window"]
 groups = ["time"]
 
 [right]
-groups = ["playing", "weather", "system", "network", "power"]
+groups = ["playing", "weather", "tray", "system", "network", "power"]
 
 # ---------------------------------------------------------------------------
 # Styles
@@ -233,6 +233,18 @@ radius = 12
 left = "round"
 right = "round"
 
+# Whatever else is running and wants somewhere to put an icon. The island holds
+# no modules of its own: one appears per application, and the group is not drawn
+# at all while nothing is in the tray.
+[group.tray]
+modules = ["tray"]
+background = "$surface"
+radius = 12
+
+[group.tray.edges]
+left = "round"
+right = "round"
+
 # What the machine is doing with itself: how hard it is working, how much it is
 # holding, and how hot that is making it. Three readings of one thing, so they
 # share one island and run into each other rather than being ruled apart.
@@ -344,6 +356,23 @@ radius = 12
 # click plays and pauses, and the wheel moves between tracks. dbar asks the
 # player over the session bus and draws what the player then reports, so what is
 # on the bar is what actually happened.
+# An application's own icon, drawn as it shipped it. A left click is what the
+# application calls being activated - usually showing its window - and the middle
+# button is its second action. There is nothing to write here: the picture is the
+# whole module, and `format` is empty by default because of it.
+[module.tray]
+source = "tray"
+style = "panel"
+padding = 6
+
+# An application asking to be noticed says so, and the icon is left alone while
+# the island around it changes: recolouring someone else's artwork would be
+# guessing at what it is a picture of.
+[module.tray.states.attention]
+field = "status"
+equals = "attention"
+background = "$critical"
+
 [module.media]
 source = "media"
 controls = true

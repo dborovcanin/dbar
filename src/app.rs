@@ -225,6 +225,10 @@ pub struct App {
     control_warned: bool,
     /// Workspaces and the focused window, when a compositor is talking to us.
     sway: SwayState,
+    /// What the system tray is showing, when a module asks for one.
+    tray: crate::tray::TrayState,
+    /// The way into the tray thread, when a click has to reach an application.
+    tray_commands: Option<crate::tray::Commands>,
     /// Set when the status provider itself has failed; shown in place of the groups.
     fault: Option<String>,
     /// Item names from the last "nothing matched" warning, so it is not repeated per redraw.
@@ -287,6 +291,8 @@ impl App {
             provider,
             items: Vec::new(),
             sway: SwayState::default(),
+            tray: crate::tray::TrayState::default(),
+            tray_commands: None,
             fault: None,
             warned_names: None,
             name_count_warned: false,
@@ -481,6 +487,45 @@ impl App {
                 self.collect();
             }
             _ => {}
+        }
+    }
+
+    /// Where to send what a click on a tray item asks for.
+    pub fn set_tray(&mut self, commands: crate::tray::Commands) {
+        self.tray_commands = Some(commands);
+    }
+
+    /// Take what the tray thread says is on the bus.
+    pub fn on_tray(&mut self, event: crate::tray::Event) {
+        match event {
+            crate::tray::Event::State(state) => {
+                self.tray = *state;
+                self.invalidate();
+            }
+            crate::tray::Event::Stopped(reason) => {
+                // The rest of the bar is unaffected; only the tray goes quiet.
+                log::warn!("the tray has stopped: {reason}");
+                self.tray = crate::tray::TrayState::default();
+                self.invalidate();
+            }
+        }
+    }
+
+    /// Pass a click on a tray icon to the application it belongs to.
+    fn tell_tray(&self, key: String, button: u32, x: f64, y: f64) {
+        use crate::tray::Command;
+        let (x, y) = (x as i32, y as i32);
+        let command = match button {
+            1 => Command::Activate { key, x, y },
+            2 => Command::Secondary { key, x, y },
+            // A wheel notch, in the direction the protocol numbers it.
+            4 => Command::Scroll { key, delta: -1 },
+            5 => Command::Scroll { key, delta: 1 },
+            _ => return,
+        };
+        match &self.tray_commands {
+            Some(commands) => commands.send(command),
+            None => log::debug!("no tray thread to tell"),
         }
     }
 
@@ -758,6 +803,7 @@ impl App {
             collapsed,
             waiting,
             spin,
+            tray,
             ..
         } = self;
         let bar = &bars[i];
@@ -775,6 +821,7 @@ impl App {
             collapsed,
             waiting,
             spin: *spin,
+            tray,
             output: bar.name.as_deref(),
         };
         let frame = layout::compute(
@@ -996,6 +1043,9 @@ impl App {
                         }
                     }
                     ActionTarget::Control { what, step } => self.control(what, step, button),
+                    // The application decides what a click means; the bar only says where
+                    // it happened, in the coordinates the protocol asks for.
+                    ActionTarget::Tray { key } => self.tell_tray(key, button, x, y),
                     ActionTarget::I3Bar { name, instance } => {
                         let event = ClickEvent {
                             name: name.as_deref(),

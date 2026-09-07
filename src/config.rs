@@ -94,6 +94,8 @@ pub enum Source {
     SwayLanguage(BTreeMap<String, String>),
     /// The binding mode the compositor is in.
     SwayMode,
+    /// One entry per application in the system tray, expanded at layout time.
+    Tray,
 }
 
 impl Source {
@@ -106,6 +108,7 @@ impl Source {
             Source::SwayWorkspaces(_) => crate::sway::WORKSPACE_FIELDS,
             Source::SwayLanguage(_) => crate::sway::LANGUAGE_FIELDS,
             Source::SwayMode => crate::sway::MODE_FIELDS,
+            Source::Tray => crate::tray::FIELDS,
         }
     }
 
@@ -121,6 +124,9 @@ impl Source {
             Source::SwayWorkspaces(_) => "$name",
             Source::SwayLanguage(_) => " $short ",
             Source::SwayMode => " $mode ",
+            // A tray item is its icon; the application's name beside every one of them
+            // would be a row of words where a row of pictures was asked for.
+            Source::Tray => "",
         }
     }
 }
@@ -222,6 +228,14 @@ struct RawBar {
     /// Empty, or a single "*", is every screen there is and every one plugged in later.
     #[serde(default)]
     outputs: Vec<String>,
+    /// The icon theme a tray item's named icon is looked for in, before the fallback theme
+    /// every application installs into.
+    #[serde(default = "default_icon_theme")]
+    icon_theme: String,
+}
+
+fn default_icon_theme() -> String {
+    "hicolor".to_string()
 }
 
 /// `on_click` as written: a program per button, each an argv.
@@ -512,6 +526,7 @@ impl Default for RawBar {
             background: RawBarBackground::default(),
             exclusive: true,
             outputs: Vec::new(),
+            icon_theme: default_icon_theme(),
         }
     }
 }
@@ -560,6 +575,8 @@ pub struct Bar {
     pub exclusive: bool,
     /// The screens this bar appears on, empty for all of them.
     pub outputs: Vec<String>,
+    /// Which icon theme a tray item's named icon is looked for in.
+    pub icon_theme: String,
 }
 
 impl Bar {
@@ -1216,6 +1233,15 @@ impl Config {
         wanted
     }
 
+    /// Whether anything on the bar shows the system tray.
+    ///
+    /// Nothing about the tray is started otherwise - not the thread, not the bus
+    /// connection, and above all not the watcher name, which an application registers with
+    /// and then waits to be drawn by.
+    pub fn needs_tray(&self) -> bool {
+        self.modules().any(|m| m.source == Source::Tray)
+    }
+
     /// Whether anything on the bar shows the keyboard layout.
     ///
     /// The compositor is only asked about input devices when there is something to draw
@@ -1265,6 +1291,7 @@ impl Config {
             radius: raw.bar.background.radius,
             exclusive: raw.bar.exclusive,
             outputs: raw.bar.outputs.clone(),
+            icon_theme: raw.bar.icon_theme.clone(),
         };
 
         // Named styles resolve against the built-in defaults, once.
@@ -1417,6 +1444,7 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         "sway:workspaces" => Source::SwayWorkspaces(raw.and_then(|m| m.scope).unwrap_or_default()),
         "sway:language" => Source::SwayLanguage(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
         "sway:mode" => Source::SwayMode,
+        "tray" => Source::Tray,
         "command" => {
             let mut argv = raw.map(|m| m.command.clone()).unwrap_or_default();
             if argv.is_empty() {
@@ -1485,7 +1513,7 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         other => bail!(
             "module {module_name:?} has unknown source {other:?}; expected one of cpu, \
              memory, battery, backlight, load, temperature, disk, network, time, provider, \
-             sway:window, sway:workspaces or sway:language"
+             tray, sway:window, sway:workspaces or sway:language"
         ),
     };
 

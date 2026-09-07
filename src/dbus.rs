@@ -26,6 +26,12 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Str(String),
+    /// A byte array, kept as bytes.
+    ///
+    /// `ay` is the one array type worth a case of its own: an icon arrives as one, and a
+    /// 64x64 icon read as a `Seq` would be 16384 `Value`s of 32 bytes each - half a
+    /// megabyte to say what 16 kilobytes already said.
+    Bytes(Vec<u8>),
     /// An array, or a struct: both are a run of values, and no caller here cares which.
     Seq(Vec<Value>),
     /// `a{sv}` and friends, which is how every property bundle arrives.
@@ -37,6 +43,28 @@ impl Value {
         match self {
             Value::Str(s) => Some(s),
             _ => None,
+        }
+    }
+
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Value::Int(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            Value::Bytes(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// The values in an array or a struct, so a caller can walk one without matching.
+    pub fn items(&self) -> &[Value] {
+        match self {
+            Value::Seq(values) => values,
+            _ => &[],
         }
     }
 
@@ -77,6 +105,8 @@ pub enum Kind {
 #[derive(Clone, Debug)]
 pub struct Message {
     pub kind: Kind,
+    /// This message's own serial, which is what a reply to it has to quote.
+    pub serial: u32,
     pub path: Option<String>,
     pub interface: Option<String>,
     pub member: Option<String>,
@@ -93,6 +123,55 @@ impl Message {
             && self.interface.as_deref() == Some(interface)
             && self.member.as_deref() == Some(member)
     }
+
+    /// Whether this is a call of the method it says it is, which is the question every
+    /// object dbar serves asks.
+    pub fn is_call(&self, interface: &str, member: &str) -> bool {
+        self.kind == Kind::MethodCall
+            && self.interface.as_deref() == Some(interface)
+            && self.member.as_deref() == Some(member)
+    }
+}
+
+/// A value dbar sends.
+///
+/// Reading has to be general because the bus decides what arrives. Writing does not: this
+/// is exactly the set of things a bar puts on the wire - the arguments of the handful of
+/// methods it calls, and the answers it gives for the objects it serves.
+#[derive(Clone, Debug)]
+pub enum Arg<'a> {
+    Str(&'a str),
+    /// An object path, which is a string the bus type-checks differently.
+    Path(&'a str),
+    /// A signature, whose length is one byte.
+    Sig(&'a str),
+    Bool(bool),
+    I32(i32),
+    U32(u32),
+    /// A variant, which is how a property answer and a header field are both wrapped.
+    Var(&'a Arg<'a>),
+    /// An array of one element type, named because an empty one still has to say what it
+    /// is empty of.
+    Array(&'a str, &'a [Arg<'a>]),
+    /// `a{sv}`, which is what `GetAll` answers with.
+    Dict(&'a [(&'a str, Arg<'a>)]),
+}
+
+impl Arg<'_> {
+    /// The type this value marshals as.
+    fn signature(&self) -> String {
+        match self {
+            Arg::Str(_) => "s".to_string(),
+            Arg::Path(_) => "o".to_string(),
+            Arg::Sig(_) => "g".to_string(),
+            Arg::Bool(_) => "b".to_string(),
+            Arg::I32(_) => "i".to_string(),
+            Arg::U32(_) => "u".to_string(),
+            Arg::Var(_) => "v".to_string(),
+            Arg::Array(element, _) => format!("a{element}"),
+            Arg::Dict(_) => "a{sv}".to_string(),
+        }
+    }
 }
 
 pub struct Connection {
@@ -101,6 +180,13 @@ pub struct Connection {
     /// Left over from a read that took in more than one message, since the bus is free to
     /// send them back to back.
     pending: Vec<u8>,
+    /// Messages that arrived while a call was waiting for its own answer.
+    ///
+    /// Waiting for a reply means reading everything ahead of it, and what is ahead of it
+    /// is other people's business: a signal that changes what is drawn, or a call from an
+    /// application that is waiting on the answer. Dropping either is how a bar loses an
+    /// update or hangs a program, so they are kept and handed out in order afterwards.
+    deferred: std::collections::VecDeque<Message>,
 }
 
 impl Connection {
@@ -117,6 +203,7 @@ impl Connection {
             socket,
             serial: 0,
             pending: Vec::new(),
+            deferred: std::collections::VecDeque::new(),
         };
         connection.authenticate()?;
         connection
@@ -146,21 +233,32 @@ impl Connection {
         path: &str,
         interface: &str,
         member: &str,
-        arguments: &[&str],
+        arguments: &[Arg],
     ) -> Result<Vec<Value>> {
         let serial = self.send(destination, path, interface, member, arguments)?;
-        loop {
-            let message = self.receive()?;
-            if message.reply_serial != Some(serial) {
-                continue;
+        // Read past whatever is ahead of the answer, holding it aside rather than putting
+        // it back: taking a message off the queue only to return it to the front of that
+        // same queue is a loop with no end.
+        let mut held = Vec::new();
+        let answer = loop {
+            match self.read_message() {
+                Ok(message) if message.reply_serial == Some(serial) => break message,
+                Ok(message) => held.push(message),
+                Err(e) => {
+                    self.deferred.extend(held);
+                    return Err(e);
+                }
             }
-            if message.kind == Kind::Error {
-                let name = message.error.as_deref().unwrap_or("an unnamed error");
-                let detail = message.body.first().and_then(Value::as_str).unwrap_or("");
-                bail!("{member} failed: {name} {detail}");
-            }
-            return Ok(message.body);
+        };
+        // Back in the order they arrived, behind anything that was already waiting.
+        self.deferred.extend(held);
+
+        if answer.kind == Kind::Error {
+            let name = answer.error.as_deref().unwrap_or("an unnamed error");
+            let detail = answer.body.first().and_then(Value::as_str).unwrap_or("");
+            bail!("{member} failed: {name} {detail}");
         }
+        Ok(answer.body)
     }
 
     /// Send a method call and do not wait for the answer.
@@ -170,41 +268,107 @@ impl Connection {
         path: &str,
         interface: &str,
         member: &str,
-        arguments: &[&str],
+        arguments: &[Arg],
+    ) -> Result<u32> {
+        let signature = signature_of(arguments);
+        let mut fields = vec![
+            (1u8, Arg::Path(path)),
+            (2u8, Arg::Str(interface)),
+            (3u8, Arg::Str(member)),
+            (6u8, Arg::Str(destination)),
+        ];
+        if !arguments.is_empty() {
+            fields.push((8u8, Arg::Sig(&signature)));
+        }
+        self.write_message(1, 0, &fields, arguments)
+            .with_context(|| format!("sending {member}"))
+    }
+
+    /// Answer a call that was made to one of the objects dbar serves.
+    pub fn reply(&mut self, to: &Message, arguments: &[Arg]) -> Result<()> {
+        let signature = signature_of(arguments);
+        let mut fields = vec![(5u8, Arg::U32(to.serial))];
+        if let Some(sender) = to.sender.as_deref() {
+            fields.push((6u8, Arg::Str(sender)));
+        }
+        if !arguments.is_empty() {
+            fields.push((8u8, Arg::Sig(&signature)));
+        }
+        // A reply is not itself replied to, so the no-reply-expected flag is set.
+        self.write_message(2, 1, &fields, arguments)?;
+        Ok(())
+    }
+
+    /// Refuse a call, which a caller reads as plainly as an answer.
+    ///
+    /// An object that stays silent leaves the caller waiting for its own timeout, and an
+    /// application that is waiting on the tray is an application that looks hung.
+    pub fn reply_error(&mut self, to: &Message, name: &str, text: &str) -> Result<()> {
+        let mut fields = vec![(4u8, Arg::Str(name)), (5u8, Arg::U32(to.serial))];
+        if let Some(sender) = to.sender.as_deref() {
+            fields.push((6u8, Arg::Str(sender)));
+        }
+        fields.push((8u8, Arg::Sig("s")));
+        self.write_message(3, 1, &fields, &[Arg::Str(text)])?;
+        Ok(())
+    }
+
+    /// Announce something from an object dbar serves, to whoever asked to hear it.
+    pub fn emit(
+        &mut self,
+        path: &str,
+        interface: &str,
+        member: &str,
+        arguments: &[Arg],
+    ) -> Result<()> {
+        let signature = signature_of(arguments);
+        let mut fields = vec![
+            (1u8, Arg::Path(path)),
+            (2u8, Arg::Str(interface)),
+            (3u8, Arg::Str(member)),
+        ];
+        if !arguments.is_empty() {
+            fields.push((8u8, Arg::Sig(&signature)));
+        }
+        self.write_message(4, 1, &fields, arguments)
+            .with_context(|| format!("announcing {member}"))?;
+        Ok(())
+    }
+
+    /// Take a name on the bus, and say what happened.
+    ///
+    /// The answer matters rather than only the success: asking for a name someone else
+    /// already holds succeeds as a message and fails as a request, and those are the two
+    /// cases a tray has to tell apart.
+    pub fn request_name(&mut self, name: &str, flags: u32) -> Result<NameRequest> {
+        let reply = self.call(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            "RequestName",
+            &[Arg::Str(name), Arg::U32(flags)],
+        )?;
+        Ok(match reply.first().and_then(Value::as_int) {
+            Some(1) => NameRequest::Owner,
+            Some(2) => NameRequest::Queued,
+            Some(3) => NameRequest::Taken,
+            Some(4) => NameRequest::AlreadyOurs,
+            other => bail!("the bus answered RequestName with {other:?}"),
+        })
+    }
+
+    /// Put one message on the wire and return the serial it was sent under.
+    fn write_message(
+        &mut self,
+        kind: u8,
+        flags: u8,
+        fields: &[(u8, Arg)],
+        arguments: &[Arg],
     ) -> Result<u32> {
         self.serial = self.serial.wrapping_add(1);
         let serial = self.serial;
-
-        let mut body = Writer::new();
-        for argument in arguments {
-            body.string(argument);
-        }
-        let signature: String = std::iter::repeat_n('s', arguments.len()).collect();
-
-        let mut fields = vec![
-            (1u8, 'o', path.to_string()),
-            (2u8, 's', interface.to_string()),
-            (3u8, 's', member.to_string()),
-            (6u8, 's', destination.to_string()),
-        ];
-        if !arguments.is_empty() {
-            fields.push((8u8, 'g', signature));
-        }
-
-        let mut out = Writer::new();
-        out.byte(b'l');
-        out.byte(1); // method call
-        out.byte(0); // no flags: a reply is wanted
-        out.byte(1); // protocol version
-        out.u32(body.bytes.len() as u32);
-        out.u32(serial);
-        out.header_fields(&fields);
-        out.align(8);
-        out.bytes.extend_from_slice(&body.bytes);
-
-        self.socket
-            .write_all(&out.bytes)
-            .with_context(|| format!("sending {member}"))?;
+        let bytes = build_message(serial, kind, flags, fields, arguments);
+        self.socket.write_all(&bytes)?;
         Ok(serial)
     }
 
@@ -215,14 +379,31 @@ impl Connection {
             "/org/freedesktop/DBus",
             "org.freedesktop.DBus",
             "AddMatch",
-            &[rule],
+            &[Arg::Str(rule)],
         )
         .with_context(|| format!("watching for {rule}"))?;
         Ok(())
     }
 
+    /// Whether a message is already in hand, so a caller waiting on the socket knows to
+    /// come back before sleeping on it again.
+    pub fn has_deferred(&self) -> bool {
+        !self.deferred.is_empty()
+    }
+
     /// Read one message, waiting for it if none has arrived.
+    ///
+    /// Anything set aside by a call that was waiting for its own answer comes out first,
+    /// and in the order it arrived.
     pub fn receive(&mut self) -> Result<Message> {
+        if let Some(message) = self.deferred.pop_front() {
+            return Ok(message);
+        }
+        self.read_message()
+    }
+
+    /// One message off the socket, waiting for it, and never from what was set aside.
+    fn read_message(&mut self) -> Result<Message> {
         loop {
             if let Some(message) = self.take_message()? {
                 return Ok(message);
@@ -311,6 +492,54 @@ impl Connection {
     }
 }
 
+/// What the bus said about a name that was asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameRequest {
+    /// It is ours now.
+    Owner,
+    /// Someone else has it, and we are behind them in the queue.
+    Queued,
+    /// Someone else has it and would not give it up.
+    Taken,
+    /// We already had it.
+    AlreadyOurs,
+}
+
+/// One marshalled message, ready for the socket.
+///
+/// Separate from sending it so the marshaller can be read back by the parser in a test:
+/// a message that is wrong by one byte of padding is refused by the bus with nothing said
+/// about which byte.
+fn build_message(
+    serial: u32,
+    kind: u8,
+    flags: u8,
+    fields: &[(u8, Arg)],
+    arguments: &[Arg],
+) -> Vec<u8> {
+    let mut body = Writer::new();
+    for argument in arguments {
+        body.arg(argument);
+    }
+
+    let mut out = Writer::new();
+    out.byte(b'l');
+    out.byte(kind);
+    out.byte(flags);
+    out.byte(1); // protocol version
+    out.u32(body.bytes.len() as u32);
+    out.u32(serial);
+    out.header_fields(fields);
+    out.align(8);
+    out.bytes.extend_from_slice(&body.bytes);
+    out.bytes
+}
+
+/// The signature of a whole argument list.
+fn signature_of(arguments: &[Arg]) -> String {
+    arguments.iter().map(Arg::signature).collect()
+}
+
 /// The socket in a bus address, which may list several ways to connect.
 fn socket_path(address: &str) -> Option<String> {
     address.split(';').find_map(|one| {
@@ -345,9 +574,11 @@ fn parse_message(raw: &[u8]) -> Result<Message> {
         other => bail!("a message of unknown type {other}"),
     };
     let mut reader = Reader::new(raw);
-    reader.position = 12;
+    reader.position = 8;
+    let serial = reader.u32()?;
     let mut message = Message {
         kind,
+        serial,
         path: None,
         interface: None,
         member: None,
@@ -515,6 +746,11 @@ impl<'a> Reader<'a> {
                 if end > self.bytes.len() {
                     bail!("an array longer than the message holding it");
                 }
+                // Bytes are taken whole rather than one value at a time: see `Bytes`.
+                if element == "y" {
+                    let bytes = self.take(length)?.to_vec();
+                    return Ok(Value::Bytes(bytes));
+                }
                 let dictionary = element.starts_with('{');
                 let mut values = Vec::new();
                 let mut entries = Vec::new();
@@ -600,19 +836,53 @@ impl Writer {
         self.bytes.push(0);
     }
 
+    /// One value, marshalled as the type it says it is.
+    fn arg(&mut self, value: &Arg) {
+        match value {
+            Arg::Str(text) | Arg::Path(text) => self.string(text),
+            Arg::Sig(text) => self.signature(text),
+            Arg::Bool(flag) => self.u32(u32::from(*flag)),
+            Arg::I32(number) => self.u32(*number as u32),
+            Arg::U32(number) => self.u32(*number),
+            Arg::Var(inner) => {
+                self.signature(&inner.signature());
+                self.arg(inner);
+            }
+            // An array is a length in bytes, then its contents on the boundary the element
+            // type asks for - so the contents are written apart and measured before the
+            // length can be put down.
+            Arg::Array(element, items) => {
+                let mut inner = Writer::new();
+                for item in *items {
+                    inner.arg(item);
+                }
+                self.u32(inner.bytes.len() as u32);
+                self.align(alignment_of(element));
+                self.bytes.extend_from_slice(&inner.bytes);
+            }
+            Arg::Dict(entries) => {
+                let mut inner = Writer::new();
+                for (key, value) in *entries {
+                    inner.align(8);
+                    inner.string(key);
+                    inner.arg(&Arg::Var(value));
+                }
+                self.u32(inner.bytes.len() as u32);
+                self.align(8);
+                self.bytes.extend_from_slice(&inner.bytes);
+            }
+        }
+    }
+
     /// The array of (code, variant) pairs that says what a message is.
-    fn header_fields(&mut self, fields: &[(u8, char, String)]) {
+    fn header_fields(&mut self, fields: &[(u8, Arg)]) {
         // The array's contents are measured from where they start, and each field inside
         // begins on an eight-byte boundary of its own.
         let mut inner = Writer::new();
-        for (code, kind, value) in fields {
+        for (code, value) in fields {
             inner.align(8);
             inner.byte(*code);
-            inner.signature(&kind.to_string());
-            match kind {
-                'g' => inner.signature(value),
-                _ => inner.string(value),
-            }
+            inner.arg(&Arg::Var(value));
         }
         self.u32(inner.bytes.len() as u32);
         self.bytes.extend_from_slice(&inner.bytes);
@@ -711,6 +981,151 @@ mod tests {
         assert_eq!(several.first_str(), Some("First"));
 
         assert_eq!(Value::Seq(Vec::new()).first_str(), None);
+    }
+
+    /// Write one value and read it straight back. A marshaller is only ever wrong by a
+    /// byte of padding, and the bus refuses such a message without saying which byte.
+    fn round_trip(value: &Arg) -> Value {
+        let mut out = Writer::new();
+        out.arg(value);
+        Reader::new(&out.bytes)
+            .value(&value.signature())
+            .expect("what was just written reads back")
+    }
+
+    #[test]
+    fn every_value_dbar_writes_reads_back_as_itself() {
+        assert_eq!(round_trip(&Arg::Bool(true)), Value::Bool(true));
+        assert_eq!(round_trip(&Arg::Bool(false)), Value::Bool(false));
+        assert_eq!(round_trip(&Arg::I32(-7)), Value::Int(-7));
+        assert_eq!(
+            round_trip(&Arg::U32(4_000_000_000)),
+            Value::Int(4_000_000_000)
+        );
+        assert_eq!(round_trip(&Arg::Str("hello")), Value::Str("hello".into()));
+        assert_eq!(round_trip(&Arg::Str("")), Value::Str(String::new()));
+        assert_eq!(
+            round_trip(&Arg::Path("/StatusNotifierItem")),
+            Value::Str("/StatusNotifierItem".into())
+        );
+        assert_eq!(round_trip(&Arg::Sig("a{sv}")), Value::Str("a{sv}".into()));
+    }
+
+    #[test]
+    fn a_variant_reads_back_as_what_it_wrapped() {
+        assert_eq!(round_trip(&Arg::Var(&Arg::I32(3))), Value::Int(3));
+        assert_eq!(
+            round_trip(&Arg::Var(&Arg::Str("Passive"))),
+            Value::Str("Passive".into())
+        );
+    }
+
+    #[test]
+    fn an_array_reads_back_with_its_elements_in_order() {
+        let items = [Arg::Str("one"), Arg::Str("two"), Arg::Str("three")];
+        let value = round_trip(&Arg::Array("s", &items));
+        let read: Vec<&str> = value.items().iter().filter_map(Value::as_str).collect();
+        assert_eq!(read, ["one", "two", "three"]);
+
+        // An empty array still says what it is empty of, and reads back as nothing.
+        assert_eq!(round_trip(&Arg::Array("s", &[])), Value::Seq(Vec::new()));
+    }
+
+    /// `a{sv}` is what every `GetAll` answers with, and its entries are the one place
+    /// eight-byte alignment inside an array is load-bearing.
+    #[test]
+    fn a_property_bundle_dbar_writes_reads_back_as_a_map() {
+        let entries = [
+            ("Id", Arg::Str("dbar")),
+            ("ProtocolVersion", Arg::I32(0)),
+            ("IsStatusNotifierHostRegistered", Arg::Bool(true)),
+        ];
+        let value = round_trip(&Arg::Dict(&entries));
+        assert_eq!(value.get("Id").and_then(Value::as_str), Some("dbar"));
+        assert_eq!(value.get("ProtocolVersion"), Some(&Value::Int(0)));
+        assert_eq!(
+            value.get("IsStatusNotifierHostRegistered"),
+            Some(&Value::Bool(true))
+        );
+    }
+
+    /// Padding is only visible when one value has to push the next along, so the sizes are
+    /// deliberately awkward.
+    #[test]
+    fn values_after_an_odd_one_are_still_aligned() {
+        let mut out = Writer::new();
+        for value in [Arg::Bool(true), Arg::Str("x"), Arg::U32(9), Arg::Str("yz")] {
+            out.arg(&value);
+        }
+        let mut reader = Reader::new(&out.bytes);
+        assert_eq!(reader.value("b").unwrap(), Value::Bool(true));
+        assert_eq!(reader.value("s").unwrap(), Value::Str("x".into()));
+        assert_eq!(reader.value("u").unwrap(), Value::Int(9));
+        assert_eq!(reader.value("s").unwrap(), Value::Str("yz".into()));
+    }
+
+    /// A whole message, marshalled and parsed back: the header fields, the body and the
+    /// serial a reply has to quote all have to agree at once.
+    #[test]
+    fn a_message_dbar_builds_parses_back_as_itself() {
+        let raw = build_message(
+            42,
+            4, // a signal
+            1,
+            &[
+                (1u8, Arg::Path("/StatusNotifierWatcher")),
+                (2u8, Arg::Str("org.kde.StatusNotifierWatcher")),
+                (3u8, Arg::Str("StatusNotifierItemRegistered")),
+                (8u8, Arg::Sig("s")),
+            ],
+            &[Arg::Str(":1.72/StatusNotifierItem")],
+        );
+        let message = parse_message(&raw).expect("what was just built parses");
+        assert_eq!(message.serial, 42);
+        assert!(message.is_signal(
+            "org.kde.StatusNotifierWatcher",
+            "StatusNotifierItemRegistered"
+        ));
+        assert_eq!(message.path.as_deref(), Some("/StatusNotifierWatcher"));
+        assert_eq!(
+            message.body.first().and_then(Value::as_str),
+            Some(":1.72/StatusNotifierItem")
+        );
+    }
+
+    /// A reply quotes the serial of the call it answers and is addressed back at whoever
+    /// made it, or the caller waits for its own timeout instead.
+    #[test]
+    fn a_reply_names_the_call_it_answers() {
+        let raw = build_message(
+            8,
+            2,
+            1,
+            &[
+                (5u8, Arg::U32(1234)),
+                (6u8, Arg::Str(":1.9")),
+                (8u8, Arg::Sig("v")),
+            ],
+            &[Arg::Var(&Arg::I32(0))],
+        );
+        let message = parse_message(&raw).expect("a reply parses");
+        assert_eq!(message.kind, Kind::Return);
+        assert_eq!(message.reply_serial, Some(1234));
+        assert_eq!(message.body.first(), Some(&Value::Int(0)));
+    }
+
+    /// An icon arrives as `ay`, and reading it a byte at a time would cost thirty-two
+    /// bytes for every one on the wire.
+    #[test]
+    fn a_byte_array_is_read_as_bytes() {
+        let mut out = Writer::new();
+        let pixels: Vec<u8> = (0..64u8).collect();
+        out.u32(pixels.len() as u32);
+        out.bytes.extend_from_slice(&pixels);
+        let value = Reader::new(&out.bytes)
+            .value("ay")
+            .expect("bytes read back");
+        assert_eq!(value.as_bytes(), Some(pixels.as_slice()));
     }
 
     #[test]

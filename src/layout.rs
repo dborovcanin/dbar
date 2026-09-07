@@ -42,6 +42,8 @@ pub struct Inputs<'a> {
     /// Which step of its turn a spinner is on. One step for the whole bar, so two waiting
     /// modules turn together rather than beating against each other.
     pub spin: usize,
+    /// What the system tray is showing, when a module asks for one.
+    pub tray: &'a crate::tray::TrayState,
     /// The screen this bar is on, as the compositor names it, when it is known.
     ///
     /// Everything drawn from the compositor is about a screen: the workspaces on it and
@@ -84,13 +86,16 @@ pub trait Measure {
 }
 
 /// An icon placed inside a module, already resolved to the level it should draw at.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct PlacedIcon {
     pub icon: Icon,
     pub level: usize,
     pub x: f32,
     pub y: f32,
     pub size: f32,
+    /// Pixels to draw instead of the built-in outline, for an icon that arrived as a
+    /// picture. Shared rather than copied: it outlives the frames that draw it.
+    pub art: Option<Arc<crate::icon::Raster>>,
 }
 
 #[derive(Clone, Debug)]
@@ -282,6 +287,8 @@ struct SizedModule {
     /// Width of the icon plus its gap, or zero.
     icon_advance: f32,
     icon: Option<(Icon, usize)>,
+    /// Pixels for an icon that arrived as a picture, carried beside `icon`.
+    art: Option<Arc<crate::icon::Raster>>,
     text: String,
     style: Style,
     foreground: Color,
@@ -313,6 +320,9 @@ struct Candidate<'g> {
     action: Option<ActionTarget>,
     /// How many readings the source published, when the module scrolls between them.
     pages: usize,
+    /// An icon the source brought with it, as pixels, for a source whose artwork is not
+    /// dbar's to choose.
+    art: Option<Arc<crate::icon::Raster>>,
 }
 
 /// Everything a group shows, in the order the group asks for.
@@ -335,6 +345,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
         background: item.background,
         action: item.action.clone(),
         pages: 1,
+        art: None,
     };
 
     if group.wildcard {
@@ -366,11 +377,13 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                             background: None,
                             action: None,
                             pages: 1,
+                            art: None,
                         });
                     }
                     continue;
                 };
                 out.push(Candidate {
+                    art: None,
                     module,
                     text: wording(module, inputs.alt).render(&reading.fields),
                     flags: StateFlags {
@@ -400,6 +413,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     let mut fields = Fields::default();
                     fields.set("title", Value::Text(title.to_string()));
                     out.push(Candidate {
+                        art: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
@@ -433,6 +447,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     // the index survives xkb renaming anything.
                     fields.set_primary("index");
                     out.push(Candidate {
+                        art: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
@@ -454,6 +469,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     let mut fields = Fields::default();
                     fields.set("mode", Value::Text(mode.clone()));
                     out.push(Candidate {
+                        art: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
@@ -465,6 +481,32 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     });
                 }
             }
+            // One application, one rectangle - the same expansion a workspace list gets,
+            // and for the same reason: each needs its own icon, state and click target.
+            Source::Tray => {
+                for item in &inputs.tray.items {
+                    let mut fields = Fields::default();
+                    fields.set("title", Value::Text(item.title.clone()));
+                    fields.set("id", Value::Text(item.id.clone()));
+                    fields.set("status", Value::Text(item.status.name().to_string()));
+                    out.push(Candidate {
+                        art: item.icon.clone(),
+                        module,
+                        text: wording(module, inputs.alt).render(&fields),
+                        flags: StateFlags {
+                            urgent: item.status == crate::tray::Status::NeedsAttention,
+                            ..StateFlags::default()
+                        },
+                        values: fields,
+                        foreground: None,
+                        background: None,
+                        pages: 1,
+                        action: Some(ActionTarget::Tray {
+                            key: item.key.clone(),
+                        }),
+                    });
+                }
+            }
             Source::SwayWorkspaces(scope) => {
                 for workspace in &inputs.sway.workspaces {
                     if !inputs.on_this_screen(*scope, &workspace.output) {
@@ -473,6 +515,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     let mut fields = Fields::default();
                     fields.set("name", Value::Text(workspace.name.clone()));
                     out.push(Candidate {
+                        art: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags {
@@ -524,6 +567,7 @@ fn size_group(
             background,
             action,
             pages,
+            art,
         } = candidate;
         // Whether this module's program is out, which the spinner is drawn for. The check
         // is skipped outright while nothing is waiting, which is nearly always.
@@ -533,7 +577,9 @@ fn size_group(
         // folded down is empty on purpose and stays, because its icon is still there, and
         // so does one whose spinner is the only thing it has to show.
         let folded = module.collapsible && inputs.collapsed.contains(&module.name);
-        if content.is_empty() && !folded && !waiting {
+        // A module with a picture to show is not empty, whatever its wording says: a tray
+        // item is its icon, and most of them have nothing written on them at all.
+        if content.is_empty() && !folded && !waiting && art.is_none() {
             continue;
         }
         // The state rules and the graded icons both key on what the source published, not
@@ -570,7 +616,7 @@ fn size_group(
         // Stripping can empty the text entirely, which is fine when an icon is left to
         // carry the module: a muted volume is the icon and nothing else, and so is a
         // command that has not answered yet.
-        if content.is_empty() && style.icon.is_none() && !waiting {
+        if content.is_empty() && style.icon.is_none() && !waiting && art.is_none() {
             continue;
         }
 
@@ -596,9 +642,12 @@ fn size_group(
         // A command with a run on its way says so where its icon goes, so the reading
         // that is coming lands in the place the spinner was and nothing else moves. A
         // module with no icon of its own grows one for as long as it is waiting.
-        let icon = match waiting {
-            true => Some((Icon::Spinner, inputs.spin)),
-            false => style.icon.map(|icon| {
+        // A picture the source handed over stands in for whatever icon the style names:
+        // an application's own artwork is the thing a tray module exists to show.
+        let icon = match (waiting, art.is_some()) {
+            (true, _) => Some((Icon::Spinner, inputs.spin)),
+            (false, true) => Some((Icon::Raster, 0)),
+            (false, false) => style.icon.map(|icon| {
                 let level = if icon.is_graded() {
                     value.map(icon::level_of).unwrap_or(0)
                 } else {
@@ -645,7 +694,7 @@ fn size_group(
         let fixed = icon_advance + style.padding * 2.0;
         // Truncation can take the last of it, which an icon still carries - a spinner
         // included, since a module waiting on its first answer has nothing else.
-        if content.is_empty() && style.icon.is_none() && !waiting {
+        if content.is_empty() && style.icon.is_none() && !waiting && art.is_none() {
             continue;
         }
 
@@ -663,6 +712,7 @@ fn size_group(
             hover_style,
             icon_advance,
             icon,
+            art,
             text: content,
             style,
             foreground: foreground.unwrap_or(style.foreground),
@@ -789,6 +839,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             x: content_x,
             y: inner_y + (inner_h - m.style.icon_size) / 2.0,
             size: m.style.icon_size,
+            art: m.art.clone(),
         });
 
         // Hover is resolved here, against the final rectangle, so it is always the module
@@ -1128,6 +1179,7 @@ mod tests {
             collapsed,
             waiting,
             spin: 3,
+            tray: &Default::default(),
             output: None,
         };
         compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
@@ -1175,6 +1227,7 @@ padding = 0
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
+                tray: &Default::default(),
                 output: None,
             };
             let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
@@ -1227,6 +1280,7 @@ padding = 0
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
+                tray: &Default::default(),
                 output,
             };
             let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
@@ -1272,6 +1326,7 @@ padding = 0
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
+            tray: &Default::default(),
             output: Some("HDMI-A-1"),
         };
         let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
@@ -1310,6 +1365,7 @@ padding = 0
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
+                tray: &Default::default(),
                 output,
             };
             let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
@@ -1350,6 +1406,112 @@ padding = 0
         }
     }
 
+    /// One module, one icon per application - the same expansion a workspace list gets.
+    #[test]
+    fn a_tray_module_becomes_one_module_per_application() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["tray"]
+
+[module.tray]
+source = "tray"
+padding = 0
+"##;
+        let cfg = Config::parse(config).expect("test config parses");
+        let tray = crate::tray::TrayState {
+            items: vec![tray_item("a", "One"), tray_item("b", "Two")],
+        };
+        let frame = render_with(&cfg, &tray);
+        assert_eq!(frame.groups[0].modules.len(), 2);
+        // Each carries its own artwork and its own click target rather than the module's.
+        for module in &frame.groups[0].modules {
+            assert!(module.icon.as_ref().is_some_and(|i| i.art.is_some()));
+        }
+        assert!(matches!(
+            frame.groups[0].modules[0].action,
+            Some(ActionTarget::Tray { .. })
+        ));
+    }
+
+    /// A tray item says nothing by default - the picture is the whole module - and the
+    /// check that drops a module with no text would otherwise drop every one of them.
+    #[test]
+    fn an_item_with_no_wording_is_still_drawn() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["tray"]
+
+[module.tray]
+source = "tray"
+padding = 0
+"##;
+        let cfg = Config::parse(config).expect("test config parses");
+        let tray = crate::tray::TrayState {
+            items: vec![tray_item("a", "One")],
+        };
+        let frame = render_with(&cfg, &tray);
+        assert_eq!(frame.groups[0].modules[0].text, "");
+        assert!(frame.groups[0].modules[0].icon.is_some());
+    }
+
+    /// An item that brought no icon at all and has nothing written on it is nothing to
+    /// draw, and a rectangle of empty bar is worse than no rectangle.
+    #[test]
+    fn an_item_with_neither_icon_nor_wording_is_left_out() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["tray"]
+
+[module.tray]
+source = "tray"
+padding = 0
+"##;
+        let cfg = Config::parse(config).expect("test config parses");
+        let mut item = tray_item("a", "One");
+        item.icon = None;
+        let tray = crate::tray::TrayState { items: vec![item] };
+        assert!(render_with(&cfg, &tray).groups.is_empty());
+    }
+
+    fn tray_item(key: &str, title: &str) -> crate::tray::Item {
+        crate::tray::Item {
+            key: key.to_string(),
+            id: title.to_lowercase(),
+            title: title.to_string(),
+            status: crate::tray::Status::Active,
+            icon: Some(Arc::new(crate::icon::Raster {
+                width: 1,
+                height: 1,
+                pixels: vec![255, 255, 255, 255],
+            })),
+        }
+    }
+
+    fn render_with(cfg: &Config, tray: &crate::tray::TrayState) -> Frame {
+        let inputs = Inputs {
+            items: &[],
+            native: &Registry::new(&Default::default()),
+            sway: &SwayState::default(),
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed: &Default::default(),
+            waiting: &Default::default(),
+            spin: 0,
+            tray,
+            output: None,
+        };
+        compute(cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
+    }
+
     /// The mode indicator is on the bar exactly while a mode is held. `default` is what a
     /// keyboard does anyway, so it is drawn as nothing at all rather than as the word.
     #[test]
@@ -1377,6 +1539,7 @@ padding = 0
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
+                tray: &Default::default(),
                 output: None,
             };
             let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
@@ -2069,7 +2232,7 @@ collapsible = true
         // The icon and its padding, and not the gap that would have separated it from
         // text there is none of: 12 + 6 + 6.
         assert_eq!(module.width, 24.0);
-        let icon = module.icon.expect("the icon is what is left");
+        let icon = module.icon.as_ref().expect("the icon is what is left");
         // Which is what leaves the same room either side of it.
         assert_eq!(icon.x - module.x, 6.0);
         assert_eq!((module.x + module.width) - (icon.x + icon.size), 6.0);
@@ -2191,12 +2354,15 @@ icon = "battery-charging"
 
         let on = frame_with(config, &[], charging("charging"));
         assert_eq!(
-            on.groups[0].modules[0].icon.unwrap().icon,
+            on.groups[0].modules[0].icon.as_ref().unwrap().icon,
             Icon::BatteryCharging
         );
 
         let off = frame_with(config, &[], charging("discharging"));
-        assert_eq!(off.groups[0].modules[0].icon.unwrap().icon, Icon::Battery);
+        assert_eq!(
+            off.groups[0].modules[0].icon.as_ref().unwrap().icon,
+            Icon::Battery
+        );
     }
 
     #[test]
@@ -2290,7 +2456,7 @@ icon = "battery"
         for (percent, level) in [(0.0, 0), (50.0, 2), (100.0, 4)] {
             let frame = frame_of(config, &[with_percent(item("bat", "x"), percent)]);
             assert_eq!(
-                frame.groups[0].modules[0].icon.unwrap().level,
+                frame.groups[0].modules[0].icon.as_ref().unwrap().level,
                 level,
                 "at {percent}%"
             );

@@ -283,10 +283,13 @@ fn draw_icon_cached(
     if color.is_transparent() || placed.size <= 0.0 {
         return;
     }
+    // A picture is already rasterised, and the cache is keyed by which built-in icon it is
+    // - which every one of these shares. Caching them would draw one tray item's artwork
+    // for all of them.
     // A clipped icon is rare - only a group with a separator at its end still has a mask -
     // and blending coverage through one would mean applying the mask by hand, so those go
     // the direct way.
-    if clip.is_some() {
+    if clip.is_some() || placed.art.is_some() {
         draw_icon(pixmap, placed, color, transform, clip);
         return;
     }
@@ -491,6 +494,37 @@ fn path_of(cmds: &[PathCmd]) -> Option<Path> {
     pb.finish()
 }
 
+/// Lay an icon that is already pixels into the box layout gave it.
+///
+/// The picture is resampled to the box rather than assumed to fit it: what size it arrived
+/// at is the application's business, and the surface it lands on may be at any scale.
+fn draw_raster(
+    pixmap: &mut PixmapMut<'_>,
+    placed: &PlacedIcon,
+    art: &icon::Raster,
+    transform: Transform,
+    clip: Option<&Mask>,
+) {
+    if art.width == 0 || art.height == 0 {
+        return;
+    }
+    let Some(source) = tiny_skia::PixmapRef::from_bytes(&art.pixels, art.width, art.height) else {
+        return;
+    };
+    // Square, like every other icon: the box is `size` on a side, and the picture is put
+    // into it whatever shape it arrived in.
+    let scale = (
+        placed.size / art.width as f32,
+        placed.size / art.height as f32,
+    );
+    let local = Transform::from_translate(placed.x, placed.y).pre_scale(scale.0, scale.1);
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..tiny_skia::PixmapPaint::default()
+    };
+    pixmap.draw_pixmap(0, 0, source, &paint, transform.pre_concat(local), clip);
+}
+
 /// Draw an icon on its own, at one size and offset within a pixel, and keep the coverage.
 fn rasterise_icon(what: icon::Icon, level: usize, size: f32, fx: f32, fy: f32) -> Option<IconRun> {
     let width = (size * what.width() + fx).ceil() as usize + 1;
@@ -502,6 +536,7 @@ fn rasterise_icon(what: icon::Icon, level: usize, size: f32, fx: f32, fy: f32) -
         x: fx,
         y: fy,
         size,
+        art: None,
     };
     draw_icon(
         &mut pixmap.as_mut(),
@@ -525,6 +560,12 @@ fn draw_icon(
     clip: Option<&Mask>,
 ) {
     if color.is_transparent() || placed.size <= 0.0 {
+        return;
+    }
+    // An icon that is a picture is drawn as one: it carries its own colours, so the
+    // module's foreground says nothing about it beyond whether it is drawn at all.
+    if let Some(art) = &placed.art {
+        draw_raster(pixmap, placed, art, transform, clip);
         return;
     }
     let IconArt::Paths(paths) = icon::art(placed.icon, placed.level) else {
@@ -1336,6 +1377,7 @@ mod tests {
             width,
             height: 20.0,
             icon: icon.then_some(PlacedIcon {
+                art: None,
                 icon: Icon::Cpu,
                 level: 0,
                 x: x + 2.0,
@@ -1533,6 +1575,7 @@ mod tests {
                     Icon::BatteryCharging,
                 ] {
                     let placed = PlacedIcon {
+                        art: None,
                         icon: what,
                         level: 2,
                         x: 4.0 + fx,

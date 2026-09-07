@@ -13,6 +13,7 @@ mod signal;
 mod status;
 mod sway;
 mod text;
+mod tray;
 
 use std::path::PathBuf;
 
@@ -149,6 +150,11 @@ fn main() -> Result<()> {
     // Which sources a click or a signal can ask for another reading, so a command that
     // nothing can ask keeps no thread waiting to be asked.
     let askable = config.refreshable();
+    // Read before the config is handed over: a tray icon is drawn at the size the bar uses
+    // for every other icon, and resolved once at that size rather than per frame.
+    let tray_wanted = config.needs_tray();
+    let tray_size = config.bar.icon_size.round().max(1.0) as u32;
+    let tray_theme = config.bar.icon_theme.clone();
     let mut app = App::new(&globals, &qh, conn.clone(), config, provider)?;
 
     if listening {
@@ -285,6 +291,27 @@ fn main() -> Result<()> {
                 }
             })
             .map_err(|e| anyhow::anyhow!("inserting a command source: {e}"))?;
+    }
+
+    // The tray is started only when something on the bar draws one. Nothing else in dbar
+    // takes a name on the bus that other programs look for, and taking that one without
+    // drawing anything would leave applications registered with a bar that never shows
+    // them, and keep a real tray from ever taking it.
+    if tray_wanted {
+        let (tray_tx, tray_rx) = calloop::channel::channel();
+        match crate::tray::spawn(tray_tx, tray_size, tray_theme) {
+            Ok(commands) => {
+                app.set_tray(commands);
+                handle
+                    .insert_source(tray_rx, |event, _, app: &mut App| {
+                        if let calloop::channel::Event::Msg(event) = event {
+                            app.on_tray(event);
+                        }
+                    })
+                    .map_err(|e| anyhow::anyhow!("inserting the tray source: {e}"))?;
+            }
+            Err(e) => log::warn!("the system tray is unavailable: {e:#}"),
+        }
     }
 
     let (sway_tx, sway_rx) = calloop::channel::channel();
