@@ -155,6 +155,8 @@ fn main() -> Result<()> {
     let watching = crate::sway::Watching {
         language: config.needs_language(),
         mode: config.needs_mode(),
+        windows: config.needs_windows(),
+        workspaces: config.needs_workspaces(),
     };
     let collectors = !config_collectors.is_empty();
     let listening = provider.is_some();
@@ -329,21 +331,31 @@ fn main() -> Result<()> {
         }
     }
 
-    let (sway_tx, sway_rx) = calloop::channel::channel();
-    match crate::sway::spawn(sway_tx, watching) {
-        Ok(()) => {
-            // Commands go out on a thread of their own: a click must not wait on the
-            // compositor, because the thread it arrives on is the one that draws.
-            app.set_sway_commands(crate::sway::commands());
-            handle
-                .insert_source(sway_rx, |event, _, app: &mut App| {
-                    if let calloop::channel::Event::Msg(event) = event {
-                        app.on_sway(event);
-                    }
-                })
-                .map_err(|e| anyhow::anyhow!("inserting the sway source: {e}"))?;
+    // The compositor is asked nothing at all by a bar that draws none of what it knows:
+    // no sockets, no threads, and no tree read every time a window title changes.
+    if !watching.anything() {
+        log::info!("no module comes from the compositor, so it is not connected to");
+    } else {
+        let (sway_tx, sway_rx) = calloop::channel::channel();
+        match crate::sway::spawn(sway_tx, watching) {
+            Ok(()) => {
+                // Clicking a workspace is the only thing that sends the compositor a
+                // command, and it goes out on a thread of its own: a click must not wait
+                // on the compositor, because the thread it arrives on is the one that
+                // draws.
+                if watching.workspaces {
+                    app.set_sway_commands(crate::sway::commands());
+                }
+                handle
+                    .insert_source(sway_rx, |event, _, app: &mut App| {
+                        if let calloop::channel::Event::Msg(event) = event {
+                            app.on_sway(event);
+                        }
+                    })
+                    .map_err(|e| anyhow::anyhow!("inserting the sway source: {e}"))?;
+            }
+            Err(e) => log::warn!("compositor integration unavailable: {e}"),
         }
-        Err(e) => log::warn!("compositor integration unavailable: {e}"),
     }
 
     // Two rounds with the compositor before the loop starts: the first brings the outputs

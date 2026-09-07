@@ -1422,6 +1422,18 @@ impl Config {
         self.modules().any(|m| m.source == Source::SwayMode)
     }
 
+    /// Whether anything on the bar draws the focused window.
+    pub fn needs_windows(&self) -> bool {
+        self.modules()
+            .any(|m| matches!(m.source, Source::SwayWindow(_)))
+    }
+
+    /// Whether anything on the bar draws the workspace list.
+    pub fn needs_workspaces(&self) -> bool {
+        self.modules()
+            .any(|m| matches!(m.source, Source::SwayWorkspaces(_)))
+    }
+
     /// Whether anything in this config comes from an external status provider.
     ///
     /// Nothing does on a native configuration, and then there is no child process to run.
@@ -2386,6 +2398,31 @@ format = "$load"
             "{message}"
         );
         assert!(message.contains("load"), "{message}");
+    }
+
+    /// A bar that draws nothing the compositor knows must not connect to it: two sockets,
+    /// two threads and a tree read on every window title are the cost of asking.
+    #[test]
+    fn a_config_says_which_halves_of_the_compositor_it_needs() {
+        let native = Config::parse(
+            "[bar]\nheight = 30\n\n[right]\ngroups = [\"g\"]\n\n\
+             [group.g]\nmodules = [\"cpu\"]\n\n[module.cpu]\nsource = \"cpu\"\n",
+        )
+        .expect("a native config");
+        assert!(!native.needs_windows());
+        assert!(!native.needs_workspaces());
+        assert!(!native.needs_language());
+        assert!(!native.needs_mode());
+
+        let desktop = Config::parse(
+            "[bar]\nheight = 30\n\n[right]\ngroups = [\"g\"]\n\n\
+             [group.g]\nmodules = [\"ws\"]\n\n[module.ws]\nsource = \"sway:workspaces\"\n",
+        )
+        .expect("a workspace config");
+        // A workspace list is not a window title: the tree is what costs, and nothing here
+        // reads it.
+        assert!(desktop.needs_workspaces());
+        assert!(!desktop.needs_windows());
     }
 
     /// The argv a command module ends up with, given what it wrote.

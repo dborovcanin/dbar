@@ -142,6 +142,23 @@ fn send(stream: &mut UnixStream, kind: u32, payload: &[u8]) -> Result<()> {
     stream.flush().context("flushing an IPC message")
 }
 
+/// Whether another message has already arrived, so a burst can be taken in one go.
+///
+/// Messages are read straight off the socket rather than through a buffer, so asking the
+/// kernel is the whole of it: nothing can be waiting anywhere else.
+fn more_waiting(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd as _;
+
+    let mut poll = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one descriptor owned by the caller for the length of this call, a count
+    // that matches, and a timeout of zero, so nothing here waits.
+    unsafe { libc::poll(&mut poll, 1, 0) > 0 }
+}
+
 fn recv(stream: &mut UnixStream) -> Result<(u32, Vec<u8>)> {
     let mut header = [0u8; 14];
     stream
@@ -234,13 +251,18 @@ fn title_of(node: &serde_json::Value) -> Option<String> {
 }
 
 /// Re-read the two halves a workspace or window event can have changed.
-fn read_desktop(query_stream: &mut UnixStream, state: &mut SwayState) -> Result<()> {
+fn read_desktop(query_stream: &mut UnixStream, state: &mut SwayState, windows: bool) -> Result<()> {
+    // The workspace list is read either way: it is where the focused screen comes from,
+    // and a window module on one screen has to know which screen that is. The tree is the
+    // expensive half, and only a window module has anything to do with it.
     state.workspaces = serde_json::from_slice(&query(query_stream, GET_WORKSPACES)?)
         .context("parsing the workspace list")?;
 
-    let tree: serde_json::Value =
-        serde_json::from_slice(&query(query_stream, GET_TREE)?).context("parsing the tree")?;
-    state.windows = windows_by_output(&tree);
+    if windows {
+        let tree: serde_json::Value =
+            serde_json::from_slice(&query(query_stream, GET_TREE)?).context("parsing the tree")?;
+        state.windows = windows_by_output(&tree);
+    }
     state.focused_output = state
         .workspaces
         .iter()
@@ -403,14 +425,29 @@ fn run_command(command: &str) {
 
 /// Subscribe to the compositor and forward its state into the event loop.
 ///
-/// What the bar has asked the compositor for beyond workspaces and windows.
+/// What the bar has asked the compositor for.
 ///
-/// Each of these costs a subscription and a question at startup, so a bar that draws
-/// neither pays for neither.
+/// Each of these costs a subscription and a question at startup, and the desktop ones
+/// cost a workspace list - and, for windows, a whole tree - every time the desktop moves.
+/// A bar that draws none of them never connects at all.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Watching {
     pub language: bool,
     pub mode: bool,
+    pub windows: bool,
+    pub workspaces: bool,
+}
+
+impl Watching {
+    /// Whether anything on the bar comes from the compositor.
+    pub fn anything(self) -> bool {
+        self.language || self.mode || self.windows || self.workspaces
+    }
+
+    /// Whether the workspace list and the windows on it have to be followed.
+    fn desktop(self) -> bool {
+        self.windows || self.workspaces
+    }
 }
 
 /// Input devices and binding modes are only subscribed to when something on the bar is
@@ -421,7 +458,16 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
     let mut events = connect()?;
     let mut queries = connect()?;
 
-    let mut wanted = vec!["\"workspace\"", "\"window\""];
+    // A workspace list and a window title both move with the workspace, so both follow
+    // workspace events; only a window module has any use for a title changing, which is
+    // the noisiest thing the compositor reports.
+    let mut wanted = Vec::new();
+    if watching.desktop() {
+        wanted.push("\"workspace\"");
+    }
+    if watching.windows {
+        wanted.push("\"window\"");
+    }
     if watching.language {
         wanted.push("\"input\"");
     }
@@ -431,10 +477,15 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
     let subscription = format!("[{}]", wanted.join(","));
     send(&mut events, SUBSCRIBE, subscription.as_bytes())?;
     let (_, reply) = recv(&mut events)?;
-    log::debug!("sway subscribe -> {}", String::from_utf8_lossy(&reply));
+    log::debug!(
+        "sway subscribe {subscription} -> {}",
+        String::from_utf8_lossy(&reply)
+    );
 
     let mut state = SwayState::default();
-    read_desktop(&mut queries, &mut state)?;
+    if watching.desktop() {
+        read_desktop(&mut queries, &mut state, watching.windows)?;
+    }
     if watching.mode {
         // Sway only reports a mode when it changes, so the one it is already in has to be
         // asked for. A compositor too old to answer leaves the module empty rather than
@@ -458,38 +509,52 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
         .name("sway-ipc".to_string())
         .spawn(move || {
             loop {
-                let kind = match recv(&mut events) {
-                    Ok((kind, body)) => {
-                        if kind == EVENT_MODE {
+                // Everything the compositor has already said is taken before anything is
+                // asked or drawn. Moving to another workspace is several events - the
+                // workspace, the window that came with it, sometimes a mode - and reading
+                // the desktop once for the lot is the difference between one redraw and
+                // four that nobody can see apart.
+                let mut news = false;
+                let mut desktop = false;
+                loop {
+                    match recv(&mut events) {
+                        Ok((EVENT_MODE, body)) => {
                             state.mode = mode_change(&body);
+                            news = true;
                         }
-                        if kind == EVENT_INPUT {
-                            // Most input events say nothing about the layout, and a redraw
-                            // for one would be a wake-up spent on nothing.
-                            let Some(layout) = layout_change(&body) else {
-                                continue;
-                            };
-                            state.layout = Some(layout);
+                        // Most input events say nothing about the layout, and a redraw for
+                        // one would be a wake-up spent on nothing.
+                        Ok((EVENT_INPUT, body)) => {
+                            if let Some(layout) = layout_change(&body) {
+                                state.layout = Some(layout);
+                                news = true;
+                            }
                         }
-                        kind
+                        // Any workspace or window event can change either half, and the
+                        // queries are cheap next to a redraw, so both are re-read rather
+                        // than patched.
+                        Ok(_) => {
+                            desktop = true;
+                            news = true;
+                        }
+                        Err(e) => {
+                            let _ = sender.send(SwayEvent::Stopped(e.to_string()));
+                            return;
+                        }
                     }
-                    Err(e) => {
-                        let _ = sender.send(SwayEvent::Stopped(e.to_string()));
-                        return;
+                    if !more_waiting(&events) {
+                        break;
                     }
-                };
-                // Any workspace or window event can change either half, and the queries are
-                // cheap next to a redraw, so both are re-read rather than patched.
-                if kind != EVENT_INPUT
-                    && kind != EVENT_MODE
-                    && let Err(e) = read_desktop(&mut queries, &mut state)
+                }
+                if desktop && let Err(e) = read_desktop(&mut queries, &mut state, watching.windows)
                 {
                     let _ = sender.send(SwayEvent::Stopped(e.to_string()));
                     return;
                 }
-                if sender
-                    .send(SwayEvent::State(Box::new(state.clone())))
-                    .is_err()
+                if news
+                    && sender
+                        .send(SwayEvent::State(Box::new(state.clone())))
+                        .is_err()
                 {
                     return;
                 }
@@ -502,6 +567,31 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the bar asks for decides what it subscribes to and what it re-reads, so this
+    /// is the switch that keeps a clock-only bar off the compositor entirely.
+    #[test]
+    fn nothing_from_the_compositor_means_nothing_to_ask_it() {
+        assert!(!Watching::default().anything());
+        assert!(!Watching::default().desktop());
+
+        let language = Watching {
+            language: true,
+            ..Watching::default()
+        };
+        assert!(language.anything(), "a layout still needs a connection");
+        assert!(!language.desktop(), "but not the workspaces or the tree");
+
+        let workspaces = Watching {
+            workspaces: true,
+            ..Watching::default()
+        };
+        assert!(workspaces.desktop());
+        assert!(
+            !workspaces.windows,
+            "and no tree, which is the expensive half"
+        );
+    }
 
     /// The tree as sway reports it with two screens: the keyboard is on the left one, and
     /// the right one is still showing what it was last used for.
