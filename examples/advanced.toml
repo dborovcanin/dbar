@@ -136,13 +136,13 @@ icon_gap = 3
 background = "$raised"
 foreground = "$text"
 padding = 10
-radius = 12
+radius = 16
 
 [style.focused]
 background = "$accent"
 foreground = "$background"
 padding = 10
-radius = 12
+radius = 16
 
 [style.dim]
 foreground = "$subtext"
@@ -185,7 +185,7 @@ foreground = "$text"
 [group.desktop]
 modules = ["workspaces"]
 background = "$surface"
-radius = 12
+radius = 16
 # opacity = 0.8
 padding = 3
 spacing = 3
@@ -202,7 +202,7 @@ right = "round"
 [group.mode]
 modules = ["mode"]
 background = "$warning"
-radius = 12
+radius = 16
 # opacity = 0.8
 
 [group.mode.edges]
@@ -212,7 +212,7 @@ right = "round"
 [group.window]
 modules = ["title"]
 background = "$surface"
-radius = 12
+radius = 16
 # opacity = 0.8
 
 [group.window.edges]
@@ -226,7 +226,7 @@ right = "round"
 [group.playing]
 modules = ["media"]
 background = "$surface"
-radius = 12
+radius = 16
 # opacity = 0.8
 
 [group.playing.edges]
@@ -239,7 +239,7 @@ right = "round"
 [group.tray]
 modules = ["tray"]
 background = "$surface"
-radius = 12
+radius = 16
 
 [group.tray.edges]
 left = "round"
@@ -250,7 +250,7 @@ right = "round"
 # share one island and run into each other rather than being ruled apart.
 [group.system]
 modules = ["cpu", "memory", "temperature"]
-radius = 12
+radius = 16
 # opacity = 0.8
 
 [group.system.separator]
@@ -267,7 +267,7 @@ right = "round"
 # machine is connected to rather than what it is doing.
 [group.network]
 modules = ["language", "network"]
-radius = 12
+radius = 16
 # opacity = 0.8
 
 [group.network.separator]
@@ -282,7 +282,7 @@ right = "round"
 
 [group.power]
 modules = ["volume", "brightness", "battery"]
-radius = 12
+radius = 16
 # opacity = 0.8
 
 [group.power.separator]
@@ -300,7 +300,7 @@ right = "round"
 [group.weather]
 modules = ["weather"]
 background = "$surface"
-radius = 12
+radius = 16
 # opacity = 0.8
 
 [group.weather.edges]
@@ -312,7 +312,7 @@ right = "round"
 [group.time]
 modules = ["clock"]
 background = "$accent"
-radius = 12
+radius = 16
 # opacity = 0.8
 
 [group.time.edges]
@@ -350,7 +350,7 @@ style = "pill"
 [module.workspaces.states.urgent]
 urgent = true
 style = "critical"
-radius = 12
+radius = 16
 
 # `controls = true` makes the module the remote as well as the display: a left
 # click plays and pauses, and the wheel moves between tracks. dbar asks the
