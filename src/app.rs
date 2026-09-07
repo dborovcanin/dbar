@@ -1256,7 +1256,6 @@ impl App {
         let App {
             bars,
             painter,
-            config,
             qh,
             format,
             pixels,
@@ -1289,7 +1288,6 @@ impl App {
                 clip: &mut bar.clip,
                 pixels: *pixels,
             },
-            config,
             &frame,
             scale as f32,
             painter,

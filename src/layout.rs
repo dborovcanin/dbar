@@ -318,9 +318,27 @@ pub struct PlacedGroup {
     pub separators: Vec<PlacedSeparator>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Frame {
     pub groups: Vec<PlacedGroup>,
+    /// The bar's own ground, under everything the groups draw.
+    ///
+    /// Here rather than read from the config while painting, so that nothing below this
+    /// point knows a config exists - the same deal `MenuFrame` already had. A renderer
+    /// takes positioned geometry and colour and needs nothing else; that is what makes it
+    /// replaceable.
+    pub background: Color,
+    pub radius: f32,
+}
+
+impl Default for Frame {
+    fn default() -> Frame {
+        Frame {
+            groups: Vec::new(),
+            background: Color::TRANSPARENT,
+            radius: 0.0,
+        }
+    }
 }
 
 fn contains(x: f32, y: f32, rx: f32, ry: f32, rw: f32, rh: f32) -> bool {
@@ -458,7 +476,10 @@ impl Frame {
     }
 
     pub fn damage(&self, on_screen: &Frame) -> Damage {
-        if self.groups.len() != on_screen.groups.len() {
+        if self.groups.len() != on_screen.groups.len()
+            || self.background != on_screen.background
+            || self.radius != on_screen.radius
+        {
             return Damage::All;
         }
         let mut rects = Vec::new();
@@ -1319,7 +1340,11 @@ pub fn compute(
     pointer: Option<(f32, f32)>,
 ) -> Frame {
     let gap = cfg.bar.gap;
-    let mut frame = Frame::default();
+    let mut frame = Frame {
+        background: cfg.bar.background,
+        radius: cfg.bar.radius,
+        ..Frame::default()
+    };
 
     let run_width = |groups: &Vec<SizedGroup>| -> f32 {
         if groups.is_empty() {
@@ -1432,6 +1457,7 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
             }],
             separators: Vec::new(),
         }],
+        ..Frame::default()
     }
 }
 

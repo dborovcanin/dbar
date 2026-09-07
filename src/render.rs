@@ -10,7 +10,7 @@ use tiny_skia::{
 };
 
 use crate::color::Color;
-use crate::config::{Config, Direction, EdgeShape, SeparatorShape};
+use crate::config::{Direction, EdgeShape, SeparatorShape};
 use crate::icon::{self, IconArt, Ink, PathCmd};
 use std::collections::HashMap;
 
@@ -693,7 +693,6 @@ fn fill(
 /// lays out its bytes.
 pub fn render_to_buffer(
     target: Target<'_>,
-    cfg: &Config,
     frame: &Frame,
     scale: f32,
     painter: &mut Painter<impl DrawText>,
@@ -708,7 +707,7 @@ pub fn render_to_buffer(
     {
         let mut pixmap =
             PixmapMut::from_bytes(canvas, width, height).context("wrapping the shm buffer")?;
-        render(&mut pixmap, cfg, frame, scale, painter, clip);
+        render(&mut pixmap, frame, scale, painter, clip);
     }
     pixels.apply(canvas);
     Ok(())
@@ -906,7 +905,6 @@ impl Pixels {
 /// `clip` is the surface's own, not the painter's, for the reason [`Clip`] gives.
 fn render(
     pixmap: &mut PixmapMut<'_>,
-    cfg: &Config,
     frame: &Frame,
     scale: f32,
     painter: &mut Painter<impl DrawText>,
@@ -920,8 +918,8 @@ fn render(
     fill(
         pixmap,
         (0.0, 0.0, width, height),
-        cfg.bar.radius,
-        cfg.bar.background,
+        frame.radius,
+        frame.background,
         transform,
         None,
     );
@@ -1451,7 +1449,6 @@ format = "$text"
     fn the_two_buffer_formats_differ_only_in_red_and_blue() {
         let frame = island(1.0);
         let (w, h) = (500u32, 20u32);
-        let cfg = Config::parse("[bar]\nheight = 20\n").expect("a bar with nothing on it");
         let paint = |pixels: Pixels| {
             let mut canvas = vec![0u8; w as usize * h as usize * 4];
             let mut painter = Painter::new(Blocks {
@@ -1466,7 +1463,6 @@ format = "$text"
                     clip: &mut Clip::default(),
                     pixels,
                 },
-                &cfg,
                 &frame,
                 1.0,
                 &mut painter,
@@ -1573,7 +1569,6 @@ format = "$text"
                                 clip,
                                 pixels,
                             },
-                            &cfg,
                             &frame,
                             scale,
                             painter,
@@ -1845,11 +1840,8 @@ format = "$text"
                     under: TILE_ALT,
                 }],
             }],
+            ..Frame::default()
         }
-    }
-
-    fn bar() -> Config {
-        Config::parse("[bar]\nheight = 20\n").expect("a bar with no modules is a config")
     }
 
     fn shot(frame: &Frame, scale: f32) -> Pixmap {
@@ -1857,13 +1849,44 @@ format = "$text"
         let mut painter = Painter::new(Blocks { scale, run: None });
         render(
             &mut pixmap.as_mut(),
-            &bar(),
             frame,
             scale,
             &mut painter,
             &mut Clip::default(),
         );
         pixmap
+    }
+
+    /// The bar's own ground is the frame's, not the config's: the renderer is handed
+    /// positioned geometry and colour and reads nothing else, which is the whole of what
+    /// makes it replaceable.
+    #[test]
+    fn the_bar_draws_the_ground_the_frame_carries() {
+        let ground = Color::rgba(0x28, 0x28, 0x28, 0xff);
+        let frame = Frame {
+            background: ground,
+            radius: 6.0,
+            ..island(1.0)
+        };
+        let painted = shot(&frame, 1.0);
+        let at = |x: u32, y: u32| {
+            let p = painted.pixel(x, y).expect("inside the pixmap");
+            (p.red(), p.green(), p.blue(), p.alpha())
+        };
+
+        // Everywhere the islands are not, down to the rounded corner.
+        assert_eq!(at(200, 10), (ground.r, ground.g, ground.b, 0xff));
+        assert_eq!(at(0, 0).3, 0, "the radius rounds the corner off the ground");
+
+        // And nothing at all where the frame says the bar is transparent.
+        let clear = shot(
+            &Frame {
+                background: Color::TRANSPARENT,
+                ..frame
+            },
+            1.0,
+        );
+        assert_eq!(clear.pixel(200, 10).expect("inside").alpha(), 0);
     }
 
     /// Text is the one thing the renderer's transform cannot move: the backend places
