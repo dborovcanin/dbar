@@ -510,10 +510,26 @@ fn align(interval: Duration) -> Duration {
 }
 
 /// Read a file that the kernel generates, where the reported length is meaningless.
+///
+/// `std::fs::read_to_string` sizes its buffer from the length the file reports, and every
+/// file under `/proc` and `/sys` reports zero however much it is about to hand over. That
+/// leaves the buffer growing from nothing on every read, a few times a second, forever.
+/// Asking for a page up front is enough for all of them: `/proc/stat` on a large machine
+/// is the biggest of the lot and still fits.
 fn read_to_string(path: impl AsRef<std::path::Path>) -> Result<String> {
+    use std::io::Read as _;
     let path = path.as_ref();
-    std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))
+    let read = |path: &std::path::Path| -> std::io::Result<String> {
+        let mut file = std::fs::File::open(path)?;
+        let mut out = String::with_capacity(PSEUDO_FILE);
+        file.read_to_string(&mut out)?;
+        Ok(out)
+    };
+    read(path).map_err(|e| anyhow::anyhow!("reading {}: {e}", path.display()))
 }
+
+/// What to make room for when reading a file the kernel generates.
+const PSEUDO_FILE: usize = 4096;
 
 #[cfg(test)]
 mod tests {
