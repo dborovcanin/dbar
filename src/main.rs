@@ -8,6 +8,7 @@ mod dbus;
 mod format;
 mod icon;
 mod layout;
+mod lines;
 mod render;
 mod signal;
 mod status;
@@ -41,6 +42,19 @@ OPTIONS:
 Without -c, dbar reads $XDG_CONFIG_HOME/dbar/config.toml and falls back to its
 built-in defaults when that file does not exist.
 ";
+
+/// How many updates from somebody else's program may be waiting for the bar at once.
+///
+/// A script and an i3bar provider both send on their own thread, and the bar draws on
+/// this one. Left unbounded, a program printing faster than the bar can draw would queue
+/// every one of those updates - memory the bar cannot get back, spent on states nobody
+/// will ever see, and a bar working through a backlog rather than showing what is true
+/// now. A full queue blocks the sender instead, which is backpressure the program itself
+/// feels: it is the shape a pipe already has.
+///
+/// A handful, because everything past the newest update is going to be drawn over anyway;
+/// the depth is only there so an ordinary burst is not paced by the frame rate.
+const QUEUED_UPDATES: usize = 8;
 
 struct Args {
     config: Option<PathBuf>,
@@ -128,7 +142,7 @@ fn main() -> Result<()> {
 
     // An external provider is started only when something in the config reads from one.
     // A native configuration runs no child process at all.
-    let (status_tx, status_rx) = calloop::channel::channel();
+    let (status_tx, status_rx) = calloop::channel::sync_channel(QUEUED_UPDATES);
     let provider = if config.needs_provider() {
         Some(I3BarProvider::spawn(&config.i3bar, status_tx)?)
     } else {
@@ -252,7 +266,7 @@ fn main() -> Result<()> {
         let crate::collect::Which::Command(spec) = which else {
             continue;
         };
-        let (tx, rx) = calloop::channel::channel();
+        let (tx, rx) = calloop::channel::sync_channel(QUEUED_UPDATES);
         let trigger = match crate::collect::command::spawn(
             spec.argv.clone(),
             spec.run,

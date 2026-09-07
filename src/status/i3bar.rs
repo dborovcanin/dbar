@@ -9,7 +9,7 @@
 //! boundary, and everything downstream sees ordinary `StatusItem`s.
 
 use std::borrow::Cow;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 
 use anyhow::{Context as _, Result};
@@ -191,7 +191,7 @@ impl I3BarProvider {
     /// Spawn the provider and start forwarding its output into `sender`.
     pub fn spawn(
         cfg: &config::I3Bar,
-        sender: calloop::channel::Sender<StatusEvent>,
+        sender: calloop::channel::SyncSender<StatusEvent>,
     ) -> Result<I3BarProvider> {
         let mut child = Command::new(&cfg.command)
             .args(&cfg.args)
@@ -302,11 +302,11 @@ impl Drop for I3BarProvider {
     }
 }
 
-fn read_loop(stdout: std::process::ChildStdout, sender: calloop::channel::Sender<StatusEvent>) {
+fn read_loop(stdout: std::process::ChildStdout, sender: calloop::channel::SyncSender<StatusEvent>) {
     let reader = BufReader::new(stdout);
     let mut header_seen = false;
 
-    for line in reader.lines() {
+    for line in crate::lines::capped(reader) {
         let line = match line {
             Ok(l) => l,
             Err(e) => {
@@ -314,6 +314,16 @@ fn read_loop(stdout: std::process::ChildStdout, sender: calloop::channel::Sender
                 return;
             }
         };
+        // An update is one line of JSON, so a line that had to be cut would not parse
+        // anyway. Saying why beats a parse error that blames the provider's syntax.
+        if line.dropped > 0 {
+            log::warn!(
+                "status provider sent a line longer than {} bytes; it was ignored",
+                crate::lines::LIMIT
+            );
+            continue;
+        }
+        let line = line.text;
         // The protocol frames updates as a never-ending JSON array: an opening `[` on its own
         // line, then one array per update. Implementations differ on whether the separating
         // comma leads or trails the line, so strip it from either end.

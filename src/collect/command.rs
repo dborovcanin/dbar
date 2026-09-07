@@ -34,7 +34,7 @@
 //! pipeline is something you ask for - `["sh", "-c", "..."]` - rather than something dbar
 //! decides to give you.
 
-use std::io::{BufRead as _, BufReader};
+use std::io::BufReader;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -107,7 +107,7 @@ pub fn spawn(
     argv: Vec<String>,
     run: Run,
     declared: &'static [FieldSpec],
-    sender: calloop::channel::Sender<Message>,
+    sender: calloop::channel::SyncSender<Message>,
     askable: bool,
     pages: bool,
     timeout: Duration,
@@ -191,7 +191,7 @@ fn stream_forever(
     name: &str,
     rest: &[String],
     declared: &'static [FieldSpec],
-    sender: &calloop::channel::Sender<Message>,
+    sender: &calloop::channel::SyncSender<Message>,
 ) {
     let mut wait = FIRST_WAIT;
     loop {
@@ -287,7 +287,12 @@ fn run_to_end(program: &str, args: &[String], timeout: Duration) -> Result<Strin
     let Ended::Output(output) = ended else {
         // `reap` kills and waits, so nothing is left behind.
         reap(&mut child);
-        anyhow::bail!("{program} had not answered after {timeout:?} and was stopped");
+        match ended {
+            Ended::Flooded => {
+                anyhow::bail!("{program} printed more than {OUTPUT_LIMIT} bytes and was stopped")
+            }
+            _ => anyhow::bail!("{program} had not answered after {timeout:?} and was stopped"),
+        }
     };
     let status = child.wait().context("waiting for the command")?;
     if !status.success() {
@@ -296,6 +301,14 @@ fn run_to_end(program: &str, args: &[String], timeout: Duration) -> Result<Strin
     Ok(output)
 }
 
+/// The most one run of a command may print before it is stopped.
+///
+/// A run's output is held whole, because the answer is the last line of it, so a program
+/// stuck in a printing loop would otherwise grow the bar until the machine gave out. A
+/// module's worth of readings is a few hundred bytes; a megabyte is a program that has
+/// gone wrong.
+const OUTPUT_LIMIT: usize = 1024 * 1024;
+
 /// How reading a command's output finished.
 enum Ended {
     /// The command closed its output, which is how a run that worked ends.
@@ -303,6 +316,8 @@ enum Ended {
     /// The deadline passed first. Whatever had been read by then is dropped: half an
     /// answer is worse than none, because the half would be published as a whole one.
     Overran,
+    /// It printed more than `OUTPUT_LIMIT`, and was not going to be believed anyway.
+    Flooded,
 }
 
 /// Read everything a command writes, giving up at `deadline`.
@@ -346,6 +361,9 @@ fn read_until(stdout: &mut std::process::ChildStdout, deadline: Instant) -> std:
         if read == 0 {
             return Ok(Ended::Output(output));
         }
+        if output.len() + read > OUTPUT_LIMIT {
+            return Ok(Ended::Flooded);
+        }
         output.push_str(&String::from_utf8_lossy(&buffer[..read]));
     }
 }
@@ -355,14 +373,14 @@ fn run_once(
     program: &str,
     args: &[String],
     declared: &'static [FieldSpec],
-    sender: &calloop::channel::Sender<Message>,
+    sender: &calloop::channel::SyncSender<Message>,
 ) -> Result<()> {
     let mut child = configured(program, args)
         .spawn()
         .with_context(|| format!("spawning {program}"))?;
 
     let stdout = child.stdout.take().context("stdout was piped")?;
-    for line in BufReader::new(stdout).lines() {
+    for line in crate::lines::capped(BufReader::new(stdout)) {
         let line = match line {
             Ok(line) => line,
             Err(e) => {
@@ -370,8 +388,17 @@ fn run_once(
                 return Err(e).context("reading a line");
             }
         };
+        // A line that had to be cut is not a reading: half of what a program printed is
+        // not half an answer, it is a wrong one.
+        if line.dropped > 0 {
+            log::warn!(
+                "{program} printed a line longer than {} bytes; it was ignored",
+                crate::lines::LIMIT
+            );
+            continue;
+        }
         if sender
-            .send(Message::Readings(vec![reading_of(&line, declared)]))
+            .send(Message::Readings(vec![reading_of(&line.text, declared)]))
             .is_err()
         {
             // The bar has gone; take the command with it.
