@@ -703,16 +703,14 @@ pub fn render_to_buffer(
         width,
         height,
         clip,
+        pixels,
     } = target;
     {
         let mut pixmap =
             PixmapMut::from_bytes(canvas, width, height).context("wrapping the shm buffer")?;
         render(&mut pixmap, cfg, frame, scale, painter, clip);
     }
-    // tiny-skia writes premultiplied RGBA; wl_shm ARGB8888 is BGRA in memory order.
-    for px in canvas.chunks_exact_mut(4) {
-        px.swap(0, 2);
-    }
+    pixels.apply(canvas);
     Ok(())
 }
 
@@ -730,6 +728,7 @@ pub fn render_menu_to_buffer(
         canvas,
         width,
         height,
+        pixels,
         ..
     } = target;
     {
@@ -737,9 +736,7 @@ pub fn render_menu_to_buffer(
             PixmapMut::from_bytes(canvas, width, height).context("wrapping the shm buffer")?;
         render_menu(&mut pixmap, frame, scale, painter);
     }
-    for px in canvas.chunks_exact_mut(4) {
-        px.swap(0, 2);
-    }
+    pixels.apply(canvas);
     Ok(())
 }
 
@@ -876,6 +873,32 @@ pub struct Target<'a> {
     pub width: u32,
     pub height: u32,
     pub clip: &'a mut Clip,
+    pub pixels: Pixels,
+}
+
+/// How the surface's bytes are laid out.
+///
+/// tiny-skia writes premultiplied RGBA, which is `wl_shm`'s ABGR8888 byte for byte. Where
+/// the compositor takes that, a frame is finished the moment it is painted; where it takes
+/// only ARGB8888 - one of the two formats every compositor must offer - red and blue change
+/// places first, which is a pass over every pixel of the surface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pixels {
+    /// Exactly what the rasteriser wrote.
+    AsWritten,
+    /// Red and blue the other way round.
+    Swapped,
+}
+
+impl Pixels {
+    fn apply(self, canvas: &mut [u8]) {
+        if self == Pixels::AsWritten {
+            return;
+        }
+        for px in canvas.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+    }
 }
 
 /// Draw the bar background, then every group and module, into `pixmap`.
@@ -1338,6 +1361,53 @@ mod tests {
                 pixels: RunPixels::Coverage(vec![0xff; width * height]),
             });
             self.run.as_ref()
+        }
+    }
+
+    /// The two layouts are the same picture, told to the compositor two ways: ABGR8888 is
+    /// what the rasteriser already writes, ARGB8888 is that with red and blue changed
+    /// over. Getting this the wrong way round is a bar drawn in the wrong colours, which
+    /// is why it is pinned here rather than left to a screenshot.
+    #[test]
+    fn the_two_buffer_formats_differ_only_in_red_and_blue() {
+        let frame = island(1.0);
+        let (w, h) = (500u32, 20u32);
+        let cfg = Config::parse("[bar]\nheight = 20\n").expect("a bar with nothing on it");
+        let paint = |pixels: Pixels| {
+            let mut canvas = vec![0u8; w as usize * h as usize * 4];
+            let mut painter = Painter::new(Blocks {
+                scale: 1.0,
+                run: None,
+            });
+            render_to_buffer(
+                Target {
+                    canvas: &mut canvas,
+                    width: w,
+                    height: h,
+                    clip: &mut Clip::default(),
+                    pixels,
+                },
+                &cfg,
+                &frame,
+                1.0,
+                &mut painter,
+            )
+            .expect("painting");
+            canvas
+        };
+
+        let written = paint(Pixels::AsWritten);
+        let swapped = paint(Pixels::Swapped);
+        assert_ne!(
+            written, swapped,
+            "the island is not grey, so the two must differ"
+        );
+        for (a, b) in written.chunks_exact(4).zip(swapped.chunks_exact(4)) {
+            assert_eq!(
+                [a[2], a[1], a[0], a[3]],
+                [b[0], b[1], b[2], b[3]],
+                "the swap has to move red and blue and leave green and alpha alone"
+            );
         }
     }
 

@@ -244,6 +244,9 @@ pub struct App {
     seat_state: SeatState,
     output_state: OutputState,
     shm: Shm,
+    /// The buffer format the compositor takes, and what the renderer has to do to match it.
+    format: wl_shm::Format,
+    pixels: render::Pixels,
     compositor: CompositorState,
     layer_shell: LayerShell,
     /// The shell a menu's surface comes from.
@@ -368,6 +371,10 @@ impl App {
             seat_state: SeatState::new(globals, qh),
             output_state: OutputState::new(globals, qh),
             shm,
+            // Until the compositor has said what it takes, the format every compositor
+            // must offer. `choose_pixel_format` settles it once the formats have arrived.
+            format: wl_shm::Format::Argb8888,
+            pixels: render::Pixels::Swapped,
             compositor,
             layer_shell,
             wm_base,
@@ -597,6 +604,28 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Take the buffer format the compositor offers that costs the least to produce.
+    ///
+    /// tiny-skia writes premultiplied RGBA, which is ABGR8888 in `wl_shm`'s naming. A
+    /// compositor that takes it is a whole pass over every pixel of every frame saved;
+    /// ARGB8888, which every compositor must offer, needs red and blue changing places
+    /// first. Called once the formats have arrived, which is after the first round with
+    /// the compositor rather than at bind time.
+    pub fn choose_pixel_format(&mut self) {
+        if self.shm.formats().contains(&wl_shm::Format::Abgr8888) {
+            self.format = wl_shm::Format::Abgr8888;
+            self.pixels = render::Pixels::AsWritten;
+        }
+        log::info!(
+            "drawing into {:?} buffers{}",
+            self.format,
+            match self.pixels {
+                render::Pixels::AsWritten => "",
+                render::Pixels::Swapped => ", swapping red and blue on the way out",
+            }
+        );
     }
 
     /// Where to send what a click on a tray item asks for.
@@ -895,6 +924,8 @@ impl App {
             menus,
             painter,
             config,
+            format,
+            pixels,
             ..
         } = self;
         let menu = &mut menus[index];
@@ -913,7 +944,7 @@ impl App {
         let ph = (menu.height * scale as u32) as i32;
         let (buffer, canvas) = menu
             .pool
-            .create_buffer(pw, ph, pw * 4, wl_shm::Format::Argb8888)
+            .create_buffer(pw, ph, pw * 4, *format)
             .context("creating a buffer for a menu")?;
 
         render::render_menu_to_buffer(
@@ -922,6 +953,7 @@ impl App {
                 width: pw as u32,
                 height: ph as u32,
                 clip: &mut render::Clip::default(),
+                pixels: *pixels,
             },
             &menu.frame,
             scale as f32,
@@ -1219,6 +1251,8 @@ impl App {
             painter,
             config,
             qh,
+            format,
+            pixels,
             ..
         } = self;
         let bar = &mut bars[i];
@@ -1237,7 +1271,7 @@ impl App {
         let stride = pw * 4;
         let (buffer, canvas) = bar
             .pool
-            .create_buffer(pw, ph, stride, wl_shm::Format::Argb8888)
+            .create_buffer(pw, ph, stride, *format)
             .context("creating an shm buffer")?;
 
         render::render_to_buffer(
@@ -1246,6 +1280,7 @@ impl App {
                 width: pw as u32,
                 height: ph as u32,
                 clip: &mut bar.clip,
+                pixels: *pixels,
             },
             config,
             &frame,

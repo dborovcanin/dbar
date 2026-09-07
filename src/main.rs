@@ -368,6 +368,9 @@ fn main() -> Result<()> {
             .context("asking the compositor what screens there are")?;
     }
     app.warn_if_nowhere();
+    // The compositor lists its buffer formats when wl_shm is bound, so this is the first
+    // point at which the cheapest one can be chosen.
+    app.choose_pixel_format();
 
     WaylandSource::new(conn, event_queue)
         .insert(handle)
