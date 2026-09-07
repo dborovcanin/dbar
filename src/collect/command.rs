@@ -36,7 +36,7 @@
 
 use std::io::BufReader;
 use std::os::unix::process::CommandExt as _;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -279,8 +279,13 @@ fn run_to_end(program: &str, args: &[String], timeout: Duration) -> Result<Strin
         .with_context(|| format!("spawning {program}"))?;
     let mut stdout = child.stdout.take().context("stdout was piped")?;
 
-    let ended = read_until(&mut stdout, Instant::now() + timeout)
-        .with_context(|| format!("reading from {program}"))?;
+    // One deadline for the whole run, not one for the reading. A command that closes its
+    // output and then carries on - `exec 1>&-` and a sleep, or a child of its own holding
+    // the descriptor - reaches the end of its output at once and would otherwise be waited
+    // on with no limit at all, which is the thing the timeout exists to prevent.
+    let deadline = Instant::now() + timeout;
+    let ended =
+        read_until(&mut stdout, deadline).with_context(|| format!("reading from {program}"))?;
     // Why the read stopped is what matters, and only the read knows it: the clock cannot
     // be asked afterwards, because `poll` may return a hair before the deadline it was
     // given, and that looks exactly like a command that finished.
@@ -294,7 +299,10 @@ fn run_to_end(program: &str, args: &[String], timeout: Duration) -> Result<Strin
             _ => anyhow::bail!("{program} had not answered after {timeout:?} and was stopped"),
         }
     };
-    let status = child.wait().context("waiting for the command")?;
+    let Some(status) = wait_until(&mut child, deadline).context("waiting for the command")? else {
+        reap(&mut child);
+        anyhow::bail!("{program} had said everything but had not exited after {timeout:?}");
+    };
     if !status.success() {
         anyhow::bail!("{program} exited with {status}");
     }
@@ -439,6 +447,25 @@ fn configured(program: &str, args: &[String]) -> Command {
 }
 
 /// Stop waiting on a command that has closed its output.
+/// Wait for a command to exit, giving up at `deadline`.
+///
+/// `Child::wait` has no deadline of its own, so the wait is done in short steps: a command
+/// that has closed its output has usually already exited, and the step is small enough
+/// that the ordinary case costs one poll and long enough that a stuck one is not spun on.
+fn wait_until(child: &mut Child, deadline: Instant) -> std::io::Result<Option<ExitStatus>> {
+    const STEP: Duration = Duration::from_millis(5);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        std::thread::sleep(STEP.min(left));
+    }
+}
+
 fn reap(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
@@ -571,6 +598,26 @@ mod tests {
         );
         let message = format!("{e:#}");
         assert!(message.contains("had not answered"), "{message}");
+    }
+
+    /// Closing standard output is not the same as exiting, and used to be treated as if
+    /// it were: the read ended at once and the wait that followed had no deadline of its
+    /// own, so a command that closed its output and then hung held the thread anyway.
+    #[test]
+    fn a_command_that_closes_its_output_and_stays_is_stopped() {
+        let started = std::time::Instant::now();
+        let result = super::run_to_end(
+            "sh",
+            &["-c".to_string(), "exec 1>&-; sleep 30".to_string()],
+            std::time::Duration::from_millis(200),
+        );
+        let e = result.expect_err("a command that will not exit is a failure");
+        let waited = started.elapsed();
+        assert!(
+            waited < std::time::Duration::from_secs(5),
+            "waited {waited:?}, so the deadline did not cover the exit"
+        );
+        assert!(format!("{e:#}").contains("had not exited"), "{e:#}");
     }
 
     /// The deadline must not cut short a command that answers in time, however slowly it
