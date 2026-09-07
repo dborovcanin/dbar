@@ -94,6 +94,12 @@ struct OpenMenu {
     frame: MenuFrame,
     /// Which row the pointer is on.
     hover: Option<usize>,
+    /// The submenu asked for while the pointer sits on a row, until it arrives.
+    ///
+    /// An application answers when it answers, and the pointer has usually moved on by
+    /// then. Without this, a slow reply would open a menu under a row nobody is pointing
+    /// at any more.
+    awaiting: Option<u64>,
     width: u32,
     height: u32,
     scale: i32,
@@ -305,13 +311,15 @@ pub struct App {
     /// A stack rather than one surface, because a menu that opens another has to keep the
     /// first on screen: the second is anchored to a row of it.
     menus: Vec<OpenMenu>,
+    /// What the next menu asked for is called, so an answer can be matched to its ask.
+    menu_request: u64,
     /// The item whose menu is being opened, while its rows are still being read.
     ///
     /// The screen is remembered as the output itself rather than a position in `bars`: a
     /// monitor unplugged between the ask and the answer moves every bar after it along,
     /// and an index kept across that would open the menu on the wrong screen or index
     /// past the end.
-    opening: Option<(wl_output::WlOutput, String, f32, f32)>,
+    opening: Option<(wl_output::WlOutput, String, f32, f32, u64)>,
     /// Set when the status provider itself has failed; shown in place of the groups.
     fault: Option<String>,
     /// Item names from the last "nothing matched" warning, so it is not repeated per redraw.
@@ -389,6 +397,7 @@ impl App {
             tray: crate::tray::TrayState::default(),
             tray_commands: None,
             sway_commands: None,
+            menu_request: 0,
             menus: Vec::new(),
             opening: None,
             fault: None,
@@ -607,7 +616,12 @@ impl App {
                 self.tray = *state;
                 self.invalidate();
             }
-            crate::tray::Event::Menu { key, parent, rows } => self.open_menu(&key, parent, rows),
+            crate::tray::Event::Menu {
+                key,
+                parent,
+                request,
+                rows,
+            } => self.open_menu(&key, parent, request, rows),
             crate::tray::Event::Stopped(reason) => {
                 // The rest of the bar is unaffected; only the tray goes quiet.
                 log::warn!("the tray has stopped: {reason}");
@@ -623,9 +637,15 @@ impl App {
             return;
         };
         let output = self.bars[bar].output.clone();
+        let request = self.menu_request.wrapping_add(1);
+        self.menu_request = request;
         self.menus.clear();
-        self.opening = Some((output, key.clone(), x, width));
-        commands.send(crate::tray::Command::Menu { key, parent: 0 });
+        self.opening = Some((output, key.clone(), x, width, request));
+        commands.send(crate::tray::Command::Menu {
+            key,
+            parent: 0,
+            request,
+        });
     }
 
     /// Pass a click on a tray icon to the application it belongs to.
@@ -647,35 +667,53 @@ impl App {
     }
 
     /// Put a menu on screen, under the icon it belongs to or beside the row that opened it.
-    fn open_menu(&mut self, key: &str, parent: i32, rows: Vec<crate::tray::menu::Row>) {
-        if rows.is_empty() {
-            log::debug!("{key} has an empty menu, so there is nothing to open");
-            self.opening = None;
-            return;
-        }
+    fn open_menu(
+        &mut self,
+        key: &str,
+        parent: i32,
+        request: u64,
+        rows: Vec<crate::tray::menu::Row>,
+    ) {
         // Where it hangs from: the module for an item's own menu, the row for a submenu.
+        //
+        // Both are matched on the ask this answers rather than on the item alone. An
+        // application answers when it feels like it, so a second click can come first:
+        // without the request, a slow answer for one item would take the place of a
+        // newer click on another, and the menu the pointer is actually waiting for would
+        // never open.
         let anchor = match parent {
-            0 => match self.opening.take() {
-                Some((output, opening_key, x, width)) if opening_key == key => {
-                    // The screen may have gone while the rows were being read, in which
-                    // case there is nothing left to hang the menu from.
-                    match self.bars.iter().position(|b| b.output == output) {
-                        Some(bar) => Anchor2::Bar { bar, x, width },
-                        None => return,
-                    }
+            0 => {
+                let asked = self
+                    .opening
+                    .take_if(|(_, opening_key, _, _, id)| *id == request && opening_key == key);
+                let Some((output, _, x, width, _)) = asked else {
+                    return;
+                };
+                // The screen may have gone while the rows were being read, in which case
+                // there is nothing left to hang the menu from.
+                match self.bars.iter().position(|b| b.output == output) {
+                    Some(bar) => Anchor2::Bar { bar, x, width },
+                    None => return,
                 }
-                // The click that asked for this is long gone, or was for something else.
-                _ => return,
-            },
-            row => match self
-                .menus
-                .iter()
-                .position(|m| m.key == key && m.rows.iter().any(|r| r.id == row && r.submenu))
-            {
-                Some(level) => Anchor2::Row { level, id: row },
+            }
+            row => match self.menus.iter().position(|m| {
+                m.awaiting == Some(request)
+                    && m.key == key
+                    && m.rows.iter().any(|r| r.id == row && r.submenu)
+            }) {
+                Some(level) => {
+                    self.menus[level].awaiting = None;
+                    Anchor2::Row { level, id: row }
+                }
+                // The pointer has moved on, or this is an answer nobody is waiting for.
                 None => return,
             },
         };
+
+        if rows.is_empty() {
+            log::debug!("{key} has an empty menu, so there is nothing to open");
+            return;
+        }
 
         // A submenu replaces anything already open below the level it came from.
         if let Anchor2::Row { level, .. } = anchor {
@@ -805,6 +843,7 @@ impl App {
             pool,
             frame,
             hover: None,
+            awaiting: None,
             width,
             height,
             scale: scale.max(1),
@@ -917,10 +956,19 @@ impl App {
             .map(|row| row.id);
         let key = menu.key.clone();
         self.menus.truncate(index + 1);
+        // Whatever the last row asked for is no longer wanted: the pointer has moved.
+        self.menus[index].awaiting = None;
         if let Some(id) = opening
             && let Some(commands) = &self.tray_commands
         {
-            commands.send(crate::tray::Command::Menu { key, parent: id });
+            let request = self.menu_request.wrapping_add(1);
+            self.menu_request = request;
+            self.menus[index].awaiting = Some(request);
+            commands.send(crate::tray::Command::Menu {
+                key,
+                parent: id,
+                request,
+            });
         }
         self.draw_menus();
     }

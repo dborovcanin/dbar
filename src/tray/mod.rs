@@ -110,10 +110,11 @@ pub struct TrayState {
 pub enum Event {
     State(Box<TrayState>),
     /// One level of an item's menu, ready to be drawn. `parent` is the row it hangs from,
-    /// or zero for the menu itself.
+    /// or zero for the menu itself, and `request` is the ask this answers.
     Menu {
         key: String,
         parent: i32,
+        request: u64,
         rows: Vec<menu::Row>,
     },
     Stopped(String),
@@ -137,9 +138,14 @@ pub enum Command {
         delta: i32,
     },
     /// Read an item's menu, or one level of it, and send it back to be drawn.
+    ///
+    /// Reading one means asking the application, which takes as long as the application
+    /// takes; `request` is quoted back in the answer so a click can tell the menu it
+    /// asked for from one it has already given up on.
     Menu {
         key: String,
         parent: i32,
+        request: u64,
     },
     /// Tell the application one of its menu rows was chosen.
     Chose {
@@ -818,9 +824,14 @@ fn act(
                 };
                 match rows {
                     Some(rows) => {
+                        let request = match command {
+                            Command::Menu { request, .. } => *request,
+                            _ => 0,
+                        };
                         let _ = sender.send(Event::Menu {
                             key: key.clone(),
                             parent: *parent,
+                            request,
                             rows,
                         });
                     }
