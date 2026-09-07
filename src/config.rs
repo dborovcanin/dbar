@@ -95,7 +95,38 @@ pub enum Source {
     /// The binding mode the compositor is in.
     SwayMode,
     /// One entry per application in the system tray, expanded at layout time.
-    Tray,
+    Tray(TrayView),
+}
+
+/// Which tray items a module shows, and in what order.
+///
+/// An application decides when its icon matters, and the protocol has a word for one that
+/// does not: `Passive`. Some applications sit there permanently passive, which is theirs
+/// to decide and the bar's to ignore if the config says so.
+///
+/// Order is the other half. Items arrive as their applications start, so a bar that has
+/// been up for a day is in start-up order and a bar restarted at lunch is in another one.
+/// Naming the ones that matter pins those; everything else keeps arriving after them.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrayView {
+    pub show_passive: bool,
+    /// Item ids, first to last. An id the tray does not have costs nothing.
+    pub order: Vec<String>,
+}
+
+impl TrayView {
+    /// Whether this item is one the config asked to see.
+    pub fn shows(&self, status: crate::tray::Status) -> bool {
+        self.show_passive || status != crate::tray::Status::Passive
+    }
+
+    /// Where an item sits: the position the config gave its id, or after everything named.
+    pub fn rank(&self, id: &str) -> usize {
+        self.order
+            .iter()
+            .position(|named| named == id)
+            .unwrap_or(usize::MAX)
+    }
 }
 
 impl Source {
@@ -108,7 +139,7 @@ impl Source {
             Source::SwayWorkspaces(_) => crate::sway::WORKSPACE_FIELDS,
             Source::SwayLanguage(_) => crate::sway::LANGUAGE_FIELDS,
             Source::SwayMode => crate::sway::MODE_FIELDS,
-            Source::Tray => crate::tray::FIELDS,
+            Source::Tray(_) => crate::tray::FIELDS,
         }
     }
 
@@ -126,7 +157,7 @@ impl Source {
             Source::SwayMode => " $mode ",
             // A tray item is its icon; the application's name beside every one of them
             // would be a row of words where a row of pictures was asked for.
-            Source::Tray => "",
+            Source::Tray(_) => "",
         }
     }
 }
@@ -527,6 +558,13 @@ struct RawModule {
     /// How much of the session a compositor module is about: `output`, which is the screen
     /// this bar is on, or `session`. Defaults to the screen.
     scope: Option<Scope>,
+    /// Whether a `tray` module draws the items whose applications say they are passive.
+    /// Defaults to showing them, which is what the bar always did.
+    show_passive: Option<bool>,
+    /// The ids a `tray` module puts first, in the order it puts them. Everything else
+    /// follows, in the order the applications registered.
+    #[serde(default)]
+    order: Vec<String>,
     /// A command module's argv. Executed directly: dbar never inserts a shell.
     #[serde(default)]
     command: Vec<String>,
@@ -1405,7 +1443,7 @@ impl Config {
     /// connection, and above all not the watcher name, which an application registers with
     /// and then waits to be drawn by.
     pub fn needs_tray(&self) -> bool {
-        self.modules().any(|m| m.source == Source::Tray)
+        self.modules().any(|m| matches!(m.source, Source::Tray(_)))
     }
 
     /// Whether anything on the bar shows the keyboard layout.
@@ -1647,7 +1685,10 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         "sway:workspaces" => Source::SwayWorkspaces(raw.and_then(|m| m.scope).unwrap_or_default()),
         "sway:language" => Source::SwayLanguage(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
         "sway:mode" => Source::SwayMode,
-        "tray" => Source::Tray,
+        "tray" => Source::Tray(TrayView {
+            show_passive: raw.and_then(|m| m.show_passive).unwrap_or(true),
+            order: raw.map(|m| m.order.clone()).unwrap_or_default(),
+        }),
         "command" => {
             let mut argv = raw.map(|m| m.command.clone()).unwrap_or_default();
             if argv.is_empty() {
@@ -1771,6 +1812,12 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
             raw.is_some_and(|m| !m.layouts.is_empty()),
             "sway:language",
         ),
+        (
+            "show_passive",
+            raw.is_some_and(|m| m.show_passive.is_some()),
+            "tray",
+        ),
+        ("order", raw.is_some_and(|m| !m.order.is_empty()), "tray"),
     ];
     for (key, given, belongs_to) in misplaced {
         if given && name != belongs_to {

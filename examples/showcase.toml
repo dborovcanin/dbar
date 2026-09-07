@@ -376,6 +376,10 @@ overlap = 1
 #   scope      how much of the session a sway:workspaces or
 #              sway:window module is about: "output", the
 #              screen its bar is on, or "session"  default: "output"
+#   show_passive  whether a tray module draws the items whose
+#              applications say they are passive     default: true
+#   order      the tray ids to put first, in order; everything
+#              else follows in the order it registered
 #
 # and on a [module.*.states.*]:
 #
@@ -566,6 +570,14 @@ style = "warning"
 [module.tray]
 source = "tray"
 padding = 6
+# An application decides when its icon matters, and the protocol has a word for
+# one that does not: passive. Some sit there permanently passive, which is theirs
+# to decide and this bar's to ignore.
+# show_passive = false
+# Items arrive as their applications start, so the order is start-up order and it
+# is different tomorrow. Naming the ones that matter pins them to the front;
+# everything else follows in the order it registered.
+# order = ["nm-applet", "blueman"]
 
 # An application asking to be noticed is the one piece of state a tray item has.
 # The icon itself is left alone - recolouring artwork dbar did not draw would be

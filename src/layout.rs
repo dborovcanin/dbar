@@ -825,8 +825,22 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
             }
             // One application, one rectangle - the same expansion a workspace list gets,
             // and for the same reason: each needs its own icon, state and click target.
-            Source::Tray => {
-                for item in &inputs.tray.items {
+            Source::Tray(view) => {
+                // Registration order unless the config named one, and filtered to what it
+                // asked to see. A handful of items either way: an application registers an
+                // icon, not a thousand of them.
+                let mut items: Vec<&crate::tray::Item> = inputs
+                    .tray
+                    .items
+                    .iter()
+                    .filter(|item| view.shows(item.status))
+                    .collect();
+                if !view.order.is_empty() {
+                    // Stable, so everything the config did not name keeps the order it
+                    // arrived in rather than shuffling when an application restarts.
+                    items.sort_by_key(|item| view.rank(&item.id));
+                }
+                for item in items {
                     let mut fields = Fields::default();
                     fields.set("title", Value::Text(item.title.clone()));
                     fields.set("id", Value::Text(item.id.clone()));
@@ -1822,6 +1836,58 @@ padding = 0
         item.icon = None;
         let tray = crate::tray::TrayState { items: vec![item] };
         assert!(render_with(&cfg, &tray).groups.is_empty());
+    }
+
+    /// Items arrive as their applications start, so a bar that has been up since morning
+    /// is in one order and the same bar restarted at lunch is in another. Naming the ones
+    /// that matter pins them; the rest keep arriving after them.
+    #[test]
+    fn a_tray_can_be_told_what_to_show_and_in_what_order() {
+        let config = |body: &str| {
+            format!(
+                r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["tray"]
+
+[module.tray]
+source = "tray"
+format = "$id"
+padding = 0
+{body}
+"##
+            )
+        };
+        let mut quiet = tray_item("k3", "Quiet");
+        quiet.status = crate::tray::Status::Passive;
+        let tray = crate::tray::TrayState {
+            items: vec![tray_item("k1", "Volume"), tray_item("k2", "Network"), quiet],
+        };
+        let drawn = |body: &str| {
+            let cfg = Config::parse(&config(body)).expect("test config parses");
+            render_with(&cfg, &tray)
+                .groups
+                .first()
+                .map(|g| g.modules.iter().map(|m| m.text.clone()).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+
+        // As they arrived, passive ones included, which is what a bar without either key
+        // has always drawn.
+        assert_eq!(drawn(""), ["volume", "network", "quiet"]);
+        assert_eq!(drawn("show_passive = false"), ["volume", "network"]);
+        // Named first, in the order named; everything else after, in arrival order.
+        assert_eq!(
+            drawn("order = [\"network\"]"),
+            ["network", "volume", "quiet"]
+        );
+        // An id nothing in the tray has costs nothing.
+        assert_eq!(
+            drawn("order = [\"nothing\", \"quiet\"]"),
+            ["quiet", "volume", "network"]
+        );
     }
 
     fn tray_item(key: &str, title: &str) -> crate::tray::Item {
