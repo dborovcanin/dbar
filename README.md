@@ -125,6 +125,14 @@ a built-in default if there is none. `make install` takes `PREFIX=` if
   own, and the wheel scrolls between them — three cities from one fetch, in one
   module, with one format
 - `signal = N`: read a source again on SIGRTMIN+N
+- `$now.time(tz:'Asia/Tokyo')`: a clock about somewhere else, checked against the
+  machine's own tz database when the config is read, and two of them in one
+  format is two zones side by side off one reading
+- `$app_id` and `$class` beside `$title` on a window module, so a rule can give
+  one program its own colour without matching a title that changes with the tab
+- `show_passive = false` and `order = [...]` on a tray module: leave out the
+  icons whose applications say they do not matter, and pin the ones that do to
+  the front
 - `left` / `center` / `right` positions holding groups of modules
 - rounded group and module backgrounds
 - click forwarding back to the provider (left, middle, right, scroll)
@@ -141,6 +149,10 @@ a built-in default if there is none. `make install` takes `PREFIX=` if
 - a format grammar for what each module says: typed fields, number and text
   formatting, `{groups}` that disappear when a field has nothing to report, and
   `$a|$b|'fallback'` chains
+
+`dbar --check-config` reads a config, says what is wrong with it and exits, with
+no compositor needed; `dbar --fields` prints what every source publishes, and
+`dbar --fields cpu` just the one.
 
 Not yet implemented: Bluetooth. See [dbar-native.md](dbar-native.md)
 for where this is going.

@@ -517,6 +517,23 @@ who want an external provider point `[i3bar] args` at their own file.
 
 Each phase ends with the bar working. No phase leaves a broken tree.
 
+**Where this stands.** P0 through P4 are done, and so is most of what follows.
+What is left of each:
+
+- **P5 — Backend seam.** `Frame` is positioned geometry and colour, and icons and
+  separators are described without reference to the rasteriser. `render.rs` still
+  reads `Config` for the bar background and radii, which is the last thing between
+  the renderer and being replaceable.
+- **P6 — Event-driven sources.** Audio through PipeWire and the player through
+  MPRIS both run on worker threads feeding a `calloop` channel, as does the tray.
+  The battery is read from sysfs on the kernel's uevent rather than through
+  UPower, and the network from `/proc` and netlink rather than NetworkManager -
+  fewer dependencies for the same answers. Bluetooth is the one that is missing.
+- **P7 — Tooling and docs.** `--check-config` is in, and `--fields` prints what
+  every source publishes. `docs/configuration.md`, `docs/formatting.md` and
+  `docs/sources.md` are not written; `examples/showcase.toml` documents the whole
+  surface instead, and is parsed by the test suite so it cannot drift.
+
 ### P0 — Decouple
 
 - `Block` → `I3BarBlock`, moved into `src/status/i3bar.rs`.
@@ -573,7 +590,9 @@ worker thread feeding a calloop channel.
 ### P7 — Tooling and docs
 
 - `dbar --check-config` — validates, resolves and reports unknown fields, unknown
-  format placeholders, unreachable state rules.
+  format placeholders, unreachable state rules. *(Done: it reads the config the way
+  a run would, without a compositor, and reports the first thing wrong with it.
+  `--fields` lists what each source publishes.)*
 - `docs/configuration.md`, `docs/formatting.md`, `docs/sources.md`.
 
 ---
@@ -597,7 +616,8 @@ worker thread feeding a calloop channel.
 - Running an unmodified i3status-rust config file.
 - Depending on i3status-rust internals, or copying its collector implementations.
 - CSS, or an embedded interpreter. Running a user's own command as a source is in scope
-  (`source = "command:..."`); growing a language of dbar's own is not.
+  (`source = "command"` with a `command = [...]` argv); growing a language of dbar's own
+  is not.
 - Async runtime.
 - A widget tree. The renderer draws text, icons, rects and separators; that is
   the whole vocabulary.
