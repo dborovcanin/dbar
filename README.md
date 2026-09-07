@@ -128,6 +128,9 @@ a built-in default if there is none. `make install` takes `PREFIX=` if
 - `left` / `center` / `right` positions holding groups of modules
 - rounded group and module backgrounds
 - click forwarding back to the provider (left, middle, right, scroll)
+- a bar per screen, appearing and going with the monitor; `outputs = ["DP-1"]`
+  names the screens it belongs on, and workspace modules show the workspaces of
+  the screen they are drawn on unless `scope = "session"` says otherwise
 - integer HiDPI buffer scaling
 - separators as real vector geometry: `line`, `slant`, `chevron`, `notch`,
   `round` and `curve`, each mirrorable, with Powerline colour modes and an
@@ -139,7 +142,7 @@ a built-in default if there is none. `make install` takes `PREFIX=` if
   formatting, `{groups}` that disappear when a field has nothing to report, and
   `$a|$b|'fallback'` chains
 
-Not yet implemented: Bluetooth, multi-monitor. See [dbar-native.md](dbar-native.md)
+Not yet implemented: Bluetooth. See [dbar-native.md](dbar-native.md)
 for where this is going.
 
 ## Build
