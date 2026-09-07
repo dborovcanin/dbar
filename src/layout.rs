@@ -330,6 +330,13 @@ pub enum Damage {
     Rects(Vec<(f32, f32, f32, f32)>),
 }
 
+/// The surface a frame is drawn on: its logical size, and the scale it is painted at.
+///
+/// Damage is worked out in logical pixels, so two frames can lay out identically on
+/// surfaces that do not share a single pixel - a monitor whose scale changed being the
+/// plain case.
+pub type Surface = (u32, u32, i32);
+
 /// Whether two of the same thing would be drawn identically.
 ///
 /// Deliberately not `PartialEq`: a placed module carries what a click on it does and what
@@ -418,6 +425,27 @@ impl Frame {
     /// a translucent one is composited as a single object. Naming a module's own rectangle
     /// would cut through all three. An island is a few hundred pixels of a bar that is
     /// thousands wide, so there is nothing to gain by being cleverer.
+    /// What has to be repainted, given the surface the frame on screen was presented on.
+    ///
+    /// A frame that lays out the same way on a different surface is not the same picture:
+    /// the buffer is a new size, or the same size at another scale, and nothing in it has
+    /// been painted yet. Comparing the two layouts would find nothing to say and leave the
+    /// compositor with a buffer it was never told to look at.
+    ///
+    /// `presented` is `None` until a frame has actually reached the screen, which covers
+    /// the first draw and every draw after one that failed.
+    pub fn damage_since(
+        &self,
+        on_screen: &Frame,
+        presented: Option<Surface>,
+        now: Surface,
+    ) -> Damage {
+        match presented == Some(now) {
+            true => self.damage(on_screen),
+            false => Damage::All,
+        }
+    }
+
     pub fn damage(&self, on_screen: &Frame) -> Damage {
         if self.groups.len() != on_screen.groups.len() {
             return Damage::All;
@@ -1904,6 +1932,37 @@ padding = 0
         let one = frame_of(BASIC, &items);
         let two = frame_of(BASIC, &items);
         assert_eq!(two.damage(&one), Damage::Rects(Vec::new()));
+    }
+
+    /// The same layout on a different surface is not the same picture: the buffer is a new
+    /// size, or the same size at another scale, and none of it has been painted. Comparing
+    /// the layouts alone would attach a buffer and tell the compositor to look at none of
+    /// it, which is a bar that stops updating until something moves.
+    #[test]
+    fn a_frame_on_a_surface_that_changed_damages_everything() {
+        let items = [item("cpu", "1%"), item("mem", "2%")];
+        let one = frame_of(BASIC, &items);
+        let two = frame_of(BASIC, &items);
+        let surface = (1920, 30, 1);
+
+        assert_eq!(
+            two.damage_since(&one, Some(surface), surface),
+            Damage::Rects(Vec::new()),
+            "the same frame on the same surface is still nothing to repaint"
+        );
+        // A monitor whose scale changed lays the bar out identically and shares not one
+        // pixel with what was there.
+        assert_eq!(
+            two.damage_since(&one, Some(surface), (1920, 30, 2)),
+            Damage::All
+        );
+        assert_eq!(
+            two.damage_since(&one, Some(surface), (3840, 30, 1)),
+            Damage::All
+        );
+        // Nothing has reached the screen yet: the first frame, and every frame after one
+        // that failed on its way there.
+        assert_eq!(two.damage_since(&one, None, surface), Damage::All);
     }
 
     /// A module whose wording changed damages the island holding it, and nothing else.

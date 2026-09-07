@@ -1195,19 +1195,22 @@ impl App {
 
     fn draw(&mut self, i: usize) -> Result<()> {
         let frame = self.lay_out(i);
-        // Worked out against the frame that is still on screen, before it is replaced.
-        let damage = frame.damage(&self.bars[i].frame);
-        self.bars[i].frame = frame;
+        let bar = &self.bars[i];
+        let surface_now = (bar.width, bar.height, bar.scale);
+        // Worked out against the frame that is on screen, which is the one still held: a
+        // frame that was laid out but never reached the screen is not what the pixels show.
+        let damage = frame.damage_since(&bar.frame, bar.presented, surface_now);
 
         // A source that came due and read the same value as last time invalidates the bar
         // all the same, and most of what a bar shows changes rarely. Nothing having moved
         // means the pixels on screen are already right, so the buffer is not painted, the
         // surface is not committed, and the compositor is not woken: what a redraw costs
         // then is one layout.
-        let bar = &self.bars[i];
-        if bar.presented == Some((bar.width, bar.height, bar.scale))
-            && matches!(&damage, layout::Damage::Rects(rects) if rects.is_empty())
-        {
+        //
+        // The frame is still taken up: it paints the same, but a click on it may do
+        // something else now, and that is answered from whatever frame is held.
+        if matches!(&damage, layout::Damage::Rects(rects) if rects.is_empty()) {
+            self.bars[i].frame = frame;
             return Ok(());
         }
 
@@ -1225,12 +1228,8 @@ impl App {
             bar.width,
             bar.height,
             bar.scale,
-            bar.frame.groups.len(),
-            bar.frame
-                .groups
-                .iter()
-                .map(|g| g.modules.len())
-                .sum::<usize>()
+            frame.groups.len(),
+            frame.groups.iter().map(|g| g.modules.len()).sum::<usize>()
         );
         let scale = bar.scale.max(1);
         let pw = (bar.width * scale as u32) as i32;
@@ -1249,7 +1248,7 @@ impl App {
                 clip: &mut bar.clip,
             },
             config,
-            &bar.frame,
+            &frame,
             scale as f32,
             painter,
         )?;
@@ -1281,7 +1280,12 @@ impl App {
         bar.frame_pending = true;
         buffer.attach_to(surface).context("attaching the buffer")?;
         bar.layer.commit();
-        bar.presented = Some((bar.width, bar.height, bar.scale));
+        // Only now: everything above can fail, and a frame that was laid out but never
+        // painted is not what the screen is showing. Taking it up early would leave the
+        // next draw comparing against a picture nobody ever saw, finding nothing to
+        // repaint, and calling the bar clean over stale pixels.
+        bar.frame = frame;
+        bar.presented = Some(surface_now);
         Ok(())
     }
 
