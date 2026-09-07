@@ -1672,6 +1672,45 @@ fn parse_duration(written: &str) -> Result<Duration> {
     Ok(Duration::from_secs_f64(seconds))
 }
 
+/// Every source a module can be built on, under the name a config writes for it.
+///
+/// The parameterised ones stand here as what they are without their parameter - a disk
+/// with no path, a command with no argv - because this exists to answer what a source
+/// publishes, and that does not depend on where it is pointed.
+pub fn sources() -> Vec<(&'static str, Source)> {
+    use crate::collect::{CommandSpec, Which, command::Run};
+
+    vec![
+        ("cpu", Source::Native(Which::Cpu)),
+        ("memory", Source::Native(Which::Memory)),
+        ("battery", Source::Native(Which::Battery)),
+        ("backlight", Source::Native(Which::Backlight)),
+        ("load", Source::Native(Which::Load)),
+        ("temperature", Source::Native(Which::Temperature(None))),
+        ("disk", Source::Native(Which::Disk("/".to_string()))),
+        ("network", Source::Native(Which::Network(None))),
+        ("time", Source::Native(Which::Time)),
+        ("audio", Source::Native(Which::Audio)),
+        ("media", Source::Native(Which::Media)),
+        (
+            "command",
+            Source::Native(Which::Command(CommandSpec {
+                argv: Vec::new(),
+                run: Run::Stream,
+                pages: false,
+                fields: crate::collect::command::PLAIN,
+                timeout: DEFAULT_COMMAND_TIMEOUT,
+            })),
+        ),
+        ("provider", Source::Provider),
+        ("sway:window", Source::SwayWindow(Scope::Output)),
+        ("sway:workspaces", Source::SwayWorkspaces(Scope::Output)),
+        ("sway:language", Source::SwayLanguage(Default::default())),
+        ("sway:mode", Source::SwayMode),
+        ("tray", Source::Tray(TrayView::default())),
+    ]
+}
+
 /// Work out where a module's content comes from.
 ///
 /// Two sources are pointed at something - a filesystem, an interface - and take that from
@@ -2365,6 +2404,25 @@ modules = ["m"]
             ..a.clone()
         };
         assert_ne!(a, patient);
+    }
+
+    /// The list `--fields` answers from and the list a module may name have to be the
+    /// same list. They are written out separately - one is a table, the other a match -
+    /// so this is what stops them drifting apart, which would be help that lies.
+    #[test]
+    fn every_source_a_module_can_name_is_one_the_help_lists() {
+        for (name, listed) in sources() {
+            let body = match name {
+                "command" => format!("source = \"{name}\"\ncommand = [\"true\"]"),
+                _ => format!("source = \"{name}\""),
+            };
+            let cfg = Config::parse(&one_module(&body))
+                .unwrap_or_else(|e| panic!("a module reading from {name:?}: {e:#}"));
+            let resolved = &cfg.modules().next().expect("one module").source;
+            let listed: Vec<&str> = listed.fields().iter().map(|f| f.name).collect();
+            let real: Vec<&str> = resolved.fields().iter().map(|f| f.name).collect();
+            assert_eq!(listed, real, "{name} publishes something else than it says");
+        }
     }
 
     /// Two modules on one command share a process, so they have to share a schema too:

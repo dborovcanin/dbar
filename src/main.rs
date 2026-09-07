@@ -35,6 +35,8 @@ USAGE:
 
 OPTIONS:
     -c, --config <PATH>     Use this config file instead of the default
+        --check-config      Read the config, report what is wrong with it, and exit
+        --fields [SOURCE]   List what each source publishes, or just this one
         --print-config      Write the built-in default config to stdout
     -h, --help              Show this message
     -V, --version           Show the version
@@ -60,8 +62,92 @@ struct Args {
     config: Option<PathBuf>,
 }
 
+/// Read the config the way a run would, and say whether it is any good.
+///
+/// Nothing else starts: no Wayland connection, no collectors, no child processes. A
+/// config is checked where it is written - in an editor, over ssh, in whatever runs
+/// before the session does - and none of those have a compositor to hand.
+fn check_config(path: Option<&PathBuf>) -> Result<()> {
+    let config = Config::load(path.map(PathBuf::as_path))?;
+    let modules = config.modules().count();
+    let groups: usize = config.positions.iter().map(Vec::len).sum();
+    println!("the config is good: {modules} modules in {groups} groups");
+    Ok(())
+}
+
+/// Print what each source publishes, which is what a format may name.
+///
+/// The fields are already declared - it is how a format is checked when the config is
+/// read - so this is the same list the error message would have quoted, asked for before
+/// making the mistake rather than after.
+fn print_fields(only: Option<&str>) -> Result<()> {
+    use std::io::Write as _;
+
+    let sources = config::sources();
+    if let Some(name) = only
+        && !sources.iter().any(|(source, _)| *source == name)
+    {
+        anyhow::bail!(
+            "no source is called {name:?}; there is {}",
+            sources
+                .iter()
+                .map(|(source, _)| *source)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    // Written rather than printed, because this is a list somebody pipes into `less` or
+    // `head`, and a closed pipe is that person having read enough rather than an error.
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let written = (|| -> std::io::Result<()> {
+        for (name, source) in sources {
+            if only.is_some_and(|wanted| wanted != name) {
+                continue;
+            }
+            writeln!(out, "{name}")?;
+            let fields = source.fields();
+            if fields.is_empty() {
+                writeln!(out, "    (nothing; what it publishes the config declares)")?;
+            }
+            for field in fields {
+                writeln!(out, "    ${:<16}{}", field.name, describe_kind(field.kind))?;
+            }
+            writeln!(out)?;
+        }
+        Ok(())
+    })();
+    match written {
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        other => other.context("writing the field list"),
+    }
+}
+
+/// What a field holds, in the words a config would use for it.
+fn describe_kind(kind: crate::status::Kind) -> &'static str {
+    use crate::status::{Kind, Unit};
+    match kind {
+        Kind::Num(Unit::None) => "number",
+        Kind::Num(Unit::Percent) => "percent",
+        Kind::Num(Unit::Bytes) => "bytes",
+        Kind::Num(Unit::BytesPerSec) => "bytes per second",
+        Kind::Num(Unit::Hertz) => "hertz",
+        Kind::Num(Unit::Celsius) => "degrees celsius",
+        Kind::Num(Unit::Watts) => "watts",
+        Kind::Num(Unit::Volts) => "volts",
+        Kind::Num(Unit::Seconds) => "seconds",
+        Kind::Text => "text",
+        Kind::Time => "a moment, for .time()",
+        Kind::Dur => "a length of time, for .dur()",
+        Kind::Flag => "true or false",
+    }
+}
+
 fn parse_args() -> Result<Option<Args>> {
     let mut config = None;
+    let mut check = false;
+    let mut fields: Option<Option<String>> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -81,8 +167,30 @@ fn parse_args() -> Result<Option<Args>> {
                 let path = args.next().context("-c/--config needs a path")?;
                 config = Some(PathBuf::from(path));
             }
+            "--check-config" => check = true,
+            // The source is optional, and a following argument that starts with a dash is
+            // the next option rather than a source nobody would name that way.
+            "--fields" => {
+                let named = args.next();
+                match named {
+                    Some(name) if !name.starts_with('-') => fields = Some(Some(name)),
+                    Some(other) => {
+                        anyhow::bail!("--fields takes a source, not {other:?}\n\n{USAGE}")
+                    }
+                    None => fields = Some(None),
+                }
+            }
             other => anyhow::bail!("unknown argument {other:?}\n\n{USAGE}"),
         }
+    }
+
+    if let Some(only) = fields {
+        print_fields(only.as_deref())?;
+        return Ok(None);
+    }
+    if check {
+        check_config(config.as_ref())?;
+        return Ok(None);
     }
     Ok(Some(Args { config }))
 }

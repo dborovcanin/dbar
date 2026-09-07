@@ -648,7 +648,8 @@ max_width = 320
 # The first four are read by dbar itself and take an `interval`, which needs a
 # unit. The rest arrive from elsewhere, and how often is not dbar's business.
 # Every source has a default format, so a module wanting the ordinary thing
-# says only where it comes from.
+# says only where it comes from. `dbar --fields` prints this list from the code
+# itself, and `dbar --fields cpu` prints one source's.
 #
 # A field can be formatted: $percent.n(w:4) pads to a fixed width so the module
 # stops resizing as the number changes, and $title.str(max:40) caps its length
