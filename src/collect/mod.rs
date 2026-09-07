@@ -53,11 +53,18 @@ pub struct CommandSpec {
     /// Declared in the config, because dbar cannot know what somebody else's program
     /// prints. Leaked once while the config is read, which happens exactly once.
     pub fields: &'static [FieldSpec],
+    /// How long one run is given before it is stopped. Part of what makes two specs
+    /// different, like the schedule: two modules that run the same program but disagree
+    /// about how long to wait for it are asking for two different things.
+    pub timeout: Duration,
 }
 
 impl PartialEq for CommandSpec {
     fn eq(&self, other: &Self) -> bool {
-        self.argv == other.argv && self.run == other.run && self.pages == other.pages
+        self.argv == other.argv
+            && self.run == other.run
+            && self.pages == other.pages
+            && self.timeout == other.timeout
     }
 }
 
@@ -68,6 +75,7 @@ impl std::hash::Hash for CommandSpec {
         self.argv.hash(state);
         self.run.hash(state);
         self.pages.hash(state);
+        self.timeout.hash(state);
     }
 }
 

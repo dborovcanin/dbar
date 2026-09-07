@@ -38,7 +38,7 @@ use std::io::{BufRead as _, BufReader};
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 
@@ -110,6 +110,7 @@ pub fn spawn(
     sender: calloop::channel::Sender<Message>,
     askable: bool,
     pages: bool,
+    timeout: Duration,
 ) -> Result<Option<Trigger>> {
     let (program, rest) = argv
         .split_first()
@@ -136,7 +137,7 @@ pub fn spawn(
                     if sender.send(Message::Started).is_err() {
                         return;
                     }
-                    let readings = answer(&name, &rest, declared, pages);
+                    let readings = answer(&name, &rest, declared, pages, timeout);
                     if sender.send(Message::Readings(readings)).is_err() {
                         return;
                     }
@@ -155,7 +156,7 @@ pub fn spawn(
                     if sender.send(Message::Started).is_err() {
                         return;
                     }
-                    let readings = answer(&name, &rest, declared, pages);
+                    let readings = answer(&name, &rest, declared, pages, timeout);
                     if sender.send(Message::Readings(readings)).is_err() {
                         return;
                     }
@@ -225,8 +226,9 @@ fn answer(
     rest: &[String],
     declared: &'static [FieldSpec],
     pages: bool,
+    timeout: Duration,
 ) -> Vec<Reading> {
-    match run_to_end(name, rest) {
+    match run_to_end(name, rest, timeout) {
         Ok(output) => {
             let readings: Vec<Reading> = match pages {
                 true => said(&output)
@@ -266,19 +268,86 @@ fn last_word(output: &str) -> Option<&str> {
 }
 
 /// Run the command until it exits, and hand back what it wrote to standard output.
-fn run_to_end(program: &str, args: &[String]) -> Result<String> {
+///
+/// A command that never finishes is stopped rather than waited on. Without that, a script
+/// blocked on a network that will not answer holds this thread forever and leaves the bar
+/// showing a spinner - and a spinner is an animation, which is the one thing the bar is
+/// not supposed to be doing while nothing is happening.
+fn run_to_end(program: &str, args: &[String], timeout: Duration) -> Result<String> {
     let mut child = configured(program, args)
         .spawn()
         .with_context(|| format!("spawning {program}"))?;
     let mut stdout = child.stdout.take().context("stdout was piped")?;
-    let mut output = String::new();
-    let read = std::io::Read::read_to_string(&mut stdout, &mut output);
+
+    let ended = read_until(&mut stdout, Instant::now() + timeout)
+        .with_context(|| format!("reading from {program}"))?;
+    // Why the read stopped is what matters, and only the read knows it: the clock cannot
+    // be asked afterwards, because `poll` may return a hair before the deadline it was
+    // given, and that looks exactly like a command that finished.
+    let Ended::Output(output) = ended else {
+        // `reap` kills and waits, so nothing is left behind.
+        reap(&mut child);
+        anyhow::bail!("{program} had not answered after {timeout:?} and was stopped");
+    };
     let status = child.wait().context("waiting for the command")?;
-    read.with_context(|| format!("reading from {program}"))?;
     if !status.success() {
         anyhow::bail!("{program} exited with {status}");
     }
     Ok(output)
+}
+
+/// How reading a command's output finished.
+enum Ended {
+    /// The command closed its output, which is how a run that worked ends.
+    Output(String),
+    /// The deadline passed first. Whatever had been read by then is dropped: half an
+    /// answer is worse than none, because the half would be published as a whole one.
+    Overran,
+}
+
+/// Read everything a command writes, giving up at `deadline`.
+///
+/// The descriptor is waited on rather than read straight through, so a command that says
+/// nothing and never exits is noticed instead of blocking the thread it runs on. This is
+/// the same `poll` the media and tray threads use to wait on a bus without going to sleep
+/// on it forever.
+fn read_until(stdout: &mut std::process::ChildStdout, deadline: Instant) -> std::io::Result<Ended> {
+    use std::io::Read as _;
+    use std::os::fd::AsRawFd as _;
+
+    let fd = stdout.as_raw_fd();
+    let mut output = String::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(Ended::Overran);
+        }
+        let mut poll = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: one descriptor owned by the caller for the length of this call, and a
+        // count that matches.
+        let ready =
+            unsafe { libc::poll(&mut poll, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            return Ok(Ended::Overran);
+        }
+        let read = stdout.read(&mut buffer)?;
+        if read == 0 {
+            return Ok(Ended::Output(output));
+        }
+        output.push_str(&String::from_utf8_lossy(&buffer[..read]));
+    }
 }
 
 /// Run the command until it stops, sending a reading per line.
@@ -454,6 +523,58 @@ fn state_of(word: &str) -> Option<State> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A script that never finishes is stopped rather than waited on. Without this the
+    /// thread is held forever and the module sits in front of a spinner - and a spinner
+    /// that never stops is an animation running while nothing is happening, which is the
+    /// one thing this bar is not supposed to do.
+    #[test]
+    fn a_command_that_never_answers_is_stopped() {
+        let started = std::time::Instant::now();
+        let result = super::run_to_end(
+            "sh",
+            &["-c".to_string(), "sleep 30".to_string()],
+            std::time::Duration::from_millis(300),
+        );
+        let e = result.expect_err("a command that outlives its deadline is a failure");
+        let waited = started.elapsed();
+        assert!(
+            waited < std::time::Duration::from_secs(5),
+            "waited {waited:?}, so the deadline did not apply"
+        );
+        let message = format!("{e:#}");
+        assert!(message.contains("had not answered"), "{message}");
+    }
+
+    /// The deadline must not cut short a command that answers in time, however slowly it
+    /// gets around to it.
+    #[test]
+    fn a_command_that_answers_in_time_is_left_alone() {
+        let output = super::run_to_end(
+            "sh",
+            &["-c".to_string(), "sleep 0.1; echo 42".to_string()],
+            std::time::Duration::from_secs(10),
+        )
+        .expect("a command well inside its deadline");
+        assert_eq!(super::last_word(&output), Some("42"));
+    }
+
+    /// Output that arrives in pieces over time is still all of it: the read waits for the
+    /// command to finish rather than taking whatever the first read happened to catch.
+    #[test]
+    fn output_written_in_pieces_is_read_whole() {
+        let output = super::run_to_end(
+            "sh",
+            &[
+                "-c".to_string(),
+                "echo one; sleep 0.1; echo two; sleep 0.1; echo three".to_string(),
+            ],
+            std::time::Duration::from_secs(10),
+        )
+        .expect("a command that dawdles but finishes");
+        let lines: Vec<&str> = super::said(&output).collect();
+        assert_eq!(lines, ["one", "two", "three"]);
+    }
 
     #[test]
     fn a_scripts_answer_is_the_last_line_with_anything_on_it() {

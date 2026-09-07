@@ -367,6 +367,10 @@ overlap = 1
 #   command    argv of a command module, run directly
 #   fields     what that command publishes: number, percent
 #              or text, keyed by field name
+#   timeout    how long one run is given to answer before it is
+#              stopped: "10s". Only for a command with an
+#              `interval`, since a streaming one is meant to
+#              keep running                            default: 30s
 #   layouts    what a sway:language module calls each
 #              layout, keyed by xkb's name for it
 #   scope      how much of the session a sway:workspaces or

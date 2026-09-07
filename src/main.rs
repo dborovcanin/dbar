@@ -260,6 +260,7 @@ fn main() -> Result<()> {
             tx,
             askable.contains(which),
             spec.pages,
+            spec.timeout,
         ) {
             Ok(trigger) => trigger,
             Err(e) => {

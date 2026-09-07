@@ -236,6 +236,14 @@ struct RawBar {
     icon_theme: String,
 }
 
+/// How long a command gets to answer before it is stopped.
+///
+/// Long enough that a script fetching something over a slow network still gets there, and
+/// short enough that one which never will does not sit in front of a spinner forever - a
+/// module that is waiting animates, and animating is the one thing this bar is not
+/// supposed to do at rest.
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn default_icon_theme() -> String {
     "hicolor".to_string()
 }
@@ -443,6 +451,8 @@ struct RawModule {
     /// scrolls between. Without it the last line is the answer.
     #[serde(default)]
     pages: bool,
+    /// How long the command is given to answer before it is stopped: "10s", "1m".
+    timeout: Option<String>,
     /// What that command publishes, and what kind each is: `number`, `percent` or `text`.
     #[serde(default)]
     fields: BTreeMap<String, String>,
@@ -1578,11 +1588,26 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
                      whose lines are pages of one answer"
                 );
             }
+            // A command that streams is not waited on: it is expected to sit there, and
+            // a deadline on it would mean killing a working program for doing its job.
+            let timeout = match raw.and_then(|m| m.timeout.as_deref()) {
+                Some(written) => parse_duration(written)
+                    .with_context(|| format!("in module {module_name:?}, `timeout`"))?,
+                None => DEFAULT_COMMAND_TIMEOUT,
+            };
+            if raw.is_some_and(|m| m.timeout.is_some())
+                && run == crate::collect::command::Run::Stream
+            {
+                bail!(
+                    "module {module_name:?} sets `timeout`, but a streaming command is meant                      to keep running; a timeout only applies to a command that is run for an                      answer, which is what an `interval` asks for"
+                );
+            }
             Source::Native(Which::Command(crate::collect::CommandSpec {
                 argv,
                 run,
                 pages,
                 fields,
+                timeout,
             }))
         }
         "audio" => Source::Native(Which::Audio),
@@ -1634,6 +1659,11 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
             "command",
         ),
         ("pages", raw.is_some_and(|m| m.pages), "command"),
+        (
+            "timeout",
+            raw.is_some_and(|m| m.timeout.is_some()),
+            "command",
+        ),
         (
             "layouts",
             raw.is_some_and(|m| !m.layouts.is_empty()),
@@ -2169,6 +2199,7 @@ modules = ["m"]
             run: Run::Every(Duration::from_secs(1)),
             pages: false,
             fields: crate::collect::command::PLAIN,
+            timeout: DEFAULT_COMMAND_TIMEOUT,
         };
         let b = crate::collect::CommandSpec {
             run: Run::Every(Duration::from_secs(60)),
@@ -2177,6 +2208,14 @@ modules = ["m"]
         let same = a.clone();
         assert_ne!(a, b);
         assert_eq!(a, same);
+
+        // And so is the deadline: one module willing to wait a minute for a script and
+        // another that is not are asking for different things from the same program.
+        let patient = crate::collect::CommandSpec {
+            timeout: Duration::from_secs(60),
+            ..a.clone()
+        };
+        assert_ne!(a, patient);
     }
 
     /// The argv a command module ends up with, given what it wrote.
@@ -2225,6 +2264,51 @@ modules = ["m"]
     /// Paging is what a run's lines mean, so two modules that read them differently are
     /// two commands rather than one they would have to agree about.
     #[test]
+    fn a_command_is_given_a_deadline_whether_it_asks_for_one_or_not() {
+        let cfg = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"w\"]\ninterval = \"1s\"",
+        ))
+        .expect("a command module");
+        let spec = match &cfg.modules().next().unwrap().source {
+            Source::Native(Which::Command(spec)) => spec.clone(),
+            other => panic!("expected a command, got {other:?}"),
+        };
+        assert_eq!(spec.timeout, DEFAULT_COMMAND_TIMEOUT);
+
+        let cfg = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"w\"]\ninterval = \"1s\"\ntimeout = \"2s\"",
+        ))
+        .expect("a command module with a deadline");
+        let spec = match &cfg.modules().next().unwrap().source {
+            Source::Native(Which::Command(spec)) => spec.clone(),
+            other => panic!("expected a command, got {other:?}"),
+        };
+        assert_eq!(spec.timeout, Duration::from_secs(2));
+    }
+
+    /// A streaming command is meant to sit there, so a deadline on one would mean killing
+    /// a working program for doing its job.
+    #[test]
+    fn a_streaming_command_cannot_be_given_a_deadline() {
+        let e = Config::parse(&one_module(
+            "source = \"command\"\ncommand = [\"tail\"]\ntimeout = \"2s\"",
+        ))
+        .expect_err("a streaming command has nothing to time out");
+        let message = format!("{e:#}");
+        assert!(message.contains("timeout"), "{message}");
+        assert!(message.contains("interval"), "{message}");
+    }
+
+    #[test]
+    fn a_deadline_on_a_module_that_runs_nothing_is_rejected() {
+        let e = Config::parse(&one_module("source = \"cpu\"\ntimeout = \"2s\""))
+            .expect_err("only a command has a run to time out");
+        let message = format!("{e:#}");
+        assert!(message.contains("timeout"), "{message}");
+        assert!(message.contains("command"), "{message}");
+    }
+
+    #[test]
     fn paging_tells_one_command_from_another() {
         use crate::collect::command::Run;
         let plain = crate::collect::CommandSpec {
@@ -2232,6 +2316,7 @@ modules = ["m"]
             run: Run::Once,
             pages: false,
             fields: crate::collect::command::PLAIN,
+            timeout: DEFAULT_COMMAND_TIMEOUT,
         };
         let paged = crate::collect::CommandSpec {
             pages: true,

@@ -1885,6 +1885,7 @@ format = "$text"
             run: crate::collect::command::Run::Once,
             pages: true,
             fields: crate::collect::command::PLAIN,
+            timeout: std::time::Duration::from_secs(30),
         });
         let page = |showing: usize| {
             let native = Registry::fixture_pages(
@@ -1932,6 +1933,7 @@ icon = "clock"
             run: crate::collect::command::Run::Every(std::time::Duration::from_secs(1800)),
             pages: false,
             fields: crate::collect::command::PLAIN,
+            timeout: std::time::Duration::from_secs(30),
         });
         let mut fields = Fields::default();
         fields.set("text", Value::Text("18C".to_string()));
@@ -1985,6 +1987,7 @@ interval = "once"
             run: crate::collect::command::Run::Once,
             pages: false,
             fields: crate::collect::command::PLAIN,
+            timeout: std::time::Duration::from_secs(30),
         });
         let frame = |waiting: std::collections::HashSet<Which>| {
             frame_waiting(
