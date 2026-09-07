@@ -1355,7 +1355,7 @@ impl App {
         painter.text.set_scale(bar.scale.max(1) as f32);
         let (width, height) = (bar.width as f32, bar.height as f32);
         if let Some(message) = fault {
-            return layout::fault(message, width, height, &mut painter.text);
+            return layout::fault(config, message, width, height, &mut painter.text);
         }
         let inputs = Inputs {
             items,

@@ -1533,7 +1533,13 @@ pub fn compute(
 /// Provider failures bypass the group configuration entirely: a fault reported as an ordinary
 /// block would be dropped by any group that selects modules by name, which is exactly when the
 /// message matters most.
-pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> Frame {
+pub fn fault(
+    cfg: &Config,
+    message: &str,
+    width: f32,
+    height: f32,
+    text: &mut dyn Measure,
+) -> Frame {
     let padding = 10.0;
     let module_width = text.measure(message) + padding * 2.0;
     let x = (width - module_width).max(0.0);
@@ -1575,6 +1581,10 @@ pub fn fault(message: &str, width: f32, height: f32, text: &mut dyn Measure) -> 
             }],
             separators: Vec::new(),
         }],
+        // The bar keeps its own ground while it is saying what went wrong: a message that
+        // needs reading is not the moment to lose the surface it is read on.
+        background: cfg.bar.background,
+        radius: cfg.bar.radius,
         ..Frame::default()
     }
 }
@@ -2307,6 +2317,27 @@ padding = 0
             truncate("exactly twenty chars", 20.0, &mut measure),
             "exactly twenty chars"
         );
+    }
+
+    /// The bar keeps its ground while it is saying what went wrong. The renderer paints
+    /// what the frame carries and nothing else, so a fault frame that carried no ground
+    /// put its message straight onto the wallpaper.
+    #[test]
+    fn a_fault_keeps_the_bar_it_is_drawn_on() {
+        let cfg = Config::parse(
+            "[colors]\nink = \"#1e1e2e\"\n\n[bar]\nheight = 20\n\n\
+             [bar.background]\ncolor = \"$ink\"\nradius = 8\n",
+        )
+        .expect("a bar with a ground");
+        let frame = fault(&cfg, "the provider stopped", 200.0, 20.0, &mut Fixed);
+        assert_eq!(frame.background, cfg.bar.background);
+        assert_eq!(frame.radius, cfg.bar.radius);
+        assert_eq!(frame.groups[0].modules[0].text, "the provider stopped");
+
+        // A bar configured with no ground of its own still has none here.
+        let plain = Config::parse("[bar]\nheight = 20\n").expect("a bar with nothing on it");
+        let frame = fault(&plain, "the provider stopped", 200.0, 20.0, &mut Fixed);
+        assert_eq!(frame.background, Color::TRANSPARENT);
     }
 
     /// The first frame has nothing on screen to compare against, so all of it is new.
