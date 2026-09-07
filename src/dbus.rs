@@ -13,8 +13,18 @@
 use std::io::{Read as _, Write as _};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
+
+/// How long a call waits for its answer.
+///
+/// Every call here is to a program on the same machine, answering about something it
+/// already knows: an icon, a menu, a player's title. A peer that has not answered in this
+/// long is not going to. Waiting for ever instead would park the thread that made the
+/// call - the tray, which is also the thread applications register with, so one stuck
+/// application would take the whole tray down with it.
+const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// A value read off the bus.
 ///
@@ -236,12 +246,13 @@ impl Connection {
         arguments: &[Arg],
     ) -> Result<Vec<Value>> {
         let serial = self.send(destination, path, interface, member, arguments)?;
+        let deadline = Instant::now() + CALL_TIMEOUT;
         // Read past whatever is ahead of the answer, holding it aside rather than putting
         // it back: taking a message off the queue only to return it to the front of that
         // same queue is a loop with no end.
         let mut held = Vec::new();
         let answer = loop {
-            match self.read_message() {
+            match self.read_message_by(Some(deadline)) {
                 Ok(message) if message.reply_serial == Some(serial) => break message,
                 Ok(message) => held.push(message),
                 Err(e) => {
@@ -404,9 +415,17 @@ impl Connection {
 
     /// One message off the socket, waiting for it, and never from what was set aside.
     fn read_message(&mut self) -> Result<Message> {
+        self.read_message_by(None)
+    }
+
+    /// One message off the socket, giving up at `deadline` if there is one.
+    fn read_message_by(&mut self, deadline: Option<Instant>) -> Result<Message> {
         loop {
             if let Some(message) = self.take_message()? {
                 return Ok(message);
+            }
+            if let Some(deadline) = deadline {
+                self.wait_until(deadline)?;
             }
             let mut chunk = [0u8; 4096];
             let read = self
@@ -417,6 +436,40 @@ impl Connection {
                 bail!("the session bus closed the connection");
             }
             self.pending.extend_from_slice(&chunk[..read]);
+        }
+    }
+
+    /// Wait for the socket to have something to say, giving up at `deadline`.
+    ///
+    /// The same `poll` the collectors use to wait on a descriptor without going to sleep
+    /// on it for ever, so a peer that never answers costs one timeout rather than a
+    /// thread.
+    fn wait_until(&self, deadline: Instant) -> Result<()> {
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                bail!("the peer did not answer within {CALL_TIMEOUT:?}");
+            }
+            let mut poll = libc::pollfd {
+                fd: self.socket.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one descriptor owned by this connection for the length of the call,
+            // and a count that matches.
+            let ready =
+                unsafe { libc::poll(&mut poll, 1, left.as_millis().min(i32::MAX as u128) as i32) };
+            if ready < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error).context("waiting on the session bus");
+            }
+            if ready == 0 {
+                bail!("the peer did not answer within {CALL_TIMEOUT:?}");
+            }
+            return Ok(());
         }
     }
 

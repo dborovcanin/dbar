@@ -212,6 +212,12 @@ fn pipe() -> Result<(OwnedFd, OwnedFd)> {
 struct Tracked {
     /// The bus name it answers on, which is what a call to it is addressed to.
     service: String,
+    /// The unique name behind that one - `:1.42` - when the bus has said what it is.
+    ///
+    /// An application may register under a well-known name, but every signal it sends
+    /// arrives from its unique name, and a signal is how it says its icon changed.
+    /// Matching one against the other is how those announcements get lost.
+    owner: Option<String>,
     /// The object inside that name, which is not always the one the spec suggests.
     path: String,
     /// Where its menu lives, when it has one.
@@ -413,10 +419,14 @@ fn handle(bus: &mut Connection, tray: &mut Tray, message: &Message) -> bool {
     if message.is_signal(BUS, "NameOwnerChanged") {
         let name = message.body.first().and_then(Value::as_str);
         let new_owner = message.body.get(2).and_then(Value::as_str);
-        if let Some(name) = name
-            && new_owner == Some("")
-        {
-            return remove(tray, name);
+        if let Some(name) = name {
+            return match new_owner {
+                Some("") | None => remove(tray, name),
+                // The name changed hands: an application that restarted and claimed it
+                // back is a different peer, and its signals now come from a different
+                // unique name.
+                Some(owner) => took_over(bus, tray, name, owner),
+            };
         }
         return false;
     }
@@ -556,8 +566,10 @@ fn add(bus: &mut Connection, tray: &mut Tray, service: &str, path: &str) -> bool
         return false;
     }
     let key = format!("{service}{path}");
+    let owner = owner_of(bus, service);
     tray.items.push(Tracked {
         service: service.to_string(),
+        owner,
         path: path.to_string(),
         menu: None,
         item: Item {
@@ -577,18 +589,64 @@ fn add(bus: &mut Connection, tray: &mut Tray, service: &str, path: &str) -> bool
     true
 }
 
-fn remove(tray: &mut Tray, service: &str) -> bool {
+fn remove(tray: &mut Tray, name: &str) -> bool {
     let before = tray.items.len();
-    tray.items.retain(|t| t.service != service);
+    // Either name identifies the same application: a well-known name that went, or the
+    // unique one behind it.
+    tray.items
+        .retain(|t| t.service != name && t.owner.as_deref() != Some(name));
     before != tray.items.len()
 }
 
 /// Read an item again because it said something about itself changed.
-fn refresh(bus: &mut Connection, tray: &mut Tray, service: &str) -> bool {
-    let Some(at) = tray.items.iter().position(|t| t.service == service) else {
+///
+/// The sender of a signal is always a unique name, so that is what is matched first; an
+/// item registered under one is found either way.
+fn refresh(bus: &mut Connection, tray: &mut Tray, sender: &str) -> bool {
+    let Some(at) = tray
+        .items
+        .iter()
+        .position(|t| t.owner.as_deref() == Some(sender) || t.service == sender)
+    else {
         return false;
     };
     read_item(bus, tray, at)
+}
+
+/// Follow a well-known name to whoever owns it now, and read the item again.
+fn took_over(bus: &mut Connection, tray: &mut Tray, name: &str, owner: &str) -> bool {
+    let Some(at) = tray.items.iter().position(|t| t.service == name) else {
+        return false;
+    };
+    if tray.items[at].owner.as_deref() == Some(owner) {
+        return false;
+    }
+    tray.items[at].owner = Some(owner.to_string());
+    read_item(bus, tray, at)
+}
+
+/// The unique name that owns a bus name, so signals from it can be recognised.
+///
+/// A name that is already unique owns itself. An answer that does not come - the
+/// application went between registering and this call - leaves the item matched by its
+/// advertised name alone, which is what it was before.
+fn owner_of(bus: &mut Connection, service: &str) -> Option<String> {
+    if service.starts_with(':') {
+        return Some(service.to_string());
+    }
+    match bus.call(
+        BUS,
+        "/org/freedesktop/DBus",
+        BUS,
+        "GetNameOwner",
+        &[Arg::Str(service)],
+    ) {
+        Ok(values) => values.first().and_then(Value::as_str).map(str::to_string),
+        Err(e) => {
+            log::debug!("who owns {service}: {e:#}");
+            None
+        }
+    }
 }
 
 /// Read everything about one item, and say whether any of it is different.
@@ -861,6 +919,48 @@ mod tests {
                 "/org/ayatana/NotificationItem/nm_applet".to_string()
             )
         );
+    }
+
+    /// An application registers under whatever name it likes, but every signal it sends
+    /// comes from its unique name. Keeping both is what makes "my icon changed" land on
+    /// the item it is about, and what makes a crash take the right icon off the bar.
+    #[test]
+    fn an_item_is_recognised_by_the_name_it_registered_and_the_one_it_sends_from() {
+        let tracked = |service: &str, owner: Option<&str>| Tracked {
+            service: service.to_string(),
+            owner: owner.map(str::to_string),
+            path: ITEM_PATH.to_string(),
+            menu: None,
+            item: Item {
+                key: format!("{service}{ITEM_PATH}"),
+                is_menu: false,
+                has_menu: false,
+                id: String::new(),
+                title: String::new(),
+                status: Status::Active,
+                icon: None,
+            },
+            seen: None,
+        };
+        let tray = |items: Vec<Tracked>| Tray {
+            items,
+            hosting: false,
+            size: 16,
+            theme: String::new(),
+        };
+
+        // Gone from the bus under its unique name, registered under a well-known one.
+        let mut named = tray(vec![tracked("org.kde.example", Some(":1.42"))]);
+        assert!(remove(&mut named, ":1.42"), "the owner is the application");
+        assert!(named.items.is_empty());
+
+        // And the other way round, which is the name a watcher's list gives.
+        let mut unique = tray(vec![tracked(":1.42", Some(":1.42"))]);
+        assert!(
+            !remove(&mut unique, "org.kde.example"),
+            "a name it never had"
+        );
+        assert!(remove(&mut unique, ":1.42"));
     }
 
     #[test]
