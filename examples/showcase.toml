@@ -44,9 +44,9 @@ exclusive = true       # default: true; reserve the space so windows do not sit 
 # outputs = ["DP-1", "HDMI-A-1"]
 # Which icon theme a tray item's named icon is looked for in. An application
 # usually ships its own into `hicolor`, which is where dbar looks when the theme
-# named here does not have it. Only PNG is read: an icon a theme has only as SVG
-# is one dbar cannot draw, and it falls through to whatever else it can find.
-icon_theme = "hicolor"
+# named here does not have it. PNG and SVG are both read; a drawing is rendered
+# at the size it will be shown rather than at whatever size the file declares.
+icon_theme = "Papirus"
 
 # ---------------------------------------------------------------------------
 # External status provider

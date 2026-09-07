@@ -21,6 +21,10 @@ jiff = { version = "0.2.35", default-features = false, features = ["std", "tz-sy
 libc = "0.2.189"
 log = "0.4.34"
 pipewire = "0.10.1"
+# Icon themes ship their artwork as SVG, and a tray draws whatever an application
+# points at. Text, system fonts and embedded raster images are all turned off: no
+# icon in any theme installed here uses them.
+resvg = { version = "0.45", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 signal-hook = { version = "0.4.4", default-features = false, features = ["iterator"] }

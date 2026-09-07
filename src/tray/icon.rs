@@ -123,22 +123,65 @@ fn span(index: u32, target: u32, source: u32) -> (u32, u32) {
     (start, end.max(start + 1).min(source))
 }
 
-/// An icon found by name in the icon theme, scaled to `target`.
+/// An icon found by name in the icon theme, at the size it will be drawn.
 ///
 /// `extra` is the directory an item may name for itself, which is how an application that
 /// ships its own artwork points at it without installing a theme.
 pub fn from_name(name: &str, extra: Option<&str>, theme: &str, target: u32) -> Option<Raster> {
     let file = find(name, extra, theme, target)?;
     let bytes = std::fs::read(&file).ok()?;
-    // tiny-skia already decodes PNG for its own loading, so a tray icon costs no
-    // dependency at all - only the code that was already there becoming reachable.
-    let decoded = tiny_skia::Pixmap::decode_png(&bytes).ok()?;
+    match is_svg(&file) {
+        true => from_svg(&bytes, target),
+        false => from_png(&bytes, target),
+    }
+}
+
+fn is_svg(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("svg"))
+}
+
+/// A themed icon that is already pixels.
+fn from_png(bytes: &[u8], target: u32) -> Option<Raster> {
+    // tiny-skia already decodes PNG for its own loading, so this half costs no dependency
+    // at all - only the code that was already there becoming reachable.
+    let decoded = tiny_skia::Pixmap::decode_png(bytes).ok()?;
     let (width, height) = (decoded.width(), decoded.height());
     if width == 0 || height == 0 || width as i64 > LARGEST || height as i64 > LARGEST {
         return None;
     }
     // tiny-skia hands back premultiplied RGBA, which is what the renderer blends.
     Some(scale(decoded.data(), width, height, target))
+}
+
+/// A themed icon that is a drawing, rendered at the size it will be shown.
+///
+/// Drawn straight to the target rather than at whatever size the file happens to declare
+/// and resampled after: it is the one kind of artwork that has no size of its own, and
+/// asking for the size wanted is both sharper and cheaper than asking for another.
+fn from_svg(bytes: &[u8], target: u32) -> Option<Raster> {
+    let tree = resvg::usvg::Tree::from_data(bytes, &resvg::usvg::Options::default()).ok()?;
+    let size = tree.size();
+    if size.width() <= 0.0 || size.height() <= 0.0 {
+        return None;
+    }
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(target, target)?;
+    // Fitted whole and centred, so a drawing that is not square keeps its shape rather
+    // than being stretched into the box.
+    let scale = (target as f32 / size.width()).min(target as f32 / size.height());
+    let (width, height) = (size.width() * scale, size.height() * scale);
+    let transform = resvg::tiny_skia::Transform::from_translate(
+        (target as f32 - width) / 2.0,
+        (target as f32 - height) / 2.0,
+    )
+    .pre_scale(scale, scale);
+    resvg::render(&tree, transform, &mut pixmap.as_mut());
+    // Premultiplied RGBA either way, which is the one thing the renderer needs it to be.
+    Some(Raster {
+        width: target,
+        height: target,
+        pixels: pixmap.data().to_vec(),
+    })
 }
 
 /// The file holding `name`: the configured theme's if it has one, then the fallback theme
@@ -155,7 +198,12 @@ fn find(name: &str, extra: Option<&str>, theme: &str, target: u32) -> Option<Pat
     for root in roots(extra) {
         let from_item = extra.is_some_and(|dir| root == Path::new(dir));
         for path in search(&root, name) {
-            let size = size_of(&path, &root);
+            // A drawing has no size of its own: it is rendered at exactly the size wanted,
+            // so nothing beats it on fit and nothing is gained by looking at its directory.
+            let size = match is_svg(&path) {
+                true => target,
+                false => size_of(&path, &root),
+            };
             candidates.push((rank(&path, theme, from_item), size, path));
         }
     }
@@ -224,9 +272,9 @@ fn roots(extra: Option<&str>) -> Vec<PathBuf> {
 /// icon in one and stops the walk from wandering into anything larger.
 const DEPTH: usize = 4;
 
-/// Every `<name>.png` under `root`, however the theme arranges its directories.
+/// Every file for `name` under `root`, however the theme arranges its directories.
 fn search(root: &Path, name: &str) -> Vec<PathBuf> {
-    let wanted = format!("{name}.png");
+    let wanted = [format!("{name}.png"), format!("{name}.svg")];
     let mut found = Vec::new();
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
@@ -242,7 +290,11 @@ fn search(root: &Path, name: &str) -> Vec<PathBuf> {
                 if depth < DEPTH {
                     stack.push((path, depth + 1));
                 }
-            } else if path.file_name().is_some_and(|f| f == wanted.as_str()) {
+            } else if path
+                .file_name()
+                .and_then(|f| f.to_str())
+                .is_some_and(|f| wanted.iter().any(|w| w == f))
+            {
                 found.push(path);
             }
         }
@@ -361,6 +413,70 @@ mod tests {
             Value::Bytes(vec![0; 16]),
         ])]);
         assert_eq!(from_pixmaps(&value, 16), None);
+    }
+
+    /// A drawing is rendered at the size it will be shown rather than at whatever size it
+    /// declares, so the box is always filled exactly.
+    #[test]
+    fn a_drawing_is_rendered_at_the_size_it_will_be_drawn() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48">
+            <rect x="0" y="0" width="48" height="48" fill="#ff0000"/></svg>"##;
+        let raster = from_svg(svg, 20).expect("a rectangle renders");
+        assert_eq!((raster.width, raster.height), (20, 20));
+        assert_eq!(raster.pixels.len(), 20 * 20 * 4);
+        // Opaque red, and premultiplied red is still red.
+        assert_eq!(&raster.pixels[..4], &[255, 0, 0, 255]);
+    }
+
+    /// Every icon theme installed here paints with `currentColor` taken from a CSS class,
+    /// and an icon whose colour does not resolve is drawn as nothing at all - which no
+    /// test that only checks the size would notice.
+    #[test]
+    fn a_colour_named_by_a_stylesheet_is_resolved() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+            <defs><style type="text/css">.Text { color:#00ff00; }</style></defs>
+            <path style="fill:currentColor" class="Text" d="M 0 0 H 10 V 10 H 0 Z"/></svg>"##;
+        let raster = from_svg(svg, 4).expect("a styled path renders");
+        let opaque = raster.pixels.chunks_exact(4).filter(|p| p[3] > 0).count();
+        assert!(opaque > 0, "the path was drawn as nothing");
+        assert_eq!(
+            &raster.pixels[..4],
+            &[0, 255, 0, 255],
+            "the class's colour did not reach the fill"
+        );
+    }
+
+    /// A drawing that is not square keeps its shape rather than being stretched to fill a
+    /// square box.
+    #[test]
+    fn a_drawing_that_is_not_square_is_fitted_rather_than_stretched() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20">
+            <rect x="0" y="0" width="40" height="20" fill="#0000ff"/></svg>"##;
+        let raster = from_svg(svg, 20).expect("a wide rectangle renders");
+        let row = |y: usize| {
+            raster.pixels[y * 20 * 4..(y + 1) * 20 * 4]
+                .chunks_exact(4)
+                .filter(|p| p[3] > 0)
+                .count()
+        };
+        // Twice as wide as tall, so it fills the width and half the height, centred.
+        assert_eq!(row(10), 20, "the middle row should be full");
+        assert_eq!(row(0), 0, "the top row should be empty");
+        assert_eq!(row(19), 0, "the bottom row should be empty");
+    }
+
+    #[test]
+    fn nonsense_is_refused_rather_than_drawn() {
+        assert!(from_svg(b"not an svg at all", 16).is_none());
+        assert!(from_png(b"not a png at all", 16).is_none());
+    }
+
+    #[test]
+    fn a_drawing_is_recognised_by_its_name() {
+        assert!(is_svg(Path::new("/usr/share/icons/x/22x22/panel/a.svg")));
+        assert!(is_svg(Path::new("/a/B.SVG")));
+        assert!(!is_svg(Path::new("/usr/share/icons/x/22x22/apps/a.png")));
+        assert!(!is_svg(Path::new("/a/no-extension")));
     }
 
     #[test]

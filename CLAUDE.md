@@ -35,7 +35,9 @@ in either as a bug.
   Current deps and why: `tiny-skia` (rasteriser), `cosmic-text` (shaping and fallback),
   `smithay-client-toolkit`/`wayland-client`/`calloop` (Wayland and the event loop), `serde`
   and `toml` (config), `serde_json` (the i3bar protocol), `jiff` (local time, which needs a
-  tz database), `signal-hook` and `libc` (realtime signals), `anyhow`, `log`, `env_logger`.
+  tz database), `resvg` (icon themes ship their artwork as SVG, and a tray draws whatever an
+  application points at; text and raster images are turned off), `signal-hook` and `libc`
+  (realtime signals), `anyhow`, `log`, `env_logger`.
 
 Known and accepted: a redraw repaints the whole surface and re-shapes all text, so an update
 costs the same whichever module changed. Damage tracking and a measurement cache are the fix
