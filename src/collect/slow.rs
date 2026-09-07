@@ -55,8 +55,13 @@ pub fn spawn(
         .name(format!("read:{name}"))
         .spawn(move || {
             let mut collector = which.collector();
+            let mut failures = 0u32;
             loop {
                 let read = collector.read();
+                failures = match read.is_ok() {
+                    true => 0,
+                    false => failures.saturating_add(1),
+                };
                 if sender
                     .send(Taken {
                         which: which.clone(),
@@ -66,16 +71,27 @@ pub fn spawn(
                 {
                     return;
                 }
+                // The same backoff a source read on the shared timer gets: a mount that
+                // has gone or an interface that was unplugged is asked less and less often
+                // rather than at its full rate forever. Reading here rather than there
+                // changed which thread does the work, and nothing else.
+                let wait = super::backoff(interval, failures);
+                if failures > 0 {
+                    log::debug!(
+                        "{} has failed {failures} times; reading it again in {wait:?}",
+                        which.describe()
+                    );
+                }
                 // Asked for early or left to its interval, the same as a command: three
                 // impatient clicks want the reading, not three of it.
                 match asked.as_ref() {
-                    Some(asked) => match asked.recv_timeout(interval) {
+                    Some(asked) => match asked.recv_timeout(wait) {
                         Ok(()) => while asked.try_recv().is_ok() {},
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         // Nothing is left to ask, so the interval is all there is.
-                        Err(mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(interval),
+                        Err(mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(wait),
                     },
-                    None => std::thread::sleep(interval),
+                    None => std::thread::sleep(wait),
                 }
             }
         });

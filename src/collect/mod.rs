@@ -553,13 +553,22 @@ impl Entry {
         if self.watched && self.failures == 0 {
             return None;
         }
-        // Back off while a collector is failing, so a missing sensor does not spin.
-        let wait = self.interval * 2u32.pow(self.failures.min(MAX_BACKOFF));
+        let wait = backoff(self.interval, self.failures);
         if !self.which.aligned() || self.failures > 0 {
             return Some(now + wait);
         }
         Some(now + align(wait))
     }
+}
+
+/// How long to wait before reading a source again, given how often reading it has failed.
+///
+/// Doubling while a source is failing is what keeps a missing sensor or an interface that
+/// was unplugged from being asked at its full rate forever. It is the same policy wherever
+/// the reading is taken - on the shared timer, or on the thread of a source that can block
+/// - because a source that has gone is a source that has gone either way.
+pub fn backoff(interval: Duration, failures: u32) -> Duration {
+    interval * 2u32.pow(failures.min(MAX_BACKOFF))
 }
 
 /// The wait that lands on the next whole multiple of `interval` on the wall clock.
@@ -696,6 +705,22 @@ mod tests {
             !registry.arrived(&disk, Err(anyhow::anyhow!("still gone"))),
             "staying stale is not"
         );
+    }
+
+    /// A source that has gone is asked less and less often, wherever it is read: the
+    /// shared timer and the thread of a source that can block ask the same question of
+    /// the same function, so moving a read off the main thread cannot quietly turn a
+    /// missing mount into a request every two seconds forever.
+    #[test]
+    fn a_failing_source_is_asked_less_and_less_often() {
+        let interval = Duration::from_secs(2);
+        assert_eq!(backoff(interval, 0), interval);
+        assert_eq!(backoff(interval, 1), interval * 2);
+        assert_eq!(backoff(interval, 5), interval * 32);
+        // And stops doubling, rather than growing until it overflows.
+        let capped = backoff(interval, MAX_BACKOFF);
+        assert_eq!(backoff(interval, MAX_BACKOFF + 100), capped);
+        assert_eq!(capped, interval * 2u32.pow(MAX_BACKOFF));
     }
 
     /// A source that reads the same value again has nothing for the bar to redraw, and
