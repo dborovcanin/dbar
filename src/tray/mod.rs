@@ -414,8 +414,10 @@ fn handle(bus: &mut Connection, tray: &mut Tray, message: &Message) -> bool {
 
     if message.is_signal(WATCHER_NAME, "StatusNotifierItemUnregistered") {
         if let Some(name) = message.body.first().and_then(Value::as_str) {
-            let (service, _) = split_registration(name, name);
-            return remove(tray, &service);
+            // One process may offer several items, so the object is what is being taken
+            // away rather than everything the application registered.
+            let (service, path) = split_registration(name, name);
+            return unregister(tray, &service, &path);
         }
         return false;
     }
@@ -441,7 +443,7 @@ fn handle(bus: &mut Connection, tray: &mut Tray, message: &Message) -> bool {
         && message.interface.as_deref() == Some(ITEM_INTERFACE)
         && let Some(sender) = message.sender.as_deref()
     {
-        return refresh(bus, tray, sender);
+        return refresh(bus, tray, sender, message.path.as_deref());
     }
 
     false
@@ -598,37 +600,63 @@ fn add(bus: &mut Connection, tray: &mut Tray, service: &str, path: &str) -> bool
 fn remove(tray: &mut Tray, name: &str) -> bool {
     let before = tray.items.len();
     // Either name identifies the same application: a well-known name that went, or the
-    // unique one behind it.
+    // unique one behind it. A peer that left takes every object it offered with it.
     tray.items
         .retain(|t| t.service != name && t.owner.as_deref() != Some(name));
+    before != tray.items.len()
+}
+
+/// Take away one registration, which is one object rather than one application.
+///
+/// An application may offer several items - a mail client with an account each - and a
+/// watcher unregisters them one at a time.
+fn unregister(tray: &mut Tray, service: &str, path: &str) -> bool {
+    let before = tray.items.len();
+    tray.items
+        .retain(|t| !(t.service == service && t.path == path));
     before != tray.items.len()
 }
 
 /// Read an item again because it said something about itself changed.
 ///
 /// The sender of a signal is always a unique name, so that is what is matched first; an
-/// item registered under one is found either way.
-fn refresh(bus: &mut Connection, tray: &mut Tray, sender: &str) -> bool {
-    let Some(at) = tray
-        .items
-        .iter()
-        .position(|t| t.owner.as_deref() == Some(sender) || t.service == sender)
-    else {
-        return false;
-    };
-    read_item(bus, tray, at)
+/// item registered under one is found either way. The object path says which of a
+/// process's items it was about; a signal that carries none is taken as being about all
+/// of them, since there is nothing better to go on.
+fn refresh(bus: &mut Connection, tray: &mut Tray, sender: &str, path: Option<&str>) -> bool {
+    let mut changed = false;
+    for at in items_of(&tray.items, sender, path) {
+        changed |= read_item(bus, tray, at);
+    }
+    changed
 }
 
-/// Follow a well-known name to whoever owns it now, and read the item again.
+/// Which tracked items a signal is about.
+fn items_of(items: &[Tracked], sender: &str, path: Option<&str>) -> Vec<usize> {
+    items
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.owner.as_deref() == Some(sender) || t.service == sender)
+        .filter(|(_, t)| path.is_none_or(|path| t.path == path))
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// Follow a well-known name to whoever owns it now, and read its items again.
 fn took_over(bus: &mut Connection, tray: &mut Tray, name: &str, owner: &str) -> bool {
-    let Some(at) = tray.items.iter().position(|t| t.service == name) else {
-        return false;
-    };
-    if tray.items[at].owner.as_deref() == Some(owner) {
-        return false;
+    let at: Vec<usize> = tray
+        .items
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.service == name && t.owner.as_deref() != Some(owner))
+        .map(|(at, _)| at)
+        .collect();
+    let mut changed = false;
+    for at in at {
+        tray.items[at].owner = Some(owner.to_string());
+        changed |= read_item(bus, tray, at);
     }
-    tray.items[at].owner = Some(owner.to_string());
-    read_item(bus, tray, at)
+    changed
 }
 
 /// The unique name that owns a bus name, so signals from it can be recognised.
@@ -932,18 +960,15 @@ mod tests {
         );
     }
 
-    /// An application registers under whatever name it likes, but every signal it sends
-    /// comes from its unique name. Keeping both is what makes "my icon changed" land on
-    /// the item it is about, and what makes a crash take the right icon off the bar.
-    #[test]
-    fn an_item_is_recognised_by_the_name_it_registered_and_the_one_it_sends_from() {
-        let tracked = |service: &str, owner: Option<&str>| Tracked {
+    /// One tracked item, as it stands once its properties have been read.
+    fn tracked(service: &str, owner: Option<&str>, path: &str) -> Tracked {
+        Tracked {
             service: service.to_string(),
             owner: owner.map(str::to_string),
-            path: ITEM_PATH.to_string(),
+            path: path.to_string(),
             menu: None,
             item: Item {
-                key: format!("{service}{ITEM_PATH}"),
+                key: format!("{service}{path}"),
                 is_menu: false,
                 has_menu: false,
                 id: String::new(),
@@ -952,7 +977,14 @@ mod tests {
                 icon: None,
             },
             seen: None,
-        };
+        }
+    }
+
+    /// An application registers under whatever name it likes, but every signal it sends
+    /// comes from its unique name. Keeping both is what makes "my icon changed" land on
+    /// the item it is about, and what makes a crash take the right icon off the bar.
+    #[test]
+    fn an_item_is_recognised_by_the_name_it_registered_and_the_one_it_sends_from() {
         let tray = |items: Vec<Tracked>| Tray {
             items,
             hosting: false,
@@ -961,17 +993,49 @@ mod tests {
         };
 
         // Gone from the bus under its unique name, registered under a well-known one.
-        let mut named = tray(vec![tracked("org.kde.example", Some(":1.42"))]);
+        let mut named = tray(vec![tracked("org.kde.example", Some(":1.42"), ITEM_PATH)]);
         assert!(remove(&mut named, ":1.42"), "the owner is the application");
         assert!(named.items.is_empty());
 
         // And the other way round, which is the name a watcher's list gives.
-        let mut unique = tray(vec![tracked(":1.42", Some(":1.42"))]);
+        let mut unique = tray(vec![tracked(":1.42", Some(":1.42"), ITEM_PATH)]);
         assert!(
             !remove(&mut unique, "org.kde.example"),
             "a name it never had"
         );
         assert!(remove(&mut unique, ":1.42"));
+    }
+
+    /// One process may offer several items - a mail client with an account each - so a
+    /// signal from it is about the object it names, and unregistering one leaves the rest
+    /// on the bar.
+    #[test]
+    fn one_application_can_hold_several_items_apart() {
+        let mut tray = Tray {
+            items: vec![
+                tracked("org.kde.mail", Some(":1.9"), "/items/one"),
+                tracked("org.kde.mail", Some(":1.9"), "/items/two"),
+                tracked("org.kde.other", Some(":1.10"), ITEM_PATH),
+            ],
+            hosting: false,
+            size: 16,
+            theme: String::new(),
+        };
+
+        // A signal naming an object is about that object alone.
+        assert_eq!(items_of(&tray.items, ":1.9", Some("/items/two")), [1]);
+        // One that names none is all this peer has to offer, since there is nothing
+        // better to go on.
+        assert_eq!(items_of(&tray.items, ":1.9", None), [0, 1]);
+        assert!(items_of(&tray.items, ":1.11", None).is_empty());
+
+        // Unregistering takes the object away, not the application.
+        assert!(unregister(&mut tray, "org.kde.mail", "/items/one"));
+        assert_eq!(tray.items.len(), 2);
+        assert!(!unregister(&mut tray, "org.kde.mail", "/items/one"));
+        // Losing the bus name takes everything behind it.
+        assert!(remove(&mut tray, ":1.9"));
+        assert_eq!(tray.items.len(), 1);
     }
 
     #[test]
