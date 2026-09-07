@@ -132,17 +132,22 @@ icon_gap = 3
 
 # A pill inside a panel: its own rounded background, sitting on the group's. The
 # workspaces use it to say which ones exist on another output.
+#
+# The radius is the island's less the padding it sits in - 16 - 3 - so the two
+# curves run parallel. Asking for the island's own 16 here does not draw 16: a
+# radius is capped at half the box, and the pill is 6px shorter than the island,
+# so it would come out a stadium against the island's rounded rectangle.
 [style.pill]
 background = "$raised"
 foreground = "$text"
 padding = 10
-radius = 16
+radius = 13
 
 [style.focused]
 background = "$accent"
 foreground = "$background"
 padding = 10
-radius = 16
+radius = 13
 
 [style.dim]
 foreground = "$subtext"
@@ -350,7 +355,7 @@ style = "pill"
 [module.workspaces.states.urgent]
 urgent = true
 style = "critical"
-radius = 16
+radius = 13
 
 # `controls = true` makes the module the remote as well as the display: a left
 # click plays and pauses, and the wheel moves between tracks. dbar asks the
