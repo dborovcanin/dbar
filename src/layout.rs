@@ -316,6 +316,126 @@ fn contains(x: f32, y: f32, rx: f32, ry: f32, rw: f32, rh: f32) -> bool {
     x >= rx && x < rx + rw && y >= ry && y < ry + rh
 }
 
+/// What of the bar has changed since the last frame was drawn.
+///
+/// This is what the compositor is told, not what dbar repaints: the whole surface is
+/// painted every time, and saying so needlessly makes the compositor copy and composite a
+/// strip it already has. Being wrong the other way - claiming less than really changed -
+/// leaves the old pixels on screen, so everything here errs towards saying more.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Damage {
+    /// Something structural moved, or this is the first frame. Say the lot.
+    All,
+    /// Only these rectangles, in logical pixels.
+    Rects(Vec<(f32, f32, f32, f32)>),
+}
+
+/// Whether two of the same thing would be drawn identically.
+///
+/// Deliberately not `PartialEq`: a placed module carries what a click on it does and what
+/// it is called, and none of that reaches the screen. Comparing those as well would report
+/// a change nobody can see.
+trait SamePaint {
+    fn same_paint(&self, other: &Self) -> bool;
+}
+
+impl SamePaint for PlacedIcon {
+    fn same_paint(&self, other: &Self) -> bool {
+        self.icon == other.icon
+            && self.level == other.level
+            && self.x == other.x
+            && self.y == other.y
+            && self.size == other.size
+            // Pictures are compared by identity rather than by pixel: the same artwork
+            // arrives as the same `Arc` until the application replaces it, and a copy that
+            // happens to match would only be reported as a change, which is safe.
+            && match (&self.art, &other.art) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl SamePaint for PlacedModule {
+    fn same_paint(&self, other: &Self) -> bool {
+        self.x == other.x
+            && self.y == other.y
+            && self.width == other.width
+            && self.height == other.height
+            && self.text == other.text
+            && self.text_x == other.text_x
+            && self.foreground == other.foreground
+            && self.background == other.background
+            && self.radius == other.radius
+            && match (&self.icon, &other.icon) {
+                (Some(a), Some(b)) => a.same_paint(b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl SamePaint for PlacedSeparator {
+    fn same_paint(&self, other: &Self) -> bool {
+        self.x == other.x
+            && self.y == other.y
+            && self.width == other.width
+            && self.height == other.height
+            && self.shape == other.shape
+            && self.direction == other.direction
+            && self.overlap == other.overlap
+            && self.fill == other.fill
+            && self.under == other.under
+    }
+}
+
+impl SamePaint for PlacedGroup {
+    fn same_paint(&self, other: &Self) -> bool {
+        self.x == other.x
+            && self.y == other.y
+            && self.width == other.width
+            && self.height == other.height
+            && self.background == other.background
+            && self.opacity == other.opacity
+            && self.edges == other.edges
+            && self.modules.len() == other.modules.len()
+            && self.separators.len() == other.separators.len()
+            && (self.modules.iter())
+                .zip(&other.modules)
+                .all(|(a, b)| a.same_paint(b))
+            && (self.separators.iter())
+                .zip(&other.separators)
+                .all(|(a, b)| a.same_paint(b))
+    }
+}
+
+impl Frame {
+    /// What changed between the frame that is on screen and this one.
+    ///
+    /// The island is the unit rather than the module, and on purpose: a separator bleeds
+    /// under the modules it runs between, a group's ends are rounded over its corners, and
+    /// a translucent one is composited as a single object. Naming a module's own rectangle
+    /// would cut through all three. An island is a few hundred pixels of a bar that is
+    /// thousands wide, so there is nothing to gain by being cleverer.
+    pub fn damage(&self, on_screen: &Frame) -> Damage {
+        if self.groups.len() != on_screen.groups.len() {
+            return Damage::All;
+        }
+        let mut rects = Vec::new();
+        for (new, old) in self.groups.iter().zip(&on_screen.groups) {
+            if new.same_paint(old) {
+                continue;
+            }
+            // Both rectangles: a group that moved or shrank has to repair where it was as
+            // well as cover where it is now.
+            rects.push((old.x, old.y, old.width, old.height));
+            rects.push((new.x, new.y, new.width, new.height));
+        }
+        Damage::Rects(rects)
+    }
+}
+
 impl Frame {
     /// Identity of the module under a point, for spotting a hover change without laying
     /// the bar out again. Motion within one module leaves this unchanged.
@@ -1766,6 +1886,106 @@ padding = 0
         assert!(frame.rows[0].arrow.is_none());
         // The labels start in the same place regardless.
         assert_eq!(frame.rows[0].text_x, frame.rows[2].text_x);
+    }
+
+    /// The first frame has nothing on screen to compare against, so all of it is new.
+    #[test]
+    fn the_first_frame_damages_everything() {
+        let frame = frame_of(BASIC, &[item("cpu", "1%"), item("mem", "2%")]);
+        assert_eq!(frame.damage(&Frame::default()), Damage::All);
+    }
+
+    /// A frame that draws the same thing damages nothing. This is the case that matters:
+    /// a collector that read the same value again must not make the compositor take the
+    /// bar back.
+    #[test]
+    fn a_frame_that_changed_nothing_damages_nothing() {
+        let items = [item("cpu", "1%"), item("mem", "2%")];
+        let one = frame_of(BASIC, &items);
+        let two = frame_of(BASIC, &items);
+        assert_eq!(two.damage(&one), Damage::Rects(Vec::new()));
+    }
+
+    /// A module whose wording changed damages the island holding it, and nothing else.
+    #[test]
+    fn a_changed_module_damages_its_island() {
+        let before = frame_of(BASIC, &[item("cpu", "1%"), item("mem", "2%")]);
+        let after = frame_of(BASIC, &[item("cpu", "99%"), item("mem", "2%")]);
+        let Damage::Rects(rects) = after.damage(&before) else {
+            panic!("a wording change is not the whole bar");
+        };
+        assert!(!rects.is_empty(), "something did change");
+        // Every rectangle is one of the group's, before or after.
+        let group = &after.groups[0];
+        for (x, _, w, _) in &rects {
+            assert!(
+                *x >= group.x - 1.0 && x + w <= group.x + group.width + 1.0,
+                "damage {x}+{w} reaches outside the island at {}+{}",
+                group.x,
+                group.width
+            );
+        }
+    }
+
+    /// A module that grows moves everything after it, and what moved has to be repaired
+    /// where it used to be as well as drawn where it is now.
+    #[test]
+    fn a_module_that_grows_damages_what_it_pushed_along() {
+        let config = r##"
+[left]
+groups = ["one", "two"]
+
+[group.one]
+modules = ["cpu"]
+
+[group.two]
+modules = ["mem"]
+
+[module.cpu]
+padding = 0
+
+[module.mem]
+padding = 0
+"##;
+        let narrow = frame_of(config, &[item("cpu", "1%"), item("mem", "2%")]);
+        let wide = frame_of(config, &[item("cpu", "1000000%"), item("mem", "2%")]);
+        let Damage::Rects(rects) = wide.damage(&narrow) else {
+            panic!("two islands are not the whole bar");
+        };
+        // The island that grew and the one it shoved along, each named twice - where it
+        // was and where it is.
+        assert_eq!(rects.len(), 4, "both islands, before and after: {rects:?}");
+        let widest = rects.iter().map(|(_, _, w, _)| *w).fold(0.0f32, f32::max);
+        assert!(
+            widest >= wide.groups[0].width,
+            "the grown island is covered"
+        );
+    }
+
+    /// Colour is drawn, so a state rule that recolours a module without changing a letter
+    /// of it still has to be reported.
+    #[test]
+    fn a_recoloured_module_is_damaged_even_with_the_same_words() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+padding = 0
+
+[module.cpu.states.hot]
+above = 50
+background = "#ff0000"
+"##;
+        let cool = frame_of(config, &[with_percent(item("cpu", "10%"), 10.0)]);
+        let hot = frame_of(config, &[with_percent(item("cpu", "90%"), 90.0)]);
+        let Damage::Rects(rects) = hot.damage(&cool) else {
+            panic!("one module is not the whole bar");
+        };
+        assert!(!rects.is_empty(), "a colour change is a change");
     }
 
     /// The mode indicator is on the bar exactly while a mode is held. `default` is what a

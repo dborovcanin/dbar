@@ -1113,6 +1113,8 @@ impl App {
 
     fn draw(&mut self, i: usize) -> Result<()> {
         let frame = self.lay_out(i);
+        // Worked out against the frame that is still on screen, before it is replaced.
+        let damage = frame.damage(&self.bars[i].frame);
         self.bars[i].frame = frame;
 
         let App {
@@ -1160,7 +1162,27 @@ impl App {
 
         let surface = bar.layer.wl_surface();
         surface.set_buffer_scale(scale);
-        surface.damage_buffer(0, 0, pw, ph);
+        // The whole buffer is painted either way; what is said here is only which of it
+        // the compositor has to take again. On a large screen that is most of the cost of
+        // a redraw, and nearly all of it is a strip the compositor already has.
+        match &damage {
+            layout::Damage::All => surface.damage_buffer(0, 0, pw, ph),
+            layout::Damage::Rects(rects) => {
+                for (x, y, w, h) in rects {
+                    // Out to whole pixels on every side: a rectangle in logical pixels
+                    // lands between them once the scale is applied, and antialiasing
+                    // reaches a little past the shape that asked for it.
+                    let scale = scale as f32;
+                    let x0 = ((x * scale).floor() as i32 - 1).max(0);
+                    let y0 = ((y * scale).floor() as i32 - 1).max(0);
+                    let x1 = (((x + w) * scale).ceil() as i32 + 1).min(pw);
+                    let y1 = (((y + h) * scale).ceil() as i32 + 1).min(ph);
+                    if x1 > x0 && y1 > y0 {
+                        surface.damage_buffer(x0, y0, x1 - x0, y1 - y0);
+                    }
+                }
+            }
+        }
         surface.frame(qh, FrameCallbackData(surface.clone()));
         bar.frame_pending = true;
         buffer.attach_to(surface).context("attaching the buffer")?;

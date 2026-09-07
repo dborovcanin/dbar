@@ -755,7 +755,7 @@ impl Ends {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Edges {
     pub left: EdgeShape,
     pub right: EdgeShape,
