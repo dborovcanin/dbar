@@ -965,17 +965,19 @@ fn size_group(
     joined_ends: Option<Ends>,
 ) -> Option<SizedGroup> {
     let ends = joined_ends.unwrap_or(group.ends);
-    let advance = if group.separator.shape.is_none() {
+    // The space between two modules: a configured separator owns it, otherwise `spacing`.
+    // Named apart from the icon advance below, which is a different distance entirely.
+    let between = if group.separator.shape.is_none() {
         group.spacing
     } else {
         group.separator.width
     };
-    // What is left for the modules once the group's own padding is paid for. A run with
-    // nothing else beside it gets infinity, and nothing below has to think about it.
-    let mut left = budget - group.padding * 2.0;
-    if joined_ends.is_some() {
-        left -= ends.left_width() + ends.right_width();
-    }
+    // What is left for the modules once everything drawn beside them is paid for: the
+    // group's padding, and the ends, which are drawn in room of their own rather than over
+    // the modules. Reserving them here is what keeps the width worked out at the bottom
+    // inside the budget this was given. A run with nothing else beside it gets infinity,
+    // and nothing below has to think about it.
+    let mut left = budget - group.padding * 2.0 - ends.left_width() - ends.right_width();
     let mut modules = Vec::new();
     for candidate in collect(group, inputs) {
         let Candidate {
@@ -1097,14 +1099,12 @@ fn size_group(
         // A module that would outgrow max_width, or the room its run has left, loses text
         // rather than pushing its neighbours aside: a window title has no length limit of
         // its own, and a bar can run out of width whatever the config says.
-        let available = if joined_ends.is_some() && !modules.is_empty() {
-            left - if group.separator.shape.is_none() {
-                group.spacing
-            } else {
-                group.separator.width
-            }
-        } else {
-            left
+        // Every module after the first is preceded by whatever goes between two of them,
+        // and that space is charged here rather than at the bottom, where the width is
+        // only added up.
+        let available = match modules.is_empty() {
+            true => left,
+            false => left - between,
         };
         let fixed = advance(&content) + style.padding * 2.0;
         let cap = match style.max_width > 0.0 {
@@ -1134,11 +1134,7 @@ fn size_group(
         if width > available {
             continue;
         }
-        left = if joined_ends.is_some() {
-            available - width
-        } else {
-            left - width - group.spacing
-        };
+        left = available - width;
         modules.push(SizedModule {
             width,
             text_width,
@@ -1176,7 +1172,7 @@ fn size_group(
     }
 
     let content: f32 = modules.iter().map(|m| m.width).sum();
-    let gaps = advance * (modules.len() - 1) as f32;
+    let gaps = between * (modules.len() - 1) as f32;
     // A shaped end needs room of its own: it is drawn beside the modules, not over them.
     let width = content + gaps + ends.left_width() + ends.right_width() + group.padding * 2.0;
     let _ = height;
@@ -1187,7 +1183,7 @@ fn size_group(
         opacity: group.opacity,
         edges: group.edges,
         padding: group.padding,
-        advance,
+        advance: between,
         separator: group.separator,
         ends,
         modules,
@@ -3559,6 +3555,54 @@ background = "#0000aa"
         assert_eq!(single.groups[0].separators.len(), 2);
         let empty = joined_frame(JOINED, &[], 100.0, None);
         assert!(empty.groups.is_empty() && empty.group_separators.is_empty());
+    }
+
+    /// A group that is not joined to anything has the same arithmetic to do: the room
+    /// between two modules is the separator's when there is one, and the ends are drawn
+    /// beside the modules rather than over them. Sizing against `spacing` while charging
+    /// the separator's width let a group compute itself wider than the bar it was being
+    /// fitted into, and then draw there.
+    #[test]
+    fn a_group_fits_its_separators_and_ends_in_the_width_it_was_given() {
+        let config = r##"
+[bar]
+height = 20
+gap = 0
+[right]
+groups = ["a"]
+[group.a]
+modules = ["a", "b", "c"]
+spacing = 0
+separator = { shape = "slant", width = 20 }
+ends = { left = "slant", right = "slant", width = 6 }
+[module.a]
+format = "$text"
+padding = 0
+[module.b]
+format = "$text"
+padding = 0
+[module.c]
+format = "$text"
+padding = 0
+"##;
+        let items = [item("a", "aaaa"), item("b", "bbbb"), item("c", "cccc")];
+        for width in 1..120 {
+            let width = width as f32;
+            let frame = joined_frame(config, &items, width, None);
+            for group in &frame.groups {
+                assert!(
+                    group.x >= 0.0 && group.x + group.width <= width,
+                    "width {width}: a group {} wide sits at {}",
+                    group.width,
+                    group.x
+                );
+            }
+        }
+
+        // And what it does fit is what it says it is: three modules of four characters,
+        // two twenty-wide separators between them, and six at each end.
+        let frame = joined_frame(config, &items, 120.0, None);
+        assert_eq!(frame.groups[0].width, 4.0 * 3.0 + 20.0 * 2.0 + 6.0 * 2.0);
     }
 
     #[test]
