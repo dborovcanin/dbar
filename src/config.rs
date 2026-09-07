@@ -157,6 +157,94 @@ fn field_kind(name: &str) -> Result<crate::status::Kind> {
     }
 }
 
+/// The word a field kind is written as in the config, for a message about two of them.
+fn kind_word(kind: crate::status::Kind) -> &'static str {
+    use crate::status::{Kind, Unit};
+    match kind {
+        Kind::Num(Unit::Percent) => "percent",
+        Kind::Num(_) => "number",
+        _ => "text",
+    }
+}
+
+/// Give every module built on one command the fields all of them declared.
+///
+/// Two modules naming the same program on the same schedule share one process and one
+/// reading, and the declared fields are not part of what tells two commands apart. The
+/// process is spawned with one module's schema, so anything only the other module
+/// declared was parsed out of the output and dropped: the module validated, ran, and drew
+/// nothing. The schemas are unioned here instead, so the shared reading carries every
+/// field any of them asked for.
+///
+/// A name two of them disagree about the kind of is a config error rather than a silent
+/// choice between the two, and says which modules to look at.
+fn share_command_fields(positions: &mut [Vec<Group>; 3]) -> Result<()> {
+    use crate::collect::{CommandSpec, Which};
+
+    // `mixed` says whether the modules on one command declared the same schema, which is
+    // the ordinary case: they then keep the slice the config already leaked for them.
+    struct Union {
+        fields: Vec<(FieldSpec, String)>,
+        first: &'static [FieldSpec],
+        mixed: bool,
+    }
+
+    let mut shared: HashMap<CommandSpec, Union> = HashMap::new();
+    for module in positions.iter().flatten().flat_map(|g| &g.modules) {
+        let Source::Native(Which::Command(spec)) = &module.source else {
+            continue;
+        };
+        let entry = shared.entry(spec.clone()).or_insert_with(|| Union {
+            fields: Vec::new(),
+            first: spec.fields,
+            mixed: false,
+        });
+        let same = entry.first.len() == spec.fields.len()
+            && std::iter::zip(entry.first, spec.fields)
+                .all(|(a, b)| a.name == b.name && a.kind == b.kind);
+        entry.mixed |= !same;
+        let union = &mut entry.fields;
+        for declared in spec.fields {
+            match union.iter().find(|(f, _)| f.name == declared.name) {
+                Some((seen, first)) if seen.kind != declared.kind => bail!(
+                    "modules {first:?} and {:?} run the same command on the same schedule, \
+                     so they share one reading, but {first:?} declares field {:?} as {} and \
+                     {:?} declares it as {}",
+                    module.name,
+                    declared.name,
+                    kind_word(seen.kind),
+                    module.name,
+                    kind_word(declared.kind),
+                ),
+                Some(_) => {}
+                None => union.push((*declared, module.name.clone())),
+            }
+        }
+    }
+
+    // Leaked once per shared command while the config is read, the same as the schemas it
+    // is built from, so the fields stay `'static` for the thread that parses the output.
+    let unions: HashMap<CommandSpec, &'static [FieldSpec]> = shared
+        .into_iter()
+        .filter(|(_, union)| union.mixed)
+        .map(|(spec, union)| {
+            let fields: Vec<FieldSpec> = union.fields.into_iter().map(|(f, _)| f).collect();
+            let leaked: &'static [FieldSpec] = Box::leak(fields.into_boxed_slice());
+            (spec, leaked)
+        })
+        .collect();
+
+    for module in positions.iter_mut().flatten().flat_map(|g| &mut g.modules) {
+        let Source::Native(Which::Command(spec)) = &mut module.source else {
+            continue;
+        };
+        if let Some(fields) = unions.get(spec) {
+            spec.fields = fields;
+        }
+    }
+    Ok(())
+}
+
 /// Where a separator takes its colour from.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SeparatorColor {
@@ -1420,6 +1508,8 @@ impl Config {
             max_width: raw.menu.max_width.max(40.0),
         };
 
+        share_command_fields(&mut positions)?;
+
         Ok(Config {
             bar,
             menu,
@@ -2216,6 +2306,86 @@ modules = ["m"]
             ..a.clone()
         };
         assert_ne!(a, patient);
+    }
+
+    /// Two modules on one command share a process, so they have to share a schema too:
+    /// what only one of them declared would otherwise be parsed out of the output and
+    /// thrown away, leaving a module that validated and then drew nothing.
+    #[test]
+    fn modules_sharing_a_command_share_every_field_they_declared() {
+        let text = r#"
+[bar]
+height = 30
+
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["temp", "wind"]
+
+[module.temp]
+source = "command"
+command = ["weather"]
+interval = "10m"
+fields = { temp = "number" }
+format = "$temp"
+
+[module.wind]
+source = "command"
+command = ["weather"]
+interval = "10m"
+fields = { wind = "number" }
+format = "$wind"
+"#;
+        let cfg = Config::parse(text).expect("two modules on one command");
+        for module in cfg.modules() {
+            let Source::Native(Which::Command(spec)) = &module.source else {
+                panic!("{} is not a command module", module.name);
+            };
+            let names: Vec<&str> = spec.fields.iter().map(|f| f.name).collect();
+            assert_eq!(names, ["temp", "wind"], "in module {:?}", module.name);
+        }
+
+        // And one command, not two: the schemas differing is not what tells two of them
+        // apart.
+        assert_eq!(cfg.collectors().len(), 1);
+    }
+
+    /// Sharing a reading means agreeing about what is in it. Two modules that do not are
+    /// told so by name, rather than one of them silently deciding.
+    #[test]
+    fn modules_sharing_a_command_may_not_disagree_about_a_field() {
+        let text = r#"
+[bar]
+height = 30
+
+[right]
+groups = ["g"]
+
+[group.g]
+modules = ["a", "b"]
+
+[module.a]
+source = "command"
+command = ["weather"]
+interval = "10m"
+fields = { load = "number" }
+format = "$load"
+
+[module.b]
+source = "command"
+command = ["weather"]
+interval = "10m"
+fields = { load = "text" }
+format = "$load"
+"#;
+        let e = Config::parse(text).expect_err("two kinds for one field");
+        let message = format!("{e:#}");
+        assert!(
+            message.contains("\"a\"") && message.contains("\"b\""),
+            "{message}"
+        );
+        assert!(message.contains("load"), "{message}");
     }
 
     /// The argv a command module ends up with, given what it wrote.
