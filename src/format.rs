@@ -106,6 +106,12 @@ struct StrArgs {
 #[derive(Clone, Debug)]
 struct TimeArgs {
     pattern: String,
+    /// Where the clock is, when the config says somewhere other than here.
+    ///
+    /// Held as the zone itself rather than as its name: looking one up reads the system's
+    /// tz database, and this is rendered on every redraw. Absent means the machine's own
+    /// zone, which is what a clock usually wants and what it cost before.
+    zone: Option<jiff::tz::TimeZone>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -462,15 +468,25 @@ fn build_func(name: &str, args: &[(String, String)]) -> Result<Func> {
         }
         "time" => {
             let mut pattern = None;
+            let mut zone = None;
             for (key, value) in args {
                 match key.as_str() {
                     "f" => pattern = Some(value.clone()),
-                    other => bail!(".time() takes f, not {other:?}"),
+                    // Looked up once, while the config is read: a zone the machine's tz
+                    // database does not have is a startup error naming it, rather than a
+                    // clock that quietly shows the wrong hour.
+                    "tz" => {
+                        zone = Some(
+                            jiff::tz::TimeZone::get(value)
+                                .map_err(|e| anyhow!("in .time(tz:{value:?}): {e}"))?,
+                        );
+                    }
+                    other => bail!(".time() takes f and tz, not {other:?}"),
                 }
             }
             let pattern = pattern.ok_or_else(|| anyhow!(".time() needs a pattern, as f:'%R'"))?;
             check_pattern(&pattern)?;
-            Ok(Func::Time(TimeArgs { pattern }))
+            Ok(Func::Time(TimeArgs { pattern, zone }))
         }
         "dur" => {
             let mut style = DurStyle::default();
@@ -765,14 +781,16 @@ fn render_value(value: &Value, func: Option<&Func>, out: &mut String) -> bool {
             out.extend(text.chars().flat_map(char::to_lowercase));
             true
         }
-        (Value::Time(t), Some(Func::Time(args))) => match format_time(*t, &args.pattern) {
-            Some(text) => {
-                out.push_str(&text);
-                true
+        (Value::Time(t), Some(Func::Time(args))) => {
+            match format_time(*t, &args.pattern, args.zone.as_ref()) {
+                Some(text) => {
+                    out.push_str(&text);
+                    true
+                }
+                None => false,
             }
-            None => false,
-        },
-        (Value::Time(t), None) => match format_time(*t, "%H:%M") {
+        }
+        (Value::Time(t), None) => match format_time(*t, "%H:%M", None) {
             Some(text) => {
                 out.push_str(&text);
                 true
@@ -886,17 +904,28 @@ fn check_pattern(pattern: &str) -> Result<()> {
     Ok(())
 }
 
-/// Render an instant in the machine's own time zone.
-fn strftime(pattern: &str, at: jiff::Timestamp) -> Result<String> {
-    let zoned = at.to_zoned(jiff::tz::TimeZone::system());
+/// Render an instant, in the zone the format named or in the machine's own.
+fn strftime(
+    pattern: &str,
+    at: jiff::Timestamp,
+    zone: Option<&jiff::tz::TimeZone>,
+) -> Result<String> {
+    let zoned = match zone {
+        Some(zone) => at.to_zoned(zone.clone()),
+        None => at.to_zoned(jiff::tz::TimeZone::system()),
+    };
     jiff::fmt::strtime::format(pattern, &zoned).map_err(|e| anyhow!("{e}"))
 }
 
-fn format_time(at: std::time::SystemTime, pattern: &str) -> Option<String> {
+fn format_time(
+    at: std::time::SystemTime,
+    pattern: &str,
+    zone: Option<&jiff::tz::TimeZone>,
+) -> Option<String> {
     let timestamp = jiff::Timestamp::try_from(at).ok()?;
     // The pattern was checked when the config was read, so a failure here is a clock the
     // calendar cannot express rather than a typo.
-    strftime(pattern, timestamp).ok()
+    strftime(pattern, timestamp, zone).ok()
 }
 
 fn format_dur(d: std::time::Duration, style: DurStyle) -> String {
@@ -1040,6 +1069,37 @@ mod tests {
         assert_eq!(render("$now.time(f:'day %j')", &f), "day 001");
         assert_eq!(render("$now.time(f:'%H:%M')", &f).len(), 5);
         assert_eq!(render("$now", &f).len(), 5);
+    }
+
+    /// A clock can be about somewhere else. The zone is named in the format rather than
+    /// on the module, so one module can carry two of them and both read from the one
+    /// reading the clock source already published.
+    #[test]
+    fn a_clock_can_be_told_which_zone_it_is_about() {
+        let epoch = std::time::UNIX_EPOCH;
+        let f = fields(&[("now", Value::Time(epoch))]);
+        // The epoch is midnight in UTC, and the offsets either side of it are fixed for
+        // that date, so these do not drift with the machine or the season.
+        assert_eq!(render("$now.time(f:'%H:%M',tz:'UTC')", &f), "00:00");
+        assert_eq!(
+            render("$now.time(f:'%H:%M',tz:'Europe/Belgrade')", &f),
+            "01:00"
+        );
+        assert_eq!(render("$now.time(f:'%H:%M',tz:'Asia/Tokyo')", &f), "09:00");
+        assert_eq!(
+            render("$now.time(f:'%d %H:%M',tz:'America/New_York')", &f),
+            "31 19:00"
+        );
+    }
+
+    /// A zone this machine's calendar has never heard of is a startup error naming it,
+    /// not a clock quietly showing the wrong hour.
+    #[test]
+    fn a_zone_that_does_not_exist_is_refused_when_it_is_written() {
+        assert!(Format::parse("$now.time(f:'%R',tz:'Europe/Belgrade')").is_ok());
+        let e = Format::parse("$now.time(f:'%R',tz:'Mars/Olympus')").expect_err("no such zone");
+        let message = format!("{e:#}");
+        assert!(message.contains("Mars/Olympus"), "{message}");
     }
 
     #[test]

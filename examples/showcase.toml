@@ -674,6 +674,14 @@ interval = "1m"
 format = " $now.time(f:'%a %d %b %H:%M') "
 style = "cool"
 icon = "clock"
+# A clock can be about somewhere else: `tz` takes an IANA zone name, checked
+# against this machine's own database when the config is read, so a typo is a
+# startup error rather than an hour quietly wrong. Two of them in one format is
+# two zones side by side, off the same reading.
+format_alt = " $now.time(f:'%H:%M') here  $now.time(f:'%H:%M',tz:'Asia/Tokyo') Tokyo "
+# The left button is already spoken for below, so the wording moves on a right
+# click instead.
+alt_button = "right"
 # `on_click` hands a button to a program of your own, keyed by button: `left`,
 # `middle`, `right`. This is how a bar does the thing dbar has no module for - a
 # calendar over the clock, a mixer over the volume - without dbar growing either.
