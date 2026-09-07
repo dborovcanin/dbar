@@ -136,8 +136,29 @@ impl<V> Generations<V> {
         }
     }
 
-    fn get(&self, key: &str) -> Option<&V> {
+    /// What is cached for `key`, promoting it out of the older generation if that is where
+    /// it was.
+    ///
+    /// Looking only in the newest generation would mean every string the bar is still
+    /// using is recomputed the moment a generation rolls over - and then thrown away,
+    /// because putting it back finds the kept copy and keeps that one instead. Promoting
+    /// here is what makes a string that is still in use survive indefinitely, which is the
+    /// whole point of having two generations.
+    fn get(&mut self, key: &str) -> Option<&V> {
+        if !self.hot.contains_key(key) {
+            let kept = self.cold.remove(key)?;
+            self.roll();
+            self.hot.insert(key.to_string(), kept);
+        }
         self.hot.get(key)
+    }
+
+    /// Start a new generation if the newest one is full.
+    fn roll(&mut self) {
+        if self.hot.len() >= self.limit {
+            std::mem::swap(&mut self.hot, &mut self.cold);
+            self.hot.clear();
+        }
     }
 
     fn get_or_insert(&mut self, key: &str, make: impl FnOnce() -> V) -> &mut V {
@@ -146,10 +167,7 @@ impl<V> Generations<V> {
                 Some(kept) => kept,
                 None => make(),
             };
-            if self.hot.len() >= self.limit {
-                std::mem::swap(&mut self.hot, &mut self.cold);
-                self.hot.clear();
-            }
+            self.roll();
             self.hot.insert(key.to_string(), value);
         }
         self.hot.get_mut(key).expect("just inserted")
@@ -390,6 +408,7 @@ impl TextRenderer {
         if let Some(w) = self.shaped[self.active].widths.get(text) {
             return *w;
         }
+
         let scale = self.scale();
         let (buffer, _) = self.shaped(text);
         let physical = buffer
@@ -718,6 +737,30 @@ mod tests {
             "held {} entries against a limit of 8 per generation",
             len(&cache)
         );
+    }
+
+    /// A generation rolling over must not make the bar re-measure everything it is still
+    /// showing. Before, a lookup checked only the newest generation, so every live string
+    /// was computed again at each rollover - and then discarded, because putting it back
+    /// found the kept copy.
+    #[test]
+    fn a_lookup_finds_what_the_older_generation_kept() {
+        let mut cache = Generations::new(4);
+        cache.insert("clock", 1);
+        // Just enough to roll once, so "clock" is in the older generation rather than
+        // gone: two rollovers without a lookup are what actually forgets a string.
+        for i in 0..4 {
+            cache.get_or_insert(&format!("n{i}"), || i);
+        }
+        assert_eq!(cache.hot.get("clock"), None, "it should have rolled over");
+        assert_eq!(cache.get("clock"), Some(&1), "but it is still cached");
+        assert_eq!(
+            cache.hot.get("clock"),
+            Some(&1),
+            "and looking it up brings it back to the newest generation"
+        );
+        // A key nothing ever cached is still absent, so a miss is still a miss.
+        assert_eq!(cache.get("never"), None);
     }
 
     #[test]
