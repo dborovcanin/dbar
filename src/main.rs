@@ -254,6 +254,34 @@ fn main() -> Result<()> {
         }
     }
 
+    // A source whose read can wait on something outside this machine - a filesystem that
+    // has stopped answering, a wireless driver - is read on a thread of its own, so a
+    // mount that hangs cannot take the clock and the pointer down with it.
+    let slow: Vec<crate::collect::Which> = config_collectors
+        .keys()
+        .filter(|which| which.blocking())
+        .cloned()
+        .collect();
+    if !slow.is_empty() {
+        let (slow_tx, slow_rx) = calloop::channel::sync_channel(QUEUED_UPDATES);
+        for which in slow {
+            let interval = config_collectors[&which];
+            let askable = askable.contains(&which);
+            if let Some(trigger) =
+                crate::collect::slow::spawn(which.clone(), interval, askable, slow_tx.clone())
+            {
+                app.set_trigger(which, trigger);
+            }
+        }
+        handle
+            .insert_source(slow_rx, |event, _, app: &mut App| {
+                if let calloop::channel::Event::Msg(taken) = event {
+                    app.on_slow(taken);
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("inserting the slow-source channel: {e}"))?;
+    }
+
     // Collectors share one timer: it fires when the earliest is due, reads everything that
     // has come due, and is set again for whatever is next.
     if collectors {

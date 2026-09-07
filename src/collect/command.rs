@@ -81,21 +81,6 @@ pub enum Message {
     Readings(Vec<Reading>),
 }
 
-/// The way to ask a command for another reading before its schedule would have one.
-///
-/// A module asks by being clicked or by being sent its signal. The command's thread is
-/// waiting on this rather than sleeping, so the run starts when the ask arrives rather
-/// than when the interval it was in the middle of runs out.
-pub struct Trigger(mpsc::Sender<()>);
-
-impl Trigger {
-    pub fn ask(&self) {
-        // A thread that has gone is a command that stopped answering, which the bar
-        // already knows from the last reading it sent.
-        let _ = self.0.send(());
-    }
-}
-
 /// Start `argv` and send readings from it, the way `run` says to.
 ///
 /// `askable` says whether anything in the config can ask this command for another
@@ -111,7 +96,7 @@ pub fn spawn(
     askable: bool,
     pages: bool,
     timeout: Duration,
-) -> Result<Option<Trigger>> {
+) -> Result<Option<super::Trigger>> {
     let (program, rest) = argv
         .split_first()
         .context("a command module names no command")?;
@@ -121,7 +106,7 @@ pub fn spawn(
     // is no run to bring forward.
     let channel = (askable && run != Run::Stream).then(mpsc::channel::<()>);
     let (trigger, asked) = match channel {
-        Some((ask, asked)) => (Some(Trigger(ask)), Some(asked)),
+        Some((ask, asked)) => (Some(super::Trigger::new(ask)), Some(asked)),
         None => (None, None),
     };
 

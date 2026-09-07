@@ -280,7 +280,7 @@ pub struct App {
     /// Which sources each realtime signal reads again.
     signals: std::collections::HashMap<i32, Vec<Which>>,
     /// The way to ask a command module's program for another reading, by source.
-    triggers: std::collections::HashMap<Which, crate::collect::command::Trigger>,
+    triggers: std::collections::HashMap<Which, crate::collect::Trigger>,
     /// Command sources with a run on its way, and when that run started.
     ///
     /// A command that answers quickly is in here for a few milliseconds and never draws
@@ -492,7 +492,7 @@ impl App {
     }
 
     /// Remember how to ask a command module's program for another reading.
-    pub fn set_trigger(&mut self, which: Which, trigger: crate::collect::command::Trigger) {
+    pub fn set_trigger(&mut self, which: Which, trigger: crate::collect::Trigger) {
         self.triggers.insert(which, trigger);
     }
 
@@ -1112,6 +1112,13 @@ impl App {
         self.waiting.remove(which);
         self.native.push(which, readings);
         self.invalidate();
+    }
+
+    /// Take a reading from a source read on a thread of its own.
+    pub fn on_slow(&mut self, taken: crate::collect::slow::Taken) {
+        if self.native.arrived(&taken.which, taken.read) {
+            self.invalidate();
+        }
     }
 
     /// Note that a command's program is running, and say whether a timer is now wanted.

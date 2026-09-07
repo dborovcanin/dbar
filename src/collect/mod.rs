@@ -20,6 +20,7 @@ pub mod media;
 pub mod memory;
 pub mod network;
 pub mod nl80211;
+pub mod slow;
 pub mod temperature;
 pub mod time;
 pub mod watch;
@@ -212,10 +213,25 @@ impl Which {
     /// A pushed source is never on the timer and has no collector to call: what it knows
     /// comes from a thread that is told, and the registry only holds the last of it.
     pub fn pushed(&self) -> bool {
-        matches!(self, Which::Audio | Which::Media | Which::Command(_))
+        matches!(self, Which::Audio | Which::Media | Which::Command(_)) || self.blocking()
     }
 
-    fn open(&self) -> Box<dyn Collector> {
+    /// Whether reading this source can wait on something outside this machine's control.
+    ///
+    /// `statvfs` answers when the filesystem does, which for a network mount or a FUSE
+    /// daemon that has gone may be never; a wireless link is a netlink request and a wait
+    /// for the driver to answer. Everything else here is a file under `/proc` or `/sys`
+    /// that the kernel fills in on the spot.
+    ///
+    /// A source like that is read on a thread of its own and arrives the way a command's
+    /// reading does, because the alternative is a mount that stopped answering stopping
+    /// the clock, the pointer and the compositor's own events with it.
+    pub fn blocking(&self) -> bool {
+        matches!(self, Which::Disk(_) | Which::Network(_))
+    }
+
+    /// The collector itself, whichever thread is going to read it.
+    pub fn collector(&self) -> Box<dyn Collector> {
         match self {
             Which::Audio | Which::Media | Which::Command(_) => Box::new(Pushed),
             Which::Cpu => Box::new(cpu::Cpu::new()),
@@ -228,6 +244,25 @@ impl Which {
             Which::Network(device) => Box::new(network::Network::new(device.clone())),
             Which::Time => Box::new(time::Time),
         }
+    }
+}
+
+/// The way to ask a source for another reading before its schedule would have one.
+///
+/// A module asks by being clicked or by being sent its signal. The thread behind the
+/// source is waiting on this rather than sleeping, so the reading is taken when the ask
+/// arrives rather than when the interval it was in the middle of runs out.
+pub struct Trigger(std::sync::mpsc::Sender<()>);
+
+impl Trigger {
+    pub(crate) fn new(sender: std::sync::mpsc::Sender<()>) -> Trigger {
+        Trigger(sender)
+    }
+
+    pub fn ask(&self) {
+        // A thread that has gone is a source that stopped answering, which the bar
+        // already knows from the last reading it sent.
+        let _ = self.0.send(());
     }
 }
 
@@ -300,7 +335,12 @@ impl Registry {
         let mut entries: Vec<Entry> = wanted
             .iter()
             .map(|(which, &interval)| Entry {
-                collector: which.open(),
+                // A source that can block is read on a thread of its own; the registry
+                // holds its readings and never asks for them itself.
+                collector: match which.pushed() {
+                    true => Box::new(Pushed),
+                    false => which.collector(),
+                },
                 interval,
                 readings: vec![Reading::default()],
                 due: match which.pushed() {
@@ -326,44 +366,65 @@ impl Registry {
     pub fn tick(&mut self) -> bool {
         let now = Instant::now();
         let mut changed = false;
-        for entry in &mut self.entries {
-            if entry.due.is_none_or(|due| due > now) {
+        for at in 0..self.entries.len() {
+            if self.entries[at].due.is_none_or(|due| due > now) {
                 continue;
             }
-            match entry.collector.read() {
-                Ok(reading) => {
-                    if entry.failures > 0 {
-                        log::info!("{} is reporting again", entry.which.describe());
-                    }
-                    entry.failures = 0;
-                    entry.reported = false;
-                    // Most of what a bar shows changes rarely: a disk that is still 41%
-                    // full draws exactly what it drew a minute ago. Saying so lets the
-                    // whole redraw be skipped, and saves replacing the reading as well.
-                    if !matches!(entry.readings.as_slice(), [old] if old.same(&reading)) {
-                        entry.readings = vec![reading];
-                        changed = true;
-                    }
-                }
-                Err(e) => {
-                    // The last good reading stays on screen, marked as stale, rather than
-                    // the module vanishing because a file was busy for one tick. A source
-                    // that stays broken is already drawn as stale, so only the first
-                    // failure is worth a redraw.
-                    changed |= entry.readings.iter().any(|r| r.state != State::Error);
-                    for reading in &mut entry.readings {
-                        reading.state = State::Error;
-                    }
-                    entry.failures = entry.failures.saturating_add(1);
-                    if !entry.reported {
-                        log::warn!("{} could not be read: {e:#}", entry.which.describe());
-                        entry.reported = true;
-                    }
-                }
-            }
-            entry.due = entry.next_due(now);
+            let read = self.entries[at].collector.read();
+            changed |= self.record(at, read);
+            self.entries[at].due = self.entries[at].next_due(now);
         }
         changed
+    }
+
+    /// Take a reading from the thread that owns a source that can block, and say whether
+    /// the bar has anything new to draw.
+    ///
+    /// The same bookkeeping as a reading taken here: a source is stale or fresh, and says
+    /// so once rather than every interval, wherever it was read.
+    pub fn arrived(&mut self, which: &Which, read: Result<Reading>) -> bool {
+        match self.entries.iter().position(|e| &e.which == which) {
+            Some(at) => self.record(at, read),
+            None => false,
+        }
+    }
+
+    /// Keep what a read came to, and say whether it changes what is drawn.
+    fn record(&mut self, at: usize, read: Result<Reading>) -> bool {
+        let entry = &mut self.entries[at];
+        match read {
+            Ok(reading) => {
+                if entry.failures > 0 {
+                    log::info!("{} is reporting again", entry.which.describe());
+                }
+                entry.failures = 0;
+                entry.reported = false;
+                // Most of what a bar shows changes rarely: a disk that is still 41% full
+                // draws exactly what it drew a minute ago. Saying so lets the whole redraw
+                // be skipped, and saves replacing the reading as well.
+                if matches!(entry.readings.as_slice(), [old] if old.same(&reading)) {
+                    return false;
+                }
+                entry.readings = vec![reading];
+                true
+            }
+            Err(e) => {
+                // The last good reading stays on screen, marked as stale, rather than the
+                // module vanishing because a file was busy for one tick. A source that
+                // stays broken is already drawn as stale, so only the first failure is
+                // worth a redraw.
+                let changed = entry.readings.iter().any(|r| r.state != State::Error);
+                for reading in &mut entry.readings {
+                    reading.state = State::Error;
+                }
+                entry.failures = entry.failures.saturating_add(1);
+                if !entry.reported {
+                    log::warn!("{} could not be read: {e:#}", entry.which.describe());
+                    entry.reported = true;
+                }
+                changed
+            }
+        }
     }
 
     /// Read one source again at the next opportunity, whatever its interval said.
@@ -574,6 +635,67 @@ mod tests {
                 .check(which.fields())
                 .unwrap_or_else(|e| panic!("{} default format: {e:#}", which.name()));
         }
+    }
+
+    /// The two sources whose read can wait on something outside this machine are never
+    /// read on the bar's own thread: their readings arrive from a thread of their own,
+    /// and the registry only holds them.
+    #[test]
+    fn a_source_that_can_block_is_not_read_on_the_timer() {
+        let disk = Which::Disk("/".to_string());
+        assert!(disk.blocking() && disk.pushed());
+        let wifi = Which::Network(None);
+        assert!(wifi.blocking() && wifi.pushed());
+        // Everything else is a file the kernel fills in on the spot.
+        for which in all() {
+            assert_eq!(
+                which.blocking(),
+                matches!(which, Which::Disk(_) | Which::Network(_)),
+                "{} is classified wrongly",
+                which.describe()
+            );
+        }
+
+        let wanted = HashMap::from([(disk.clone(), Duration::from_secs(1))]);
+        let mut registry = Registry::new(&wanted);
+        assert!(!registry.tick(), "the timer has nothing to read");
+        assert!(registry.next_due().is_none(), "and nothing to wake up for");
+
+        // What the thread sends is kept, and counts the same way a timed reading does.
+        let reading = |v: f64| {
+            let mut fields = Fields::default();
+            fields.set(
+                "used",
+                crate::status::Value::Num {
+                    v,
+                    unit: crate::status::Unit::Percent,
+                },
+            );
+            Reading {
+                fields,
+                state: State::Idle,
+            }
+        };
+        assert!(
+            registry.arrived(&disk, Ok(reading(41.0))),
+            "a first reading"
+        );
+        assert!(
+            !registry.arrived(&disk, Ok(reading(41.0))),
+            "the same again"
+        );
+        assert!(
+            registry.arrived(&disk, Ok(reading(42.0))),
+            "and a different one"
+        );
+        assert!(
+            registry.arrived(&disk, Err(anyhow::anyhow!("the mount has gone"))),
+            "going stale is a change"
+        );
+        assert!(
+            !registry.arrived(&disk, Err(anyhow::anyhow!("still gone"))),
+            "staying stale is not"
+        );
     }
 
     /// A source that reads the same value again has nothing for the bar to redraw, and
