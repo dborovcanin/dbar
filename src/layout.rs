@@ -152,10 +152,21 @@ pub fn menu(
     let gutter = icon_size + style.padding * 0.5;
     let arrow = line * 0.4;
 
-    let widest = rows
+    // Cut to what the menu is allowed to be before anything is measured. A label is
+    // written by the application, not by dbar, and a long one used to be shaped whole and
+    // then drawn straight off the edge of the popup.
+    let room = style.max_width - (style.padding * 3.0 + gutter + arrow);
+    let labels: Vec<String> = rows
         .iter()
-        .filter(|row| !row.separator)
-        .map(|row| text.measure(&row.label))
+        .map(|row| match row.separator {
+            true => String::new(),
+            false => truncate(&row.label, room, text),
+        })
+        .collect();
+
+    let widest = labels
+        .iter()
+        .map(|label| text.measure(label))
         .fold(0.0f32, f32::max);
     let width = (style.padding * 2.0 + gutter + widest + style.padding + arrow)
         .min(style.max_width)
@@ -182,7 +193,7 @@ pub fn menu(
             separator: row.separator,
             highlight,
             highlight_color: style.highlight,
-            text: row.label.clone(),
+            text: labels[index].clone(),
             text_x,
             text_y: y + (height - line) / 2.0,
             foreground,
@@ -549,6 +560,19 @@ fn truncate(text: &str, budget: f32, measure: &mut dyn Measure) -> String {
     format!("{}{ELLIPSIS}", text[..cuts[best]].trim_end())
 }
 
+/// The most characters that are ever shaped to lay out one string.
+///
+/// The window below grows until the text is too wide to draw, which is the right question
+/// to ask of text that takes up room. Not everything does: a run of zero-width spaces is
+/// as wide as the empty string however much of it there is, and the window would grow to
+/// the length of whatever arrived. This is the backstop, and it is in characters because
+/// that is what shaping is charged in.
+///
+/// Four thousand is far past anything a bar can show - a 4K screen at the smallest
+/// readable size holds a few hundred - and small enough that the pathological case costs
+/// a millisecond rather than a second.
+const MOST_SHAPED: usize = 4096;
+
 /// As much of `text` as could possibly be drawn in `budget`, and whether that is all of it.
 ///
 /// Doubled from a small window until it overflows, so the work is proportional to what
@@ -567,7 +591,7 @@ fn window<'a>(text: &'a str, budget: f32, measure: &mut dyn Measure) -> (&'a str
         if end == text.len() {
             return (head, true);
         }
-        if measure.measure(head) > budget {
+        if take >= MOST_SHAPED || measure.measure(head) > budget {
             return (head, false);
         }
         take *= 2;
@@ -1847,6 +1871,30 @@ padding = 0
             .menu
     }
 
+    /// A menu row's label comes from the application, and the popup has a width the
+    /// config decided. A label longer than that used to be shaped whole and then drawn
+    /// straight off the edge.
+    #[test]
+    fn a_menu_label_longer_than_the_menu_is_cut_to_fit() {
+        let style = menu_style();
+        let rows = vec![menu_row(&"label ".repeat(4096))];
+        let frame = menu(&rows, &style, 16.0, 10.0, None, &mut Fixed);
+        assert!(
+            frame.width <= style.max_width,
+            "the menu is {} wide against a limit of {}",
+            frame.width,
+            style.max_width
+        );
+        let drawn = &frame.rows[0].text;
+        assert!(drawn.ends_with(ELLIPSIS), "{drawn:?} was not cut");
+        assert!(
+            (drawn.chars().count() as f32) < style.max_width,
+            "the label is still {} characters against a menu {} wide",
+            drawn.chars().count(),
+            style.max_width
+        );
+    }
+
     /// A menu is as wide as the longest thing it has to say, and every row is the same
     /// height so the pointer does not have to hunt for them.
     #[test]
@@ -1969,6 +2017,25 @@ padding = 0
         assert!(
             measure.0 <= 128,
             "measured a string of {} characters to draw 20 of them",
+            measure.0
+        );
+
+        // Text that takes up no room at all never overflows a budget, so the growing
+        // window would grow to whatever arrived. Zero-width spaces are the plain case,
+        // and a joined emoji sequence is the one that turns up by accident.
+        struct Weightless(usize);
+        impl Measure for Weightless {
+            fn measure(&mut self, text: &str) -> f32 {
+                self.0 = self.0.max(text.chars().count());
+                0.0
+            }
+        }
+        let empty_looking = "\u{200b}".repeat(64 * 1024);
+        let mut measure = Weightless(0);
+        truncate(&empty_looking, 20.0, &mut measure);
+        assert!(
+            measure.0 <= MOST_SHAPED,
+            "shaped {} characters of text that is no width at all",
             measure.0
         );
 
