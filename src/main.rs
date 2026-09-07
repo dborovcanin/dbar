@@ -233,9 +233,9 @@ fn main() -> Result<()> {
     // between, so they are taken off the timer before it is first set.
     if collectors {
         let (watch_tx, watch_rx) = calloop::channel::channel();
-        let covered = crate::collect::watch::spawn(watch_tx);
-        if !covered.is_empty() {
-            app.on_watching(&covered);
+        let watching = crate::collect::watch::spawn(watch_tx);
+        if watching.running {
+            app.on_watching(&watching.covered);
             let handle_for_timer = handle.clone();
             handle
                 .insert_source(watch_rx, move |event, _, app: &mut App| {

@@ -57,7 +57,7 @@ struct Uevents {
 ///
 /// A watch that cannot be set up is not an error: the source keeps its interval, which is
 /// what it would have had anyway.
-pub fn spawn(sender: calloop::channel::Sender<Event>) -> Vec<Which> {
+pub fn spawn(sender: calloop::channel::Sender<Event>) -> Watching {
     let mut attributes = Vec::new();
     let mut wanted = Vec::new();
     for which in Which::WATCHABLE {
@@ -103,7 +103,7 @@ pub fn spawn(sender: calloop::channel::Sender<Event>) -> Vec<Which> {
     };
 
     if attributes.is_empty() && uevents.is_none() {
-        return Vec::new();
+        return Watching::default();
     }
 
     // Only an attribute reports every change there is; a uevent keeps its interval.
@@ -112,12 +112,29 @@ pub fn spawn(sender: calloop::channel::Sender<Event>) -> Vec<Which> {
         .name("watch".to_string())
         .spawn(move || run(attributes, uevents, sender))
     {
-        Ok(_) => covered,
+        Ok(_) => Watching {
+            running: true,
+            covered,
+        },
         Err(e) => {
             log::warn!("watching needs a thread and could not have one: {e}");
-            Vec::new()
+            Watching::default()
         }
     }
+}
+
+/// What came of asking the kernel to report changes.
+///
+/// The two halves are not the same question. `running` says whether anything is being
+/// watched at all, and so whether the channel is worth listening to; `covered` says which
+/// sources no longer need an interval, which is only ever the ones watched through an
+/// attribute. A machine with no backlight but a battery has the first without the second,
+/// and taking one for the other threw its battery's uevents away.
+#[derive(Debug, Default)]
+pub struct Watching {
+    pub running: bool,
+    /// Sources whose every change is reported, so they need no interval at all.
+    pub covered: Vec<Which>,
 }
 
 /// Open an attribute and take its current value, which is what arms the notification.
