@@ -68,7 +68,7 @@ impl Wireless {
         self.receive(true, |payload| {
             let mut ifindex_here = None;
             let mut ssid = None;
-            for (kind, value) in attributes(&payload[GENL_HEADER..]) {
+            for (kind, value) in attributes(genl_body(payload)) {
                 match kind {
                     NL80211_ATTR_IFINDEX if value.len() >= 4 => {
                         ifindex_here =
@@ -101,7 +101,7 @@ impl Wireless {
 
         let mut found = None;
         self.receive(true, |payload| {
-            for (kind, value) in attributes(&payload[GENL_HEADER..]) {
+            for (kind, value) in attributes(genl_body(payload)) {
                 if kind != NL80211_ATTR_STA_INFO {
                     continue;
                 }
@@ -125,7 +125,7 @@ impl Wireless {
 
         let mut family = None;
         self.receive(false, |payload| {
-            for (kind, value) in attributes(&payload[GENL_HEADER..]) {
+            for (kind, value) in attributes(genl_body(payload)) {
                 if kind == CTRL_ATTR_FAMILY_ID && value.len() >= 2 {
                     family = Some(u16::from_ne_bytes([value[0], value[1]]));
                 }
@@ -194,23 +194,26 @@ impl Wireless {
                 if length < HEADER || length > rest.len() {
                     bail!("nl80211 sent a message that does not fit its own length");
                 }
+                let body = &rest[HEADER..length];
                 match kind {
                     NLMSG_DONE => return Ok(()),
                     NLMSG_ERROR => {
                         // The payload starts with the errno, negated. Zero is an ack.
-                        let code = i32::from_ne_bytes([
-                            rest[HEADER],
-                            rest[HEADER + 1],
-                            rest[HEADER + 2],
-                            rest[HEADER + 3],
-                        ]);
+                        //
+                        // Checked rather than assumed: this is bytes off a socket, and a
+                        // message that says it holds an error without holding one would
+                        // otherwise be read past its own end.
+                        let Some(code) = body.get(..4) else {
+                            bail!("nl80211 reported an error without saying what it was");
+                        };
+                        let code = i32::from_ne_bytes([code[0], code[1], code[2], code[3]]);
                         if code == 0 {
                             return Ok(());
                         }
                         return Err(std::io::Error::from_raw_os_error(-code))
                             .context("nl80211 refused the request");
                     }
-                    _ => take(&rest[HEADER..length]),
+                    _ => take(body),
                 }
                 // Messages are padded to four bytes, and the next one starts after that.
                 let step = length.div_ceil(4) * 4;
@@ -271,6 +274,15 @@ fn attribute(kind: u16, value: &[u8]) -> Vec<u8> {
 }
 
 /// Walk a run of attributes, skipping anything that does not fit.
+/// What follows the generic-netlink header in a message, which is where its attributes are.
+///
+/// A message shorter than its own header holds nothing rather than being read past its end:
+/// this is bytes off a socket, and slicing what is not there would take the bar down over a
+/// reply that only the kernel could have got wrong.
+fn genl_body(payload: &[u8]) -> &[u8] {
+    payload.get(GENL_HEADER..).unwrap_or_default()
+}
+
 fn attributes(mut rest: &[u8]) -> impl Iterator<Item = (u16, &[u8])> {
     std::iter::from_fn(move || {
         if rest.len() < 4 {
@@ -304,6 +316,19 @@ mod tests {
         let padded = attribute(1, b"12345");
         assert_eq!(padded.len(), 12);
         assert_eq!(u16::from_ne_bytes([padded[0], padded[1]]), 9);
+    }
+
+    /// Everything here is bytes off a socket, and the two places that read past a length
+    /// check were the two the kernel would have to get wrong for the bar to go down with
+    /// it. A truncated message is nothing to report, not something to crash over.
+    #[test]
+    fn a_message_shorter_than_its_own_header_holds_nothing() {
+        assert!(genl_body(&[]).is_empty());
+        assert!(genl_body(&[1, 2, 3]).is_empty());
+        assert!(genl_body(&[1, 2, 3, 4]).is_empty());
+        assert_eq!(genl_body(&[1, 2, 3, 4, 9, 9]), &[9, 9]);
+        // And what it hands over is walked without reading past it either.
+        assert_eq!(attributes(genl_body(&[0, 0, 0, 0, 1])).count(), 0);
     }
 
     #[test]
