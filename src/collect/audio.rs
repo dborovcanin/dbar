@@ -15,6 +15,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use pipewire as pw;
@@ -64,17 +65,61 @@ pub enum Command {
 /// anywhere else.
 pub type Commands = pw::channel::Sender<Command>;
 
+/// How long to wait before trying PipeWire again, and the longest that wait becomes.
+///
+/// A bar usually starts with the session, which is a race it can lose: PipeWire may not be
+/// up yet, and a volume module that gave up on the first refusal would stay empty until the
+/// bar was restarted. The wait doubles, so a server arriving a second late is picked up a
+/// second late, and one that is never coming is asked for once a minute.
+const FIRST_WAIT: Duration = Duration::from_secs(1);
+const LONGEST_WAIT: Duration = Duration::from_secs(60);
+
 /// Start listening to PipeWire, and report readings as they change.
 pub fn spawn(sender: calloop::channel::Sender<Reading>) -> Result<Commands> {
     let (commands, receiver) = pw::channel::channel::<Command>();
     std::thread::Builder::new()
         .name("audio".to_string())
-        .spawn(move || match run(sender, receiver) {
-            Ok(()) => log::info!("PipeWire has gone; the volume module keeps its last reading"),
-            Err(e) => log::warn!("volume is unavailable: {e:#}"),
+        .spawn(move || {
+            // Given back on every way out, so a connection that failed can be tried again
+            // with the same channel: the bar holds the other end of it and cannot be handed
+            // a new one.
+            let mut receiver = Some(receiver);
+            let mut wait = FIRST_WAIT;
+            loop {
+                match run(&sender, &mut receiver) {
+                    Ok(()) => {
+                        log::info!("PipeWire has gone; waiting for it to come back");
+                        wait = FIRST_WAIT;
+                    }
+                    Err(e) => log::warn!("volume is unavailable: {e:#}"),
+                }
+                // There is no volume to show while there is nobody to ask, and the last one
+                // seen is not it. This doubles as how the thread learns the bar has gone:
+                // the channel closes when it does, and there is nothing left to wait for.
+                if absent(&sender).is_err() {
+                    return;
+                }
+                std::thread::sleep(wait);
+                wait = (wait * 2).min(LONGEST_WAIT);
+            }
         })
         .context("spawning the audio thread")?;
     Ok(commands)
+}
+
+/// Say that there is no volume to report, which is what a bar without PipeWire has.
+fn absent(
+    sender: &calloop::channel::Sender<Reading>,
+) -> Result<(), std::sync::mpsc::SendError<Reading>> {
+    let mut fields = Fields::default();
+    for spec in FIELDS {
+        fields.set(spec.name, Field::Absent);
+    }
+    fields.set_primary("volume");
+    sender.send(Reading {
+        fields,
+        state: State::Idle,
+    })
 }
 
 /// The proxies and their listeners, kept alive for as long as the objects they stand for.
@@ -304,9 +349,14 @@ impl Sinks {
     }
 }
 
+/// Connect to PipeWire and stay in its loop until it goes away.
+///
+/// `commands` is taken only once there is a loop to attach it to, and put back before
+/// returning, so a connection that failed leaves the caller holding the channel it needs to
+/// try again.
 fn run(
-    sender: calloop::channel::Sender<Reading>,
-    commands: pw::channel::Receiver<Command>,
+    sender: &calloop::channel::Sender<Reading>,
+    commands: &mut Option<pw::channel::Receiver<Command>>,
 ) -> Result<()> {
     pw::init();
     let main_loop = pw::main_loop::MainLoopRc::new(None).context("creating the PipeWire loop")?;
@@ -323,7 +373,7 @@ fn run(
         default: None,
         by_id: HashMap::new(),
         cards: HashMap::new(),
-        sender,
+        sender: sender.clone(),
         last: Sent::Nothing,
     }));
 
@@ -367,14 +417,20 @@ fn run(
 
     // What the bar asks for arrives here rather than on the main thread, because the
     // connection may only be touched from the loop that owns it.
-    let _commands = {
+    // Taken now, when there is a loop to attach it to, and put back below. Nothing between
+    // the two can fail, so the caller always gets it back.
+    let receiver = commands
+        .take()
+        .context("the audio thread was started without a way to be asked for anything")?;
+    let attached = {
         let sinks = sinks.clone();
-        commands.attach(main_loop.loop_(), move |command| {
+        receiver.attach(main_loop.loop_(), move |command| {
             apply(&sinks, command);
         })
     };
 
     main_loop.run();
+    *commands = Some(attached.deattach());
     Ok(())
 }
 
