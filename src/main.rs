@@ -148,7 +148,7 @@ fn parse_args() -> Result<Option<Args>> {
     let mut config = None;
     let mut check = false;
     let mut fields: Option<Option<String>> = None;
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -168,22 +168,25 @@ fn parse_args() -> Result<Option<Args>> {
                 config = Some(PathBuf::from(path));
             }
             "--check-config" => check = true,
-            // The source is optional, and a following argument that starts with a dash is
-            // the next option rather than a source nobody would name that way.
+            // The source is optional, so the next argument is looked at before it is
+            // taken: one that starts with a dash is the next option rather than a source
+            // nobody would name that way, and it is left where it is to be parsed as one.
             "--fields" => {
-                let named = args.next();
-                match named {
-                    Some(name) if !name.starts_with('-') => fields = Some(Some(name)),
-                    Some(other) => {
-                        anyhow::bail!("--fields takes a source, not {other:?}\n\n{USAGE}")
-                    }
-                    None => fields = Some(None),
-                }
+                let named = match args.peek() {
+                    Some(next) if !next.starts_with('-') => args.next(),
+                    _ => None,
+                };
+                fields = Some(named);
             }
             other => anyhow::bail!("unknown argument {other:?}\n\n{USAGE}"),
         }
     }
 
+    // Each of these ends the run having answered one question, so being asked two is a
+    // mistake worth naming rather than one of them silently going unanswered.
+    if check && fields.is_some() {
+        anyhow::bail!("--check-config and --fields do different things\n\n{USAGE}");
+    }
     if let Some(only) = fields {
         print_fields(only.as_deref())?;
         return Ok(None);
