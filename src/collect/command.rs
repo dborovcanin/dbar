@@ -319,12 +319,15 @@ enum Ended {
 /// nothing and never exits is noticed instead of blocking the thread it runs on. This is
 /// the same `poll` the media and tray threads use to wait on a bus without going to sleep
 /// on it forever.
+/// The bytes are kept and decoded once at the end rather than read by read. A character
+/// outside ASCII is several bytes, a pipe splits where it likes, and decoding half of one
+/// turns it into replacement characters that no later read can put back together.
 fn read_until(stdout: &mut std::process::ChildStdout, deadline: Instant) -> std::io::Result<Ended> {
     use std::io::Read as _;
     use std::os::fd::AsRawFd as _;
 
     let fd = stdout.as_raw_fd();
-    let mut output = String::new();
+    let mut output: Vec<u8> = Vec::new();
     let mut buffer = [0u8; 4096];
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -352,12 +355,12 @@ fn read_until(stdout: &mut std::process::ChildStdout, deadline: Instant) -> std:
         }
         let read = stdout.read(&mut buffer)?;
         if read == 0 {
-            return Ok(Ended::Output(output));
+            return Ok(Ended::Output(String::from_utf8_lossy(&output).into_owned()));
         }
         if output.len() + read > OUTPUT_LIMIT {
             return Ok(Ended::Flooded);
         }
-        output.push_str(&String::from_utf8_lossy(&buffer[..read]));
+        output.extend_from_slice(&buffer[..read]);
     }
 }
 
@@ -603,6 +606,24 @@ mod tests {
             "waited {waited:?}, so the deadline did not cover the exit"
         );
         assert!(format!("{e:#}").contains("had not exited"), "{e:#}");
+    }
+
+    /// Output arrives in whatever pieces the pipe felt like, and a character outside ASCII
+    /// is several bytes. Decoding each read on its own turns one split character into two
+    /// replacement characters, which no amount of reading afterwards can repair.
+    #[test]
+    fn a_character_split_across_two_reads_survives() {
+        let output = super::run_to_end(
+            "sh",
+            &[
+                "-c".to_string(),
+                // The two bytes of "é", written either side of a pause.
+                "printf '\\303'; sleep 0.1; printf '\\251\\n'".to_string(),
+            ],
+            std::time::Duration::from_secs(10),
+        )
+        .expect("a command that prints in pieces");
+        assert_eq!(super::last_word(&output), Some("\u{e9}"));
     }
 
     /// The deadline must not cut short a command that answers in time, however slowly it
