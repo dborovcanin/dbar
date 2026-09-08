@@ -14,7 +14,7 @@
 
 use std::process::{Child, Command};
 use std::sync::Once;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
 use std::os::unix::process::CommandExt as _;
@@ -36,11 +36,29 @@ static GROUPS: [AtomicI32; AT_ONCE] = [const { AtomicI32::new(0) }; AT_ONCE];
 /// afterwards was not going to leave, and the bar is not going to wait for it.
 const GRACE: Duration = Duration::from_millis(100);
 
+/// Whether the bar is on its way out, and the table has become the way out's to read.
+///
+/// The stopping is not instant - a program is asked before it is made to - and the threads
+/// that run programs go on running meanwhile. One of them whose program answers the polite
+/// signal notices, tidies up and gives its place back, and the group that place named is
+/// then nothing to the signal that was coming for it: what the program had forked, which
+/// may be precisely what did not answer, would be left behind by the tidying up. So from
+/// the moment the stopping starts, nobody gives a place back.
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the bar is stopping, so a caller knows not to tidy up after itself.
+pub fn stopping() -> bool {
+    STOPPING.load(Ordering::Acquire)
+}
+
 /// A program's place in the table, given up when the program is done with.
 pub struct Listed(Option<usize>);
 
 impl Drop for Listed {
     fn drop(&mut self) {
+        if stopping() {
+            return;
+        }
         if let Some(at) = self.0 {
             GROUPS[at].store(0, Ordering::Release);
         }
@@ -107,6 +125,9 @@ pub fn stop(pid: u32, signal: i32) {
 ///
 /// Nothing here but atomics, `kill` and `nanosleep`, all of which a signal handler may use.
 pub fn stop_all() {
+    // Before anything is signalled, so no thread can give back a place between the asking
+    // and the telling.
+    STOPPING.store(true, Ordering::Release);
     let mut any = false;
     for slot in &GROUPS {
         let pid = slot.load(Ordering::Acquire);
@@ -214,7 +235,74 @@ mod tests {
     /// stops everything would otherwise stop a program another test was in the middle of.
     pub fn alone() -> std::sync::MutexGuard<'static, ()> {
         static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        ONE.lock().unwrap_or_else(|held| held.into_inner())
+        let held = ONE.lock().unwrap_or_else(|held| held.into_inner());
+        // A test that stopped everything left the table saying the bar is going, and the
+        // places of what it stopped still in it. The next one starts from nothing.
+        super::STOPPING.store(false, std::sync::atomic::Ordering::Release);
+        for slot in &super::GROUPS {
+            slot.store(0, std::sync::atomic::Ordering::Release);
+        }
+        held
+    }
+
+    /// The stopping is not instant, and the threads that run programs do not stop with it.
+    /// One whose program answers the polite signal notices, tidies up and gives its place
+    /// back - and what that program forked, which may be exactly what did not answer, was
+    /// then nothing to the signal that was coming for it.
+    #[test]
+    fn a_thread_finishing_mid_stop_does_not_save_what_it_started() {
+        let _alone = alone();
+        let file = std::env::temp_dir().join(format!("dbar-race-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        // The shell answers the polite signal; what it forked does not.
+        let script = format!(
+            "sh -c 'trap \"\" TERM; echo $$ > {}; while true; do sleep 1; done' & wait",
+            file.display()
+        );
+        let mut command = std::process::Command::new("sh");
+        command
+            .arg("-c")
+            .arg(script)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let (mut child, listed) = super::spawn(&mut command).expect("a shell to run");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(&file)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell never forked"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let _ = std::fs::remove_file(&file);
+
+        // The thread that was running it, finishing in the middle of the stopping.
+        let worker = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            drop(listed);
+        });
+
+        super::stop_all();
+        worker.join().expect("the worker thread");
+
+        // SAFETY: signal 0 asks whether the pid exists and sends nothing.
+        let gone = |pid| unsafe { libc::kill(pid, 0) } != 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !gone(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "a place given back mid-stop took the second signal with it"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     /// The loop can end because it was asked to and it can end because dispatching failed,

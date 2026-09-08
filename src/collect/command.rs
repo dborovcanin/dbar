@@ -33,6 +33,11 @@
 //! Nothing here inserts a shell. The command is argv and is executed directly, so a
 //! pipeline is something you ask for - `["sh", "-c", "..."]` - rather than something dbar
 //! decides to give you.
+//!
+//! A run owns a process group, and nothing it started outlives it. A script that forks and
+//! returns would otherwise leave that fork behind on every interval, with nothing left to
+//! notice: a bar cannot follow what its commands orphan. Something meant to outlive the
+//! run is a click's job - `on_click` starts a program and lets go of it - or `setsid`.
 
 use std::io::BufReader;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -261,6 +266,7 @@ fn run_to_end(program: &str, args: &[String], timeout: Duration) -> Result<Strin
     // Listed for as long as it runs, so a bar that is stopped stops it too.
     let (mut child, _listed) = crate::proc::spawn(&mut configured(program, args))
         .with_context(|| format!("spawning {program}"))?;
+    let group = child.id();
     let mut stdout = child.stdout.take().context("stdout was piped")?;
 
     // One deadline for the whole run, not one for the reading. A command that closes its
@@ -287,6 +293,14 @@ fn run_to_end(program: &str, args: &[String], timeout: Duration) -> Result<Strin
         reap(&mut child);
         anyhow::bail!("{program} had said everything but had not exited after {timeout:?}");
     };
+    // The run is over, and so is whatever it left running. A command that forks and
+    // returns - `something &`, a pipeline whose head exits first - would otherwise leave
+    // that behind at every interval, orphaned into a group nothing is watching any more,
+    // and a bar stopping later has no way left to find it.
+    //
+    // The leader has been waited on, but its id is the group's, and the kernel keeps a
+    // group id while the group has members: this reaches what is left, or nothing.
+    crate::proc::stop(group, libc::SIGKILL);
     if !status.success() {
         anyhow::bail!("{program} exited with {status}");
     }
@@ -453,6 +467,13 @@ fn reap(child: &mut Child) {
     // its id, which is its group's, has not been given to anything else.
     crate::proc::stop(child.id(), libc::SIGKILL);
     let _ = child.kill();
+    // While the bar is stopping, that id is a group the way out still has a signal for,
+    // and waiting here is what would let the kernel hand the id to somebody else first.
+    // Nothing is leaked by not waiting: the bar is about to be gone, and what it leaves
+    // behind is somebody else's to collect.
+    if crate::proc::stopping() {
+        return;
+    }
     let _ = child.wait();
 }
 
@@ -693,6 +714,47 @@ mod tests {
         drop(listed);
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    /// A command that forks and returns leaves that fork behind, and a periodic one does it
+    /// again every interval. Nothing is left watching it either: its parent is gone, so it
+    /// belongs to no group the bar still knows about, and no later stopping can find it.
+    #[test]
+    fn what_a_run_forks_does_not_outlive_the_run() {
+        let _alone = crate::proc::alone();
+        let file = std::env::temp_dir().join(format!("dbar-fork-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        // Standard output goes elsewhere, so the run ends when the shell does rather than
+        // when the fork does - which is what leaves the fork behind.
+        let script = format!(
+            "sh -c 'trap \"\" TERM; exec sleep 30' >/dev/null 2>&1 & echo $! > {}; echo done",
+            file.display()
+        );
+        let output = super::run_to_end(
+            "sh",
+            &["-c".to_string(), script],
+            std::time::Duration::from_secs(10),
+        )
+        .expect("a command that forks and returns");
+        assert_eq!(super::last_word(&output), Some("done"));
+
+        let pid: i32 = std::fs::read_to_string(&file)
+            .expect("the fork wrote its pid")
+            .trim()
+            .parse()
+            .expect("a pid is a number");
+        let _ = std::fs::remove_file(&file);
+
+        // SAFETY: signal 0 asks whether the pid exists and sends nothing.
+        let gone = |pid| unsafe { libc::kill(pid, 0) } != 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !gone(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "what the run forked outlived it"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// Asking is not telling. A script may trap the signal and take its time, or ignore it
