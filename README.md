@@ -13,8 +13,11 @@ while something is.*
 There is no polling loop and no animation tick: the bar redraws when something
 it shows has changed and sleeps otherwise, and one shared timer serves every
 collector that is on an interval, so adding a module adds no wake-up. On the
-machine this was written on it holds about 9 MB of memory, and drawing the bar
-above at 1920 wide takes around 95 microseconds.
+machine this was written on, the bar above holds about 20 MB resident - 5 MB of
+that its own heap, the rest fonts it has mapped - and costs about a fifth of one
+percent of a core to leave running. Laying a bar out takes around 4 microseconds
+and painting it at 1920 wide around 110. [What that comes to against the
+alternatives](#what-it-costs-to-leave-running), measured rather than asserted.
 
 Nothing else has to be installed. The collectors are dbar's own, so a config
 that names no external provider starts no child process at all.
@@ -49,7 +52,7 @@ opt-in, and a bar that does not name one never starts one.
 git clone https://github.com/dborovcanin/dbar && cd dbar
 make prod                                          # optimized build
 ./target/release/dbar -c examples/advanced.toml    # try one of the example bars
-make install                                       # keep it: ~/.local/bin
+sudo make install                                  # keep it: /usr/bin/dbar
 ```
 
 ### What it needs
@@ -87,8 +90,9 @@ exec_always pkill -x dbar; dbar
 ```
 
 `dbar` with no arguments reads `~/.config/dbar/config.toml`, and falls back to
-a built-in default if there is none. `make install` takes `PREFIX=` if
-`~/.local/bin` is not where you want it.
+a built-in default if there is none. `sudo make install` puts the binary in
+`/usr/bin`; `PREFIX=` moves it, so `make install PREFIX=$HOME/.local` needs no
+root at all.
 
 ## What works
 
@@ -157,12 +161,88 @@ no compositor needed; `dbar --fields` prints what every source publishes, and
 Not yet implemented: Bluetooth. See [dbar-native.md](dbar-native.md)
 for where this is going.
 
+## What it costs to leave running
+
+Idle should cost nothing, and the only way to know is to measure it against
+what a Sway user would otherwise run. All three bars below were up at the same
+time, on the same screen, showing the same things:
+
+| idle                  | resident  | heap       | CPU        | processes | threads |
+| --------------------- | --------- | ---------- | ---------- | --------- | ------- |
+| **dbar**              | **21 MB** | **4.6 MB** | **0.21 %** | **1**     | 10      |
+| swaybar + i3status-rs | 62 MB     | 14.4 MB    | 0.51 %     | 2         | 9       |
+| Waybar                | 76 MB     | 17.9 MB    | 0.75 %     | 1         | 25      |
+
+CPU is a share of one core, averaged over three consecutive two-minute windows;
+the spread across those windows was 0.19–0.23 % for dbar, 0.49–0.53 % for
+swaybar and 0.63–0.85 % for Waybar. Resident memory is `VmRSS`, which counts the
+font files and shared libraries a bar has mapped; heap is `RssAnon`, which is
+what it allocated for itself. Both are worth knowing and they answer different
+questions - the first is what the machine gives up to have a bar on screen, the
+second is what the bar is actually holding.
+
+Then the same three over two minutes of ordinary use - a pointer crossing the
+bars, modules hovered and clicked, workspaces switched:
+
+| in use                | resident    | heap       | CPU        |
+| --------------------- | ----------- | ---------- | ---------- |
+| **dbar**              | **21.5 MB** | **5.0 MB** | **0.35 %** |
+| swaybar + i3status-rs | 62.5 MB     | 14.5 MB    | 0.82 %     |
+| Waybar                | 81 MB       | 19.0 MB    | 1.16 %     |
+
+And what each one is before it starts:
+
+|                       | binary        | shared libraries |
+| --------------------- | ------------- | ---------------- |
+| **dbar**              | **6.9 MB**    | **5**            |
+| swaybar + i3status-rs | 0.1 + 17.4 MB | 46 / 29          |
+| Waybar                | 2.1 MB        | 116              |
+
+Waybar's binary is the smallest of the three and its dependency list is the
+longest, which is the same fact twice: it is a GTK application, so most of it is
+libraries the binary does not carry. dbar links five - libc, libm, libgcc,
+xkbcommon and PipeWire - and carries the rest.
+
+### How this was measured
+
+On SwayFX 0.6 (Sway 1.12), a Ryzen 7 PRO 5850U, one 2560x1440 output at scale 1,
+with all three bars running simultaneously so that no run got a quieter machine
+than another. CPU is `utime + stime` from `/proc/PID/stat` differenced across the
+window; memory is read from `/proc/PID/status` at the end of it. Both bars that
+run helpers are counted whole - swaybar plus the `i3status-rs` it starts.
+
+dbar ran [examples/advanced.toml](examples/advanced.toml): fifteen modules -
+workspaces, binding mode, window title, media, weather, tray, cpu, memory,
+temperature, keyboard layout, network, volume, brightness, battery and the clock.
+
+Waybar ran a configuration written to match it module for module, against
+Waybar 0.15.0. swaybar ran against i3status-rs 0.36.1 with eleven blocks -
+weather, music, cpu, memory, temperature, keyboard layout, net, battery,
+backlight, sound and time - with swaybar itself drawing the workspaces, the
+binding mode and the tray. That is fourteen things rather than fifteen: it has
+no window title, so it is doing slightly *less* work than the other two, not
+more.
+
+The weather module is a script fetching from a web service in all three, on the
+same interval, so none of them is being charged for somebody else's network.
+
+The idle numbers are three windows each and tight enough to trust. The in-use
+row is a single human pass rather than a synthetic one, which makes it
+indicative rather than statistical: it is one person using the bars for two
+minutes, and every bar got the same two minutes.
+
+None of this makes dbar better at what a bar is for. It reads what it shows
+itself, from `/proc`, `/sys`, netlink and PipeWire, and draws it with a
+rasteriser and a layout model that has no widget tree in it - and those two
+decisions are most of the difference in the tables above.
+
 ## Build
 
 ```sh
-make          # debug build, fast
-make prod     # optimized build
-make install  # installs to ~/.local/bin (override with PREFIX=)
+make               # debug build, fast
+make prod          # optimized build
+sudo make install  # installs /usr/bin/dbar (override with PREFIX=)
+sudo make uninstall
 ```
 
 ## Run
