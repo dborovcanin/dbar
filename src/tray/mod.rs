@@ -17,6 +17,7 @@ pub mod menu;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
 
@@ -255,8 +256,13 @@ struct Tray {
 ///
 /// Finding a themed icon walks every installed theme, and a miss walks all of them to the
 /// end - which is the case that repeats, because an application whose icon is not installed
-/// announces it again on every property change. The answers are kept, so the walk happens
-/// once per name for as long as the bar runs.
+/// announces it again on every property change. The answers are kept, so a burst of
+/// announcements costs one walk rather than one each.
+///
+/// A miss is kept differently from a find. An application may name its icon before the file
+/// is there - artwork installed with it, a theme directory it is still writing - and a miss
+/// remembered for good would outlive the race and leave the item blank until dbar restarts.
+/// So a miss is looked for again, but not at once and not for ever.
 ///
 /// Bounded, because the names come off the bus and dbar does not decide how many there are.
 /// A live item's artwork is shared with the item itself, so a cached entry for something on
@@ -264,16 +270,34 @@ struct Tray {
 #[derive(Default)]
 struct Icons {
     /// Oldest first, so the one to drop is the one at the front.
-    entries: Vec<(Named, Option<Arc<Raster>>)>,
+    entries: Vec<Icon>,
 }
 
 /// What an application asked for: the icon's name, and the directory it offered of its own.
 type Named = (String, Option<String>);
 
+/// One answer, and what it cost to find out.
+struct Icon {
+    key: Named,
+    found: Option<Arc<Raster>>,
+    /// When the theme was last walked for it, and how many times a miss has sent us back.
+    looked: Instant,
+    tries: u8,
+}
+
 impl Icons {
     /// How many resolved names to remember. Enough for every tray anyone runs, and small
     /// enough that a linear scan is the cheapest way to search it.
     const LIMIT: usize = 32;
+
+    /// How long a miss stands before the theme is walked for that name again. Long enough
+    /// that an application announcing its icon on every property change pays for one walk,
+    /// short enough that artwork appearing a moment after its name is picked up.
+    const RETRY: Duration = Duration::from_secs(5);
+
+    /// How many times one name may send us back to the theme. An icon that is not installed
+    /// is not going to be, and the walk is not free.
+    const TRIES: u8 = 3;
 
     /// The artwork for a name, asking the icon theme only if it has not been asked before.
     ///
@@ -292,20 +316,35 @@ impl Icons {
         })
     }
 
-    /// The answer for one key, worked out only if it is not already known.
+    /// The answer for one key, worked out only if it is not already known - or if what is
+    /// known is a miss that has earned another look.
     fn remembered(
         &mut self,
         key: Named,
         find: impl FnOnce() -> Option<Arc<Raster>>,
     ) -> Option<Arc<Raster>> {
-        if let Some((_, found)) = self.entries.iter().find(|(k, _)| *k == key) {
-            return found.clone();
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.key == key) {
+            if entry.found.is_some()
+                || entry.tries >= Self::TRIES
+                || entry.looked.elapsed() < Self::RETRY
+            {
+                return entry.found.clone();
+            }
+            entry.found = find();
+            entry.looked = Instant::now();
+            entry.tries += 1;
+            return entry.found.clone();
         }
         let found = find();
         if self.entries.len() >= Self::LIMIT {
             self.entries.remove(0);
         }
-        self.entries.push((key, found.clone()));
+        self.entries.push(Icon {
+            key,
+            found: found.clone(),
+            looked: Instant::now(),
+            tries: 1,
+        });
         found
     }
 }
@@ -1036,6 +1075,59 @@ mod tests {
                 .is_none()
         );
         assert_eq!(icons.entries.len(), 1);
+    }
+
+    /// A name that resolves to nothing now may resolve later: an application can announce
+    /// its icon before the file it names is there - artwork installed alongside it, or a
+    /// theme directory it is still writing. A miss that stood for ever left the item blank
+    /// until dbar restarted.
+    #[test]
+    fn a_missing_icon_is_looked_for_again_but_not_for_ever() {
+        let art = || {
+            Some(Arc::new(Raster {
+                width: 1,
+                height: 1,
+                pixels: vec![0, 0, 0, 0],
+            }))
+        };
+        // What the theme walk would have cost, without walking anything.
+        let look = |icons: &mut Icons, asked: &mut usize, found: Option<Arc<Raster>>| {
+            icons.remembered(("late".to_string(), None), || {
+                *asked += 1;
+                found
+            })
+        };
+        // Time passing, without the test taking that long.
+        let age = |icons: &mut Icons| {
+            for entry in &mut icons.entries {
+                entry.looked -= Icons::RETRY;
+            }
+        };
+
+        let mut icons = Icons::default();
+        let mut asked = 0;
+        assert!(look(&mut icons, &mut asked, None).is_none());
+        // Inside the window the miss stands, however often the item announces itself.
+        assert!(look(&mut icons, &mut asked, art()).is_none());
+        assert_eq!(asked, 1, "the window did not hold");
+        // Once it has passed, the name is looked for again - and the artwork that turned
+        // up in the meantime is found.
+        age(&mut icons);
+        assert!(look(&mut icons, &mut asked, art()).is_some());
+        assert_eq!(asked, 2);
+        // What was found stays found, and costs nothing to ask for again.
+        age(&mut icons);
+        assert!(look(&mut icons, &mut asked, None).is_some());
+        assert_eq!(asked, 2);
+
+        // An icon that is not installed is not going to be, so the looking has an end.
+        let mut icons = Icons::default();
+        let mut asked = 0;
+        for _ in 0..Icons::TRIES + 2 {
+            look(&mut icons, &mut asked, None);
+            age(&mut icons);
+        }
+        assert_eq!(asked, Icons::TRIES as usize);
     }
 
     /// The spec says an application passes its bus name; several pass the object path
