@@ -177,6 +177,10 @@ const QUEUED_CLICKS: usize = 32;
 
 pub struct I3BarProvider {
     child: Child,
+    /// Its place among the programs dbar is running, held for as long as it runs so a
+    /// signalled bar stops it and whatever it started - a provider is somebody else's
+    /// program, and i3status-rs and py3status both shell out for what they cannot read.
+    _listed: crate::proc::Listed,
     /// The way to the thread that writes to the provider's standard input.
     ///
     /// Writing there blocks once the pipe is full, and a provider that has stopped
@@ -193,14 +197,15 @@ impl I3BarProvider {
         cfg: &config::I3Bar,
         sender: calloop::channel::SyncSender<StatusEvent>,
     ) -> Result<I3BarProvider> {
-        let mut child = Command::new(&cfg.command)
-            .args(&cfg.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            // Leave stderr attached so provider diagnostics reach our own log.
-            .stderr(Stdio::inherit())
-            .spawn()
-            .with_context(|| format!("spawning status command {:?}", cfg.command))?;
+        let (mut child, listed) = crate::proc::spawn(
+            Command::new(&cfg.command)
+                .args(&cfg.args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                // Leave stderr attached so provider diagnostics reach our own log.
+                .stderr(Stdio::inherit()),
+        )
+        .with_context(|| format!("spawning status command {:?}", cfg.command))?;
 
         let stdout = child.stdout.take().expect("stdout was piped");
         let stdin = child.stdin.take();
@@ -224,6 +229,7 @@ impl I3BarProvider {
 
         Ok(I3BarProvider {
             child,
+            _listed: listed,
             clicks,
             accepts_clicks: false,
         })
@@ -297,6 +303,9 @@ impl Drop for I3BarProvider {
         // Close stdin first so a well-behaved provider exits on its own: the writer thread
         // ends when this sender goes, and the pipe closes with it.
         self.clicks = None;
+        // Then the whole group, since what a provider started is not the provider: both of
+        // the ones anybody runs shell out for what they cannot read themselves.
+        crate::proc::stop(self.child.id(), libc::SIGKILL);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
