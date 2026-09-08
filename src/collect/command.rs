@@ -37,7 +37,8 @@
 use std::io::BufReader;
 use std::os::unix::process::CommandExt as _;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Once, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
@@ -97,6 +98,7 @@ pub fn spawn(
     pages: bool,
     timeout: Duration,
 ) -> Result<Option<super::Trigger>> {
+    stop_when_signalled();
     let (program, rest) = argv
         .split_first()
         .context("a command module names no command")?;
@@ -262,6 +264,8 @@ fn run_to_end(program: &str, args: &[String], timeout: Duration) -> Result<Strin
     let mut child = configured(program, args)
         .spawn()
         .with_context(|| format!("spawning {program}"))?;
+    // Listed for as long as it runs, so a bar that is stopped stops it too.
+    let _listed = Listed::add(child.id());
     let mut stdout = child.stdout.take().context("stdout was piped")?;
 
     // One deadline for the whole run, not one for the reading. A command that closes its
@@ -374,6 +378,9 @@ fn run_once(
     let mut child = configured(program, args)
         .spawn()
         .with_context(|| format!("spawning {program}"))?;
+    // A streaming command runs for as long as the bar does, which makes it the one most
+    // likely to be running when the bar is stopped.
+    let _listed = Listed::add(child.id());
 
     let stdout = child.stdout.take().context("stdout was piped")?;
     for line in crate::lines::capped(BufReader::new(stdout)) {
@@ -404,6 +411,91 @@ fn run_once(
     }
     reap(&mut child);
     Ok(())
+}
+
+/// How many commands can be running at once and still be stopped by hand.
+///
+/// A config with more command modules than this is not a thing anybody has; the ones past
+/// it keep the parent-death signal, which is what every command had before.
+const AT_ONCE: usize = 32;
+
+/// The process group of every command running now, or zero for a place nobody is using.
+///
+/// A fixed set of atomics rather than a list behind a lock, because the place this most
+/// needs to be read from is a signal handler - dbar is ended with a signal far more often
+/// than it is ended politely - and a handler may not take a lock.
+static GROUPS: [AtomicI32; AT_ONCE] = [const { AtomicI32::new(0) }; AT_ONCE];
+
+/// A command's place in that table, given up when the command is done.
+struct Listed(Option<usize>);
+
+impl Listed {
+    fn add(pid: u32) -> Listed {
+        let pid = pid as i32;
+        for (at, slot) in GROUPS.iter().enumerate() {
+            if slot
+                .compare_exchange(0, pid, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Listed(Some(at));
+            }
+        }
+        log::debug!("more than {AT_ONCE} commands are running; one will outlive the bar");
+        Listed(None)
+    }
+}
+
+impl Drop for Listed {
+    fn drop(&mut self) {
+        if let Some(at) = self.0 {
+            GROUPS[at].store(0, Ordering::Release);
+        }
+    }
+}
+
+/// Stop every command that is running, and everything each of them started.
+///
+/// The parent-death signal reaches the command itself and nothing it forked, so a script
+/// that is a shell leaves its pipeline behind when the bar goes. A command is its own
+/// process group, so this is one signal each.
+///
+/// Nothing here but atomics and `kill`, both of which a signal handler may use.
+pub fn stop_all() {
+    for slot in &GROUPS {
+        let pid = slot.swap(0, Ordering::AcqRel);
+        if pid > 0 {
+            // SAFETY: a negative pid names a process group, and this one is a command's
+            // own - `process_group(0)` made it the leader of a group of its own.
+            unsafe {
+                libc::kill(-pid, libc::SIGTERM);
+            }
+        }
+    }
+}
+
+/// Arrange for the running commands to be stopped when the bar is signalled.
+///
+/// dbar ends when something tells it to: a Ctrl-C, a session shutting down, `pkill dbar`.
+/// A command used to share dbar's own process group, so a Ctrl-C reached it and everything
+/// it had forked; one in a group of its own has to be told separately, and nothing at all
+/// runs on the way out of a signal that is not handled.
+fn stop_when_signalled() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        for number in [libc::SIGTERM, libc::SIGINT, libc::SIGHUP] {
+            // SAFETY: the handler swaps atomics and calls kill, which is all a handler is
+            // allowed to do, and then lets the signal do what it would have done anyway.
+            let installed = unsafe {
+                signal_hook::low_level::register(number, move || {
+                    stop_all();
+                    let _ = signal_hook::low_level::emulate_default_handler(number);
+                })
+            };
+            if let Err(e) = installed {
+                log::warn!("commands will outlive a signalled bar: {e}");
+            }
+        }
+    });
 }
 
 /// A command set up the way both ways of running one need it.
@@ -584,6 +676,14 @@ fn state_of(word: &str) -> Option<State> {
 
 #[cfg(test)]
 mod tests {
+    /// One command-spawning test at a time.
+    ///
+    /// They share the table of what is running, and `stop_all` empties it, so a test that
+    /// stops everything would otherwise stop a command another test was in the middle of.
+    fn alone() -> std::sync::MutexGuard<'static, ()> {
+        static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ONE.lock().unwrap_or_else(|held| held.into_inner())
+    }
 
     /// A script that never finishes is stopped rather than waited on. Without this the
     /// thread is held forever and the module sits in front of a spinner - and a spinner
@@ -591,6 +691,7 @@ mod tests {
     /// one thing this bar is not supposed to do.
     #[test]
     fn a_command_that_never_answers_is_stopped() {
+        let _alone = alone();
         let started = std::time::Instant::now();
         let result = super::run_to_end(
             "sh",
@@ -612,6 +713,7 @@ mod tests {
     /// own, so a command that closed its output and then hung held the thread anyway.
     #[test]
     fn a_command_that_closes_its_output_and_stays_is_stopped() {
+        let _alone = alone();
         let started = std::time::Instant::now();
         let result = super::run_to_end(
             "sh",
@@ -632,6 +734,7 @@ mod tests {
     /// accumulates until the machine notices.
     #[test]
     fn a_command_that_outlives_its_deadline_takes_its_children_with_it() {
+        let _alone = alone();
         let file = std::env::temp_dir().join(format!("dbar-reap-{}", std::process::id()));
         let _ = std::fs::remove_file(&file);
         // The grandchild writes its own pid down and then becomes the sleep, so the pid
@@ -669,11 +772,60 @@ mod tests {
         }
     }
 
+    /// The bar is stopped far more often than it stops itself, and the parent-death signal
+    /// reaches the command alone - not the pipeline a shell forked from it. Those used to
+    /// be reached because the command shared dbar's process group; a command in a group of
+    /// its own has to be stopped on the way out.
+    #[test]
+    fn stopping_the_bar_stops_what_a_command_started() {
+        let _alone = alone();
+        let file = std::env::temp_dir().join(format!("dbar-stop-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        let script = format!("sh -c 'echo $$ > {}; exec sleep 30' & wait", file.display());
+        let mut child = super::configured("sh", &["-c".to_string(), script])
+            .spawn()
+            .expect("a shell to run");
+        let listed = super::Listed::add(child.id());
+
+        // The grandchild says who it is, then becomes the sleep, so the pid stays that of
+        // something still running when the bar goes.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let pid = loop {
+            if let Ok(text) = std::fs::read_to_string(&file)
+                && let Ok(pid) = text.trim().parse::<i32>()
+            {
+                break pid;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the shell never forked"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let _ = std::fs::remove_file(&file);
+
+        super::stop_all();
+        // SAFETY: signal 0 asks whether the pid exists and sends nothing.
+        let gone = |pid| unsafe { libc::kill(pid, 0) } != 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !gone(pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "what the command started outlived the bar"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        drop(listed);
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     /// Output arrives in whatever pieces the pipe felt like, and a character outside ASCII
     /// is several bytes. Decoding each read on its own turns one split character into two
     /// replacement characters, which no amount of reading afterwards can repair.
     #[test]
     fn a_character_split_across_two_reads_survives() {
+        let _alone = alone();
         let output = super::run_to_end(
             "sh",
             &[
@@ -691,6 +843,7 @@ mod tests {
     /// gets around to it.
     #[test]
     fn a_command_that_answers_in_time_is_left_alone() {
+        let _alone = alone();
         let output = super::run_to_end(
             "sh",
             &["-c".to_string(), "sleep 0.1; echo 42".to_string()],
@@ -704,6 +857,7 @@ mod tests {
     /// command to finish rather than taking whatever the first read happened to catch.
     #[test]
     fn output_written_in_pieces_is_read_whole() {
+        let _alone = alone();
         let output = super::run_to_end(
             "sh",
             &[

@@ -524,5 +524,8 @@ fn main() -> Result<()> {
         app.draw_if_needed();
     }
 
+    // A command outlives the thread that was reading it, and what a command forked outlives
+    // the command, so the last thing the bar does is take them with it.
+    crate::collect::command::stop_all();
     Ok(())
 }
