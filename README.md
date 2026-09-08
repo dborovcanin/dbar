@@ -125,7 +125,7 @@ a built-in default if there is none. `make install` takes `PREFIX=` if
   own, and the wheel scrolls between them — three cities from one fetch, in one
   module, with one format
 - `signal = N`: read a source again on SIGRTMIN+N
-- `$now.time(tz:'Asia/Tokyo')`: a clock about somewhere else, checked against the
+- `$now.time(f:'%R',tz:'Asia/Tokyo')`: a clock about somewhere else, checked against the
   machine's own tz database when the config is read, and two of them in one
   format is two zones side by side off one reading
 - `$app_id` and `$class` beside `$title` on a window module, so a rule can give

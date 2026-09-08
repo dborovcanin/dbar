@@ -517,13 +517,13 @@ who want an external provider point `[i3bar] args` at their own file.
 
 Each phase ends with the bar working. No phase leaves a broken tree.
 
-**Where this stands.** P0 through P4 are done, and so is most of what follows.
+**Where this stands.** P0 through P5 are done, and so is most of what follows.
 What is left of each:
 
-- **P5 — Backend seam.** `Frame` is positioned geometry and colour, and icons and
-  separators are described without reference to the rasteriser. `render.rs` still
-  reads `Config` for the bar background and radii, which is the last thing between
-  the renderer and being replaceable.
+- **P5 — Backend seam.** Done. `Frame` is positioned geometry and colour, down to
+  the bar's own ground and corner radii, and icons and separators are described
+  without reference to the rasteriser. `render_to_buffer` takes no config, so a
+  different backend is a matter of reading `Frame` differently.
 - **P6 — Event-driven sources.** Audio through PipeWire and the player through
   MPRIS both run on worker threads feeding a `calloop` channel, as does the tray.
   The battery is read from sysfs on the kernel's uevent rather than through
