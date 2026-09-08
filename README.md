@@ -345,7 +345,7 @@ centre where the eye finds it without looking.
 | [weather.sh](examples/weather.sh)           | a `command` module's program, a page per city          |
 | [sway_calendar.sh](examples/sway_calendar.sh) | three months in a floating window, for the clock's click |
 
-The same fifteen modules arranged seven other ways - same readings, same
+The same fifteen modules arranged six other ways - same readings, same
 intervals, same clicks, a different bar:
 
 |                                                             |                                                       |
@@ -355,7 +355,6 @@ intervals, same clicks, a different bar:
 | [gruvbox-ribbon.toml](examples/gruvbox-ribbon.toml)         | groups joined into two ribbons, colours blending      |
 | [latte-panel.toml](examples/latte-panel.toml)               | Catppuccin Latte, opaque and light, square with notches |
 | [tokyonight-capsules.toml](examples/tokyonight-capsules.toml) | Tokyo Night, a capsule per reading                    |
-| [everforest-desk.toml](examples/everforest-desk.toml)       | Everforest along the bottom, grouped by what it is for |
 | [rosepine-curves.toml](examples/rosepine-curves.toml)       | Rosé Pine, asymmetric islands, left-facing curves     |
 
 ```sh
