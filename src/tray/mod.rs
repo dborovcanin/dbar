@@ -248,6 +248,66 @@ struct Tray {
     hosting: bool,
     size: u32,
     theme: String,
+    icons: Icons,
+}
+
+/// What a name resolved to last time it was asked for, misses included.
+///
+/// Finding a themed icon walks every installed theme, and a miss walks all of them to the
+/// end - which is the case that repeats, because an application whose icon is not installed
+/// announces it again on every property change. The answers are kept, so the walk happens
+/// once per name for as long as the bar runs.
+///
+/// Bounded, because the names come off the bus and dbar does not decide how many there are.
+/// A live item's artwork is shared with the item itself, so a cached entry for something on
+/// screen costs a pointer; only what has gone away is held on to, and not much of it.
+#[derive(Default)]
+struct Icons {
+    /// Oldest first, so the one to drop is the one at the front.
+    entries: Vec<(Named, Option<Arc<Raster>>)>,
+}
+
+/// What an application asked for: the icon's name, and the directory it offered of its own.
+type Named = (String, Option<String>);
+
+impl Icons {
+    /// How many resolved names to remember. Enough for every tray anyone runs, and small
+    /// enough that a linear scan is the cheapest way to search it.
+    const LIMIT: usize = 32;
+
+    /// The artwork for a name, asking the icon theme only if it has not been asked before.
+    ///
+    /// `theme` and `size` are fixed for the life of the tray thread, so they are not part
+    /// of what is remembered.
+    fn get(
+        &mut self,
+        name: &str,
+        extra: Option<&str>,
+        theme: &str,
+        size: u32,
+    ) -> Option<Arc<Raster>> {
+        let key = (name.to_string(), extra.map(str::to_string));
+        self.remembered(key, || {
+            icon::from_name(name, extra, theme, size).map(Arc::new)
+        })
+    }
+
+    /// The answer for one key, worked out only if it is not already known.
+    fn remembered(
+        &mut self,
+        key: Named,
+        find: impl FnOnce() -> Option<Arc<Raster>>,
+    ) -> Option<Arc<Raster>> {
+        if let Some((_, found)) = self.entries.iter().find(|(k, _)| *k == key) {
+            return found.clone();
+        }
+        let found = find();
+        if self.entries.len() >= Self::LIMIT {
+            self.entries.remove(0);
+        }
+        self.entries.push((key, found.clone()));
+        found
+    }
 }
 
 fn run(
@@ -263,6 +323,7 @@ fn run(
         hosting: false,
         size,
         theme: theme.to_string(),
+        icons: Icons::default(),
     };
 
     // Whoever gets the name is the watcher. Losing the race is not a failure: it means a
@@ -737,8 +798,16 @@ fn read_item(bus: &mut Connection, tray: &mut Tray, at: usize) -> bool {
     let name = properties.get("IconName").and_then(Value::as_str);
     let theme_path = properties.get("IconThemePath").and_then(Value::as_str);
     let pixmaps = properties.get("IconPixmap");
-    let wanted = match (name.filter(|n| !n.is_empty()), pixmaps) {
-        (Some(name), _) => Some(Seen::Named(
+
+    // What will be drawn, decided before anything is compared. A name comes first, but a
+    // name that resolves to nothing is not artwork: an application that also handed over
+    // pixmaps has said what to draw, and drawing nothing when it did is the worse answer.
+    // Asking the theme here rather than after the comparison is free - the answer, miss
+    // included, is remembered.
+    let named = name.filter(|n| !n.is_empty());
+    let found = named.and_then(|name| tray.icons.get(name, theme_path, &tray.theme, tray.size));
+    let wanted = match (named.zip(found.as_ref()), pixmaps) {
+        (Some((name, _)), _) => Some(Seen::Named(
             name.to_string(),
             theme_path.map(str::to_string),
         )),
@@ -746,6 +815,7 @@ fn read_item(bus: &mut Connection, tray: &mut Tray, at: usize) -> bool {
         (None, None) => None,
     };
 
+    let size = tray.size;
     let tracked = &mut tray.items[at];
     let same_icon = tracked.seen == wanted && (tracked.item.icon.is_some() || wanted.is_none());
     let unchanged = same_icon
@@ -782,11 +852,9 @@ fn read_item(bus: &mut Connection, tray: &mut Tray, at: usize) -> bool {
     tracked.menu = menu_path;
     if !same_icon {
         tracked.item.icon = match &wanted {
-            Some(Seen::Named(name, theme_path)) => {
-                icon::from_name(name, theme_path.as_deref(), &tray.theme, tray.size).map(Arc::new)
-            }
+            Some(Seen::Named(..)) => found,
             Some(Seen::Pixels(_)) => pixmaps
-                .and_then(|value| icon::from_pixmaps(value, tray.size))
+                .and_then(|value| icon::from_pixmaps(value, size))
                 .map(Arc::new),
             None => None,
         };
@@ -936,6 +1004,40 @@ const INTROSPECTION: &str = r#"<!DOCTYPE node PUBLIC "-//freedesktop//DTD D-BUS 
 mod tests {
     use super::*;
 
+    /// A name that resolves to nothing is the case that repeats: an application whose icon
+    /// is not installed announces it again on every property change, and each announcement
+    /// used to walk every installed theme to the end. A miss is an answer, and is kept.
+    #[test]
+    fn an_icon_that_cannot_be_found_is_only_looked_for_once() {
+        let mut icons = Icons::default();
+        let mut asked = 0;
+        let find = |icons: &mut Icons, name: &str, asked: &mut usize| {
+            icons.remembered((name.to_string(), None), || {
+                *asked += 1;
+                None
+            })
+        };
+        find(&mut icons, "missing", &mut asked);
+        find(&mut icons, "missing", &mut asked);
+        assert_eq!(asked, 1, "the miss was not remembered");
+        assert_eq!(icons.entries.len(), 1);
+
+        // The names come off the bus, so what is remembered has to have an end to it.
+        for n in 0..Icons::LIMIT * 2 {
+            find(&mut icons, &format!("missing-{n}"), &mut asked);
+        }
+        assert_eq!(icons.entries.len(), Icons::LIMIT);
+
+        // And the real lookup goes through the same door.
+        let mut icons = Icons::default();
+        assert!(
+            icons
+                .get("dbar-test-icon-that-is-not-installed", None, "hicolor", 16)
+                .is_none()
+        );
+        assert_eq!(icons.entries.len(), 1);
+    }
+
     /// The spec says an application passes its bus name; several pass the object path
     /// instead, and a watcher lists them as the two stuck together. Reading any of the
     /// three wrongly is the difference between an icon and nothing at all.
@@ -994,6 +1096,7 @@ mod tests {
             hosting: false,
             size: 16,
             theme: String::new(),
+            icons: Icons::default(),
         };
 
         // Gone from the bus under its unique name, registered under a well-known one.
@@ -1024,6 +1127,7 @@ mod tests {
             hosting: false,
             size: 16,
             theme: String::new(),
+            icons: Icons::default(),
         };
 
         // A signal naming an object is about that object alone.
