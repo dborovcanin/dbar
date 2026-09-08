@@ -324,6 +324,28 @@ pub struct PlacedGroup {
     pub separators: Vec<PlacedSeparator>,
 }
 
+impl PlacedGroup {
+    /// Every logical pixel the island can reach, which is not its rectangle.
+    ///
+    /// A separator drawn at a group's end bleeds `overlap` past each side of itself to hide
+    /// the seam between two antialiased edges, and a cap sits at the very edge of the
+    /// island, so the bleed lands outside it whenever the overlap is wider than the group's
+    /// padding. Rounded edges clip that away; square ones have nothing to clip with, and
+    /// then the pixels are really there. Both the damage a frame reports and the layer a
+    /// translucent island is composited from are wrong if they use the rectangle instead.
+    pub fn paint_bounds(&self) -> (f32, f32, f32, f32) {
+        let (mut x0, mut x1) = (self.x, self.x + self.width);
+        for separator in &self.separators {
+            if separator.shape.is_none() {
+                continue;
+            }
+            x0 = x0.min(separator.x - separator.overlap);
+            x1 = x1.max(separator.x + separator.width + separator.overlap);
+        }
+        (x0, self.y, x1 - x0, self.height)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Frame {
     pub groups: Vec<PlacedGroup>,
@@ -499,9 +521,10 @@ impl Frame {
                 continue;
             }
             // Both rectangles: a group that moved or shrank has to repair where it was as
-            // well as cover where it is now.
-            rects.push((old.x, old.y, old.width, old.height));
-            rects.push((new.x, new.y, new.width, new.height));
+            // well as cover where it is now. What each of them painted, rather than what
+            // each of them measured - an end cap reaches past the island it belongs to.
+            rects.push(old.paint_bounds());
+            rects.push(new.paint_bounds());
         }
         for (new, old) in self
             .group_separators
@@ -3759,6 +3782,49 @@ padding = 0
             joined_frame(JOINED, &items[..1], 100.0, None).damage(&old),
             Damage::All
         ));
+    }
+
+    /// An end cap bleeds `overlap` past itself, and it sits at the very edge of the island,
+    /// so a group with less padding than overlap paints outside its own rectangle. Square
+    /// edges have no clip mask to catch that, so the pixels are really there and damage has
+    /// to name them - otherwise a recoloured group leaves the old cap's edge on screen.
+    #[test]
+    fn end_caps_are_inside_the_damage_a_recoloured_group_reports() {
+        const CAPPED: &str = r##"
+[bar]
+height = 20
+[right]
+groups = ["a"]
+[group.a]
+modules = ["a"]
+padding = 0
+ends = { left = "slant", right = "slant", width = 2, overlap = 3 }
+[module.a]
+format = "$text"
+padding = 0
+background = "#aa0000"
+"##;
+        let mut items = [item("a", "aaa")];
+        let before = joined_frame(CAPPED, &items, 100.0, None);
+        let group = &before.groups[0];
+        let (bx, _, bw, _) = group.paint_bounds();
+        assert_eq!(bx, group.x - 3.0);
+        assert_eq!(bw, group.width + 6.0);
+
+        items[0].background = Some(Color::parse("#00aa00").unwrap());
+        let after = joined_frame(CAPPED, &items, 100.0, None);
+        let Damage::Rects(rects) = after.damage(&before) else {
+            panic!("only the colour changed");
+        };
+        assert!(!rects.is_empty());
+        for (x, _, w, _) in &rects {
+            assert!(
+                *x <= group.x - 3.0 && x + w >= group.x + group.width + 3.0,
+                "damage {x}+{w} does not cover the caps of a group at {}+{}",
+                group.x,
+                group.width
+            );
+        }
     }
 
     #[test]

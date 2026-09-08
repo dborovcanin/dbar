@@ -1180,10 +1180,11 @@ fn drawn_bounds(
     height: u32,
 ) -> Option<(u32, u32, u32, u32)> {
     let map = |v: f32, scale: f32, offset: f32| v * scale + offset;
-    let x0 = map(group.x, transform.sx, transform.tx).floor();
-    let y0 = map(group.y, transform.sy, transform.ty).floor();
-    let x1 = map(group.x + group.width, transform.sx, transform.tx).ceil();
-    let y1 = map(group.y + group.height, transform.sy, transform.ty).ceil();
+    let (gx, gy, gw, gh) = group.paint_bounds();
+    let x0 = map(gx, transform.sx, transform.tx).floor();
+    let y0 = map(gy, transform.sy, transform.ty).floor();
+    let x1 = map(gx + gw, transform.sx, transform.tx).ceil();
+    let y1 = map(gy + gh, transform.sy, transform.ty).ceil();
 
     let x0 = x0.clamp(0.0, width as f32) as u32;
     let y0 = y0.clamp(0.0, height as f32) as u32;
@@ -1203,14 +1204,11 @@ fn device_bounds(
     width: u32,
     height: u32,
 ) -> Option<(u32, u32, u32, u32)> {
-    let x0 = (group.x * scale).floor().clamp(0.0, width as f32) as u32;
-    let y0 = (group.y * scale).floor().clamp(0.0, height as f32) as u32;
-    let x1 = ((group.x + group.width) * scale)
-        .ceil()
-        .clamp(0.0, width as f32) as u32;
-    let y1 = ((group.y + group.height) * scale)
-        .ceil()
-        .clamp(0.0, height as f32) as u32;
+    let (gx, gy, gw, gh) = group.paint_bounds();
+    let x0 = (gx * scale).floor().clamp(0.0, width as f32) as u32;
+    let y0 = (gy * scale).floor().clamp(0.0, height as f32) as u32;
+    let x1 = ((gx + gw) * scale).ceil().clamp(0.0, width as f32) as u32;
+    let y1 = ((gy + gh) * scale).ceil().clamp(0.0, height as f32) as u32;
     match (x1 > x0, y1 > y0) {
         (true, true) => Some((x0, y0, x1 - x0, y1 - y0)),
         _ => None,
@@ -2116,6 +2114,107 @@ format = "$text"
             shot(&frame, 1.0);
         }
     }
+
+    /// An end cap bleeds past itself to hide the seam between two antialiased edges, and
+    /// it is drawn at the very edge of its island. A group with square edges has no clip
+    /// mask to catch that - one is only built for a rounded edge - so with an overlap wider
+    /// than the group's padding the cap really does paint outside the group's rectangle.
+    /// Damage that named the rectangle left those pixels stale on every colour change.
+    #[test]
+    fn a_square_group_damages_the_pixels_its_end_caps_reach() {
+        use crate::{
+            collect::Registry,
+            layout::{Damage, Inputs},
+            status::{Fields, StatusItem, Value},
+        };
+        let config = "\
+[left]
+groups = ['a']
+[group.a]
+modules = ['a']
+padding = 0
+background = '#3c3836'
+ends = { left = 'slant', right = 'slant', width = 6, overlap = 6 }
+[module.a]
+padding = 12
+format = '$text'
+";
+        let cfg = Config::parse(config).unwrap();
+        let item = |color: &str| {
+            let mut fields = Fields::default();
+            fields.set("text", Value::Text("example".into()));
+            vec![StatusItem {
+                id: Some("a".into()),
+                fields,
+                state: Default::default(),
+                urgent: false,
+                foreground: None,
+                background: Some(Color::parse(color).unwrap()),
+                action: None,
+            }]
+        };
+        let native = Registry::new(&Default::default());
+        let frame = |items: &[StatusItem]| {
+            let inputs = Inputs {
+                items,
+                native: &native,
+                sway: &Default::default(),
+                alt: &Default::default(),
+                pages: &Default::default(),
+                collapsed: &Default::default(),
+                collapsed_groups: &Default::default(),
+                waiting: &Default::default(),
+                spin: 0,
+                tray: &Default::default(),
+                output: None,
+            };
+            crate::layout::compute(
+                &cfg,
+                &inputs,
+                480.0,
+                20.0,
+                &mut Blocks {
+                    scale: 1.0,
+                    run: None,
+                },
+                None,
+            )
+        };
+        let red = frame(&item("#cc241d"));
+        let blue = frame(&item("#458588"));
+        // The caps are outside the rectangle, which is the whole point of the test.
+        let group = &red.groups[0];
+        let (bx, _, bw, _) = group.paint_bounds();
+        assert!(bx < group.x && bx + bw > group.x + group.width);
+
+        for scale in [1.0, 2.0] {
+            let before = shot(&red, scale);
+            let after = shot(&blue, scale);
+            assert_ne!(before.data(), after.data());
+            let Damage::Rects(rects) = blue.damage(&red) else {
+                panic!("only the colour changed")
+            };
+            for (n, (a, b)) in before.pixels().iter().zip(after.pixels()).enumerate() {
+                if a == b {
+                    continue;
+                }
+                let (x, y) = (
+                    (n as u32 % before.width()) as f32,
+                    (n as u32 / before.width()) as f32,
+                );
+                assert!(
+                    rects
+                        .iter()
+                        .any(|(rx, ry, rw, rh)| x >= (rx * scale).floor()
+                            && x < ((rx + rw) * scale).ceil()
+                            && y >= (ry * scale).floor()
+                            && y < ((ry + rh) * scale).ceil()),
+                    "undamaged pixel {x},{y} at scale {scale}"
+                );
+            }
+        }
+    }
+
     /// Twelve blocks, either one ribbon or four independently configured groups.
     fn ribbon_config(joined: bool, shape: &str, direction: &str, color: &str) -> Config {
         let separator = format!(
