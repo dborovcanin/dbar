@@ -417,6 +417,13 @@ fn configured(program: &str, args: &[String]) -> Command {
         // rather than disappearing.
         .stderr(Stdio::inherit());
 
+    // A group of its own, so stopping the command stops everything it started. A script is
+    // usually a shell, and killing a shell leaves the pipeline it forked running: `sh -c
+    // 'curl ... | jq ...'` past its deadline would otherwise leave the curl behind, once
+    // per interval, for ever. Asking for group 0 makes the child its own leader, so its
+    // group id is its process id and there is nothing to look up later.
+    command.process_group(0);
+
     // Ask the kernel to take the command with us. Without this a command outlives the bar
     // that started it: the reader thread is blocked in a read that a signal to dbar never
     // reaches, so nothing is left to notice and kill it, and every restart of the bar
@@ -454,7 +461,19 @@ fn wait_until(child: &mut Child, deadline: Instant) -> std::io::Result<Option<Ex
     }
 }
 
+/// Stop a command and everything it started, and collect what is left.
+///
+/// The whole process group goes, not only the child: `configured` gave the command a group
+/// of its own, so its group id is its process id and one signal reaches every descendant
+/// that has not left the group of its own accord.
 fn reap(child: &mut Child) {
+    let pid = child.id() as libc::pid_t;
+    // SAFETY: a negative pid names a process group, and this one is the child's own -
+    // `process_group(0)` made it the leader, and a spawn where that failed never got here.
+    // The child has not been waited on yet, so the id has not been reused.
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -606,6 +625,48 @@ mod tests {
             "waited {waited:?}, so the deadline did not cover the exit"
         );
         assert!(format!("{e:#}").contains("had not exited"), "{e:#}");
+    }
+
+    /// A command is stopped along with whatever it started. A script is usually a shell,
+    /// and a shell that is killed leaves its pipeline running: one of those per interval
+    /// accumulates until the machine notices.
+    #[test]
+    fn a_command_that_outlives_its_deadline_takes_its_children_with_it() {
+        let file = std::env::temp_dir().join(format!("dbar-reap-{}", std::process::id()));
+        let _ = std::fs::remove_file(&file);
+        // The grandchild writes its own pid down and then becomes the sleep, so the pid
+        // stays that of a process still running when the deadline passes.
+        let script = format!("sh -c 'echo $$ > {}; exec sleep 30' & wait", file.display());
+        let result = super::run_to_end(
+            "sh",
+            &["-c".to_string(), script],
+            std::time::Duration::from_millis(300),
+        );
+        let e = result.expect_err("a command that outlives its deadline is a failure");
+        assert!(format!("{e:#}").contains("had not answered"), "{e:#}");
+
+        let pid: i32 = std::fs::read_to_string(&file)
+            .expect("the grandchild wrote its pid")
+            .trim()
+            .parse()
+            .expect("a pid is a number");
+        let _ = std::fs::remove_file(&file);
+
+        // Killed is not the same as gone: whoever adopts the grandchild reaps it a moment
+        // later, so the answer is waited for rather than taken at once.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            // SAFETY: signal 0 asks whether the pid exists and sends nothing.
+            let alive = unsafe { libc::kill(pid, 0) } == 0;
+            if !alive {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the command's grandchild outlived it"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     /// Output arrives in whatever pieces the pipe felt like, and a character outside ASCII
