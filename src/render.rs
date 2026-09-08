@@ -10,7 +10,7 @@ use tiny_skia::{
 };
 
 use crate::color::Color;
-use crate::config::{Direction, EdgeShape, SeparatorShape};
+use crate::geometry::{Direction, EdgeShape, SeparatorShape};
 use crate::icon::{self, IconArt, Ink, PathCmd};
 use std::collections::HashMap;
 
@@ -1344,7 +1344,8 @@ fn layer(scratch: &mut Option<Pixmap>, width: u32, height: u32) -> Option<&mut P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Config, Direction, EdgeShape, Edges, SeparatorShape};
+    use crate::config::Config;
+    use crate::geometry::Edges;
     use crate::icon::Icon;
     use crate::layout::{Frame, PlacedGroup, PlacedModule, PlacedSeparator};
     use tiny_skia::Pixmap;

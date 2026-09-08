@@ -6,6 +6,7 @@ mod color;
 mod config;
 mod dbus;
 mod format;
+mod geometry;
 mod icon;
 mod layout;
 mod lines;
@@ -16,6 +17,7 @@ mod status;
 mod sway;
 mod text;
 mod tray;
+mod worker;
 
 use std::path::PathBuf;
 
@@ -133,11 +135,10 @@ fn describe_kind(kind: crate::status::Kind) -> &'static str {
         Kind::Num(Unit::Percent) => "percent",
         Kind::Num(Unit::Bytes) => "bytes",
         Kind::Num(Unit::BytesPerSec) => "bytes per second",
-        Kind::Num(Unit::Hertz) => "hertz",
+
         Kind::Num(Unit::Celsius) => "degrees celsius",
         Kind::Num(Unit::Watts) => "watts",
-        Kind::Num(Unit::Volts) => "volts",
-        Kind::Num(Unit::Seconds) => "seconds",
+
         Kind::Text => "text",
         Kind::Time => "a moment, for .time()",
         Kind::Dur => "a length of time, for .dur()",

@@ -14,8 +14,12 @@ use serde::Deserialize;
 use crate::collect::Which;
 use crate::color::Color;
 use crate::format::Format;
+// The shapes a config names live with the renderer that draws them, not here: a `Frame`
+// carries them, and nothing below one may reach into a config. Re-exported so that a
+// config is still read and written in one vocabulary.
+pub use crate::geometry::{Direction, EdgeShape, Edges, SeparatorShape};
 use crate::icon::Icon;
-use crate::status::{Control, FieldSpec, Fields, State, Value};
+use crate::status::{Control, FieldSpec, Fields, State};
 
 pub const DEFAULT_CONFIG: &str = include_str!("../examples/config.toml");
 
@@ -38,44 +42,6 @@ pub enum BarLayer {
     Bottom,
     Top,
     Overlay,
-}
-
-/// The transition drawn between two neighbouring modules.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SeparatorShape {
-    #[default]
-    None,
-    Line,
-    Slant,
-    Chevron,
-    Notch,
-    Round,
-    Curve,
-}
-
-impl SeparatorShape {
-    pub fn is_none(self) -> bool {
-        self == SeparatorShape::None
-    }
-}
-
-/// Which way a separator shape points.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Direction {
-    #[default]
-    Right,
-    Left,
-}
-
-/// How a group's outer corners are cut.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EdgeShape {
-    #[default]
-    Round,
-    None,
 }
 
 /// Where a module's content comes from.
@@ -920,13 +886,6 @@ impl Ends {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Edges {
-    pub left: EdgeShape,
-    pub right: EdgeShape,
-    pub radius: f32,
-}
-
 /// One of the three pointer buttons a module can be given something to do with.
 ///
 /// Scrolling is not here: a notch is a step in a direction rather than a press, and what
@@ -1100,13 +1059,13 @@ impl StateRule {
                 None => fields.primary(),
             };
             match said {
-                Some(Value::Text(t)) if t.eq_ignore_ascii_case(wanted) => {}
+                Some(value) if value.reads_as(wanted) => {}
                 _ => return false,
             }
         }
         for (name, wanted) in &self.fields {
             match fields.get(name) {
-                Some(Value::Text(said)) if said.eq_ignore_ascii_case(wanted) => {}
+                Some(value) if value.reads_as(wanted) => {}
                 _ => return false,
             }
         }
@@ -1766,6 +1725,15 @@ fn parse_percent(written: &str) -> Result<f64> {
     Ok(step)
 }
 
+/// Whether a rule may compare this kind of field against a word.
+///
+/// Text obviously, and a flag - which is drawn as one of two words and reads as either.
+/// Keeping the two together here is what lets a source publish a flag where it once
+/// published the word, without every config that matched on the word going quiet.
+fn compares_to_a_word(kind: crate::status::Kind) -> bool {
+    matches!(kind, crate::status::Kind::Text | crate::status::Kind::Flag)
+}
+
 fn parse_duration(written: &str) -> Result<Duration> {
     let text = written.trim();
     let split = text
@@ -2154,7 +2122,7 @@ fn resolve_group(
                             kind.describe()
                         );
                     }
-                    if wants_text && !matches!(kind, crate::status::Kind::Text) {
+                    if wants_text && !compares_to_a_word(kind) {
                         bail!(
                             "[module.{module_name}.states.{state_name}] compares ${field} \
                              against a word, but it is {}",
@@ -2179,7 +2147,7 @@ fn resolve_group(
                              which this module's source does not publish"
                         );
                     };
-                    if !matches!(kind, crate::status::Kind::Text) {
+                    if !compares_to_a_word(kind) {
                         bail!(
                             "[module.{module_name}.states.{state_name}] compares ${field} \
                              against a word, but it is {}",
@@ -3233,6 +3201,53 @@ source = "sway:window"
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("-1s").is_err());
         assert!(parse_duration("s").is_err());
+    }
+
+    /// A flag is compared against the words it is drawn with, so a source that publishes
+    /// one where it used to publish text does not silence every config that matched on the
+    /// word. The audio module's `muted` is exactly that: it was `"yes"` and `"no"` as text
+    /// before it was the flag it always was.
+    #[test]
+    fn a_state_rule_matches_a_flag_by_the_word_it_is_drawn_with() {
+        use crate::status::Value;
+
+        let config = |compare: &str| {
+            format!(
+                r##"
+[left]
+groups = ["g"]
+[group.g]
+modules = ["vol"]
+[module.vol]
+source = "audio"
+format = "$volume"
+[module.vol.states.quiet]
+{compare}
+foreground = "#ff0000"
+"##
+            )
+        };
+        // Both ways of writing the rule are accepted against a field that is a flag.
+        for compare in [
+            "field = \"muted\"\nequals = \"yes\"",
+            "fields = { muted = \"yes\" }",
+            "field = \"muted\"\nequals = \"true\"",
+        ] {
+            Config::parse(&config(compare))
+                .unwrap_or_else(|e| panic!("{compare:?} should be a rule about a flag: {e:#}"));
+        }
+        // And a number is still not a word.
+        assert!(Config::parse(&config("field = \"volume\"\nequals = \"yes\"")).is_err());
+
+        // What the matching itself does, which is what a config written against the old
+        // text depends on.
+        let yes = Value::Flag(true);
+        let no = Value::Flag(false);
+        assert!(yes.reads_as("yes") && yes.reads_as("YES") && yes.reads_as("true"));
+        assert!(no.reads_as("no") && no.reads_as("false"));
+        assert!(!yes.reads_as("no") && !no.reads_as("yes"));
+        // Text goes on reading as itself.
+        assert!(Value::Text("headphones".into()).reads_as("HeadPhones"));
     }
 
     /// A length is refused at both ends rather than rounded into something that looks

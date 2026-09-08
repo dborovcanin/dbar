@@ -648,11 +648,8 @@ fn unit_suffix(unit: Unit) -> (&'static str, bool) {
         Unit::Percent => ("%", false),
         Unit::Bytes => ("B", true),
         Unit::BytesPerSec => ("B/s", true),
-        Unit::Hertz => ("Hz", true),
         Unit::Celsius => ("°C", false),
         Unit::Watts => ("W", true),
-        Unit::Volts => ("V", true),
-        Unit::Seconds => ("s", true),
     }
 }
 
@@ -663,17 +660,14 @@ fn unit_suffix(unit: Unit) -> (&'static str, bool) {
 fn default_scale(unit: Unit) -> Scale {
     match unit {
         Unit::Bytes | Unit::BytesPerSec => Scale::Bin,
-        Unit::Hertz | Unit::Watts | Unit::Volts => Scale::Si,
-        Unit::None | Unit::Percent | Unit::Celsius | Unit::Seconds => Scale::None,
+        Unit::Watts => Scale::Si,
+        Unit::None | Unit::Percent | Unit::Celsius => Scale::None,
     }
 }
 
 /// Units whose fractional part is noise unless a format asks for it.
 fn defaults_to_whole(unit: Unit) -> bool {
-    matches!(
-        unit,
-        Unit::None | Unit::Percent | Unit::Celsius | Unit::Seconds
-    )
+    matches!(unit, Unit::None | Unit::Percent | Unit::Celsius)
 }
 
 // ---------------------------------------------------------------------------

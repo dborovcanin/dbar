@@ -2375,7 +2375,7 @@ mod tests {
                         height: 16.0,
                         background: crate::color::Color::TRANSPARENT,
                         opacity: 1.0,
-                        edges: crate::config::Edges {
+                        edges: crate::geometry::Edges {
                             left: crate::config::EdgeShape::Round,
                             right: crate::config::EdgeShape::Round,
                             radius: 4.0,

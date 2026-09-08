@@ -15,7 +15,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use pipewire as pw;
@@ -33,11 +32,11 @@ pub const FIELDS: &[FieldSpec] = &[
         name: "volume",
         kind: Kind::Num(Unit::Percent),
     },
-    // `yes` or `no`, so a state rule reads what was measured rather than searching the
-    // text a format produced.
+    // A flag, drawn as `yes` or `no` and matched as either, so a state rule reads what was
+    // measured rather than searching the text a format produced.
     FieldSpec {
         name: "muted",
-        kind: Kind::Text,
+        kind: Kind::Flag,
     },
     // What is actually playing it: "Speaker", "HDMI", the name of a headset.
     FieldSpec {
@@ -65,15 +64,6 @@ pub enum Command {
 /// anywhere else.
 pub type Commands = pw::channel::Sender<Command>;
 
-/// How long to wait before trying PipeWire again, and the longest that wait becomes.
-///
-/// A bar usually starts with the session, which is a race it can lose: PipeWire may not be
-/// up yet, and a volume module that gave up on the first refusal would stay empty until the
-/// bar was restarted. The wait doubles, so a server arriving a second late is picked up a
-/// second late, and one that is never coming is asked for once a minute.
-const FIRST_WAIT: Duration = Duration::from_secs(1);
-const LONGEST_WAIT: Duration = Duration::from_secs(60);
-
 /// Start listening to PipeWire, and report readings as they change.
 pub fn spawn(sender: calloop::channel::Sender<Reading>) -> Result<Commands> {
     let (commands, receiver) = pw::channel::channel::<Command>();
@@ -84,30 +74,20 @@ pub fn spawn(sender: calloop::channel::Sender<Reading>) -> Result<Commands> {
             // with the same channel: the bar holds the other end of it and cannot be handed
             // a new one.
             let mut receiver = Some(receiver);
-            let mut wait = FIRST_WAIT;
-            loop {
-                match run(&sender, &mut receiver) {
-                    Ok(()) => {
-                        log::info!("PipeWire has gone; waiting for it to come back");
-                        wait = FIRST_WAIT;
-                    }
-                    Err(e) => log::warn!("volume is unavailable: {e:#}"),
-                }
-                // There is no volume to show while there is nobody to ask, and the last one
-                // seen is not it. This doubles as how the thread learns the bar has gone:
-                // the channel closes when it does, and there is nothing left to wait for.
-                if absent(&sender).is_err() {
-                    return;
-                }
-                std::thread::sleep(wait);
-                wait = (wait * 2).min(LONGEST_WAIT);
-            }
+            crate::worker::forever(
+                "PipeWire",
+                || run(&sender, &mut receiver),
+                || absent(&sender).is_ok(),
+            );
         })
         .context("spawning the audio thread")?;
     Ok(commands)
 }
 
 /// Say that there is no volume to report, which is what a bar without PipeWire has.
+///
+/// Also how the thread learns the bar has gone: the channel closes with it, and a volume
+/// nobody is going to draw is not worth reconnecting for.
 fn absent(
     sender: &calloop::channel::Sender<Reading>,
 ) -> Result<(), std::sync::mpsc::SendError<Reading>> {
@@ -310,13 +290,7 @@ impl Sinks {
                         unit: Unit::Percent,
                     },
                 );
-                fields.set(
-                    "muted",
-                    Field::Text(match muted {
-                        true => "yes".to_string(),
-                        false => "no".to_string(),
-                    }),
-                );
+                fields.set("muted", Field::Flag(*muted));
                 fields.set(
                     "device",
                     match description {

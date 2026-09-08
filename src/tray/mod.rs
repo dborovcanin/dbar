@@ -192,10 +192,20 @@ pub fn spawn(
     std::thread::Builder::new()
         .name("tray".to_string())
         .spawn(move || {
-            if let Err(e) = run(&sender, read, orders, size, &theme) {
-                log::warn!("the tray has stopped: {e:#}");
-                let _ = report.send(Event::Stopped(format!("{e:#}")));
-            }
+            crate::worker::forever(
+                "the tray's bus",
+                || run(&sender, &read, &orders, size, &theme),
+                // The bar empties the tray when it hears this, which is what a tray with
+                // no bus to ask should show. It is also how the thread learns the bar has
+                // gone: the channel closes with it, and there is nothing left to reconnect
+                // for. Applications re-register with the watcher on their own, so what is
+                // running comes back without being asked.
+                || {
+                    report
+                        .send(Event::Stopped("the session bus has gone".into()))
+                        .is_ok()
+                },
+            );
         })
         .context("spawning the tray thread")?;
     Ok(Commands { pipe: write, queue })
@@ -364,8 +374,8 @@ impl Icons {
 
 fn run(
     sender: &calloop::channel::Sender<Event>,
-    wake: OwnedFd,
-    orders: mpsc::Receiver<Command>,
+    wake: &OwnedFd,
+    orders: &mpsc::Receiver<Command>,
     size: u32,
     theme: &str,
 ) -> Result<()> {

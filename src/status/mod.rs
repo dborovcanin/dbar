@@ -25,22 +25,18 @@ pub use i3bar::{ClickEvent, I3BarProvider, StatusEvent};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 // The full set exists so collectors have somewhere to put what they measure; the ones with
 // no source yet arrive with their collector.
-#[allow(dead_code)]
 pub enum Unit {
     None,
     Percent,
     Bytes,
     BytesPerSec,
-    Hertz,
     Celsius,
     Watts,
-    Volts,
-    Seconds,
 }
 
 /// One value a source publishes.
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
+
 pub enum Value {
     Num {
         v: f64,
@@ -79,6 +75,26 @@ impl Value {
     }
 
     /// The number this holds, if it holds one.
+    /// Whether this value reads as `word`, which is what a state rule compares against.
+    ///
+    /// A flag reads as the two words it is drawn with, so a rule written against `"yes"`
+    /// goes on matching if a source that published text later publishes the flag it always
+    /// was - and `true`/`false` are taken too, since that is the other way a person writes
+    /// one. Comparison ignores case for the same reason it does on text: a config is
+    /// written by hand.
+    pub fn reads_as(&self, word: &str) -> bool {
+        match self {
+            Value::Text(said) => said.eq_ignore_ascii_case(word),
+            Value::Flag(true) => {
+                word.eq_ignore_ascii_case("yes") || word.eq_ignore_ascii_case("true")
+            }
+            Value::Flag(false) => {
+                word.eq_ignore_ascii_case("no") || word.eq_ignore_ascii_case("false")
+            }
+            _ => false,
+        }
+    }
+
     pub fn num(&self) -> Option<f64> {
         match *self {
             Value::Num { v, .. } => Some(v),
@@ -93,7 +109,7 @@ impl Value {
 /// rather than quietly rendering nothing at three in the morning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 // The kinds with no source yet arrive with their collector.
-#[allow(dead_code)]
+
 pub enum Kind {
     Num(Unit),
     Text,
@@ -160,7 +176,6 @@ impl Fields {
         self.primary = self.entries.iter().position(|(n, _)| *n == name);
     }
 
-    #[allow(dead_code)] // The formatter is the caller, and it lands with the format grammar.
     pub fn get(&self, name: &str) -> Option<&Value> {
         self.entries
             .iter()
@@ -180,7 +195,7 @@ impl Fields {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 // Collectors are what declare the middle of the scale; the i3bar protocol only distinguishes
 // its two ends.
-#[allow(dead_code)]
+
 pub enum State {
     #[default]
     Idle,
@@ -242,7 +257,6 @@ pub struct StatusItem {
     pub fields: Fields,
     /// The source's own rating of what it is reporting. Read once state rules can key on
     /// it, which is a configuration change rather than a model one.
-    #[allow(dead_code)]
     pub state: State,
     /// Set by whatever is asking for attention: the provider's own flag, a workspace the
     /// compositor has marked.

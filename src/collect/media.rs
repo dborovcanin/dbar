@@ -108,12 +108,32 @@ pub fn spawn(sender: calloop::channel::Sender<Reading>) -> Result<Commands> {
     let (read, write) = pipe()?;
     std::thread::Builder::new()
         .name("media".to_string())
-        .spawn(move || match run(sender, read) {
-            Ok(()) => log::info!("the session bus has gone; the media module stops here"),
-            Err(e) => log::warn!("what is playing is unavailable: {e:#}"),
+        .spawn(move || {
+            crate::worker::forever(
+                "the session bus",
+                || run(&sender, &read),
+                || silence(&sender).is_ok(),
+            );
         })
         .context("spawning the media thread")?;
     Ok(Commands { pipe: write })
+}
+
+/// Say that nothing is playing, which is what a bar with no bus to ask has.
+///
+/// Also how the thread learns the bar has gone: the channel closes with it, and a track
+/// nobody is going to draw is not worth reconnecting for.
+fn silence(
+    sender: &calloop::channel::Sender<Reading>,
+) -> Result<(), std::sync::mpsc::SendError<Reading>> {
+    let mut fields = Fields::default();
+    for spec in FIELDS {
+        fields.set(spec.name, Field::Absent);
+    }
+    sender.send(Reading {
+        fields,
+        state: State::Idle,
+    })
 }
 
 fn pipe() -> Result<(OwnedFd, OwnedFd)> {
@@ -155,7 +175,7 @@ impl Playing {
     }
 }
 
-fn run(sender: calloop::channel::Sender<Reading>, commands: OwnedFd) -> Result<()> {
+fn run(sender: &calloop::channel::Sender<Reading>, commands: &OwnedFd) -> Result<()> {
     let mut bus = Connection::session()?;
     // Every player's property changes, and every player appearing or going away.
     bus.add_match(&format!(
@@ -171,7 +191,7 @@ fn run(sender: calloop::channel::Sender<Reading>, commands: OwnedFd) -> Result<(
     let mut name: Option<String> = None;
     // What each player calls itself, which it will go on calling itself.
     let mut identities = Identities::new();
-    publish(&mut bus, &sender, &mut showing, &mut name, &mut identities);
+    publish(&mut bus, sender, &mut showing, &mut name, &mut identities);
 
     loop {
         let mut fds = [
@@ -236,7 +256,7 @@ fn run(sender: calloop::channel::Sender<Reading>, commands: OwnedFd) -> Result<(
                 }
             }
             if stale {
-                publish(&mut bus, &sender, &mut showing, &mut name, &mut identities);
+                publish(&mut bus, sender, &mut showing, &mut name, &mut identities);
             }
         }
 

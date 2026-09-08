@@ -6,10 +6,11 @@
 use crate::collect::{Registry, Which};
 use crate::color::Color;
 use crate::config::{
-    Config, Direction, EdgeShape, Edges, Ends, Group as GroupCfg, Module as ModuleCfg, Scope,
-    Separator, SeparatorColor, SeparatorShape, Source, StateFlags, Style,
+    Config, Ends, Group as GroupCfg, Module as ModuleCfg, Scope, Separator, SeparatorColor, Source,
+    StateFlags, Style,
 };
 use crate::format::Format;
+use crate::geometry::{Direction, EdgeShape, Edges, SeparatorShape};
 use crate::icon::{self, Icon};
 use std::sync::Arc;
 
