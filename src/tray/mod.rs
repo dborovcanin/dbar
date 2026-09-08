@@ -534,7 +534,7 @@ fn adopt_existing(bus: &mut Connection, tray: &mut Tray) {
         .unwrap_or_default();
     for name in names {
         let (service, path) = split_registration(&name, &name);
-        add(bus, tray, &service, &path);
+        add(bus, tray, &service, &path, Found::Told);
     }
 }
 
@@ -563,7 +563,7 @@ fn adopt_from_bus(bus: &mut Connection, tray: &mut Tray) {
     let names = items_among(values.first().map(Value::items).unwrap_or_default());
     for name in names {
         let (service, path) = split_registration(&name, &name);
-        if add(bus, tray, &service, &path) {
+        if add(bus, tray, &service, &path, Found::Guessed) {
             log::info!("adopted {service}, which was in the tray before dbar was");
             // Any other host is watching for this, and has the same gap to fill.
             let _ = bus.emit(
@@ -599,7 +599,7 @@ fn handle(bus: &mut Connection, tray: &mut Tray, message: &Message) -> bool {
             && let Some(name) = message.body.first().and_then(Value::as_str)
         {
             let (service, path) = split_registration(name, name);
-            return add(bus, tray, &service, &path);
+            return add(bus, tray, &service, &path, Found::Told);
         }
         return false;
     }
@@ -653,7 +653,7 @@ fn serve(bus: &mut Connection, tray: &mut Tray, message: &Message) -> bool {
         let sender = message.sender.as_deref().unwrap_or("");
         let (service, path) = split_registration(argument, sender);
         let _ = bus.reply(message, &[]);
-        let changed = add(bus, tray, &service, &path);
+        let changed = add(bus, tray, &service, &path, Found::Told);
         let _ = bus.emit(
             WATCHER_PATH,
             WATCHER_NAME,
@@ -772,13 +772,21 @@ fn already_following(items: &[Tracked], service: &str, owner: Option<&str>, path
     })
 }
 
+/// How dbar came to know about an item, which decides what a silent one is worth.
+#[derive(Clone, Copy, PartialEq)]
+enum Found {
+    /// Somebody said so: the application registering, or a watcher listing what it has.
+    /// The item is there whether or not it can answer this second, and it will say when
+    /// something about it changes - which is when it is read again.
+    Told,
+    /// Recognised on the bus by the shape of its name, with the object path guessed. A
+    /// guess that cannot be read was probably wrong, and a row kept on a wrong guess sits
+    /// blank for ever, because nothing asks a second time.
+    Guessed,
+}
+
 /// Start following an item, reading everything about it once.
-///
-/// An item that cannot be read is not followed. Discovery finds a name the moment dbar
-/// starts, which may be before the object behind it exists; keeping the row anyway would
-/// leave it blank for ever, because the application's own registration would then be
-/// turned away as something already known and nothing asks a second time.
-fn add(bus: &mut Connection, tray: &mut Tray, service: &str, path: &str) -> bool {
+fn add(bus: &mut Connection, tray: &mut Tray, service: &str, path: &str, how: Found) -> bool {
     let key = format!("{service}{path}");
     let owner = owner_of(bus, service);
     if already_following(&tray.items, service, owner.as_deref(), path) {
@@ -801,9 +809,9 @@ fn add(bus: &mut Connection, tray: &mut Tray, service: &str, path: &str) -> bool
         seen: None,
     });
     let at = tray.items.len() - 1;
-    if read_properties(bus, tray, at).is_none() {
+    if read_properties(bus, tray, at).is_none() && how == Found::Guessed {
         tray.items.pop();
-        log::debug!("{service}{path} is on the bus but has nothing to say yet");
+        log::debug!("{service}{path} looked like a tray item and had nothing to say");
         return false;
     }
     log::debug!("tray item {service}{path}");
