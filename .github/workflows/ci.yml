@@ -45,3 +45,38 @@ jobs:
       # one fails here rather than on somebody's bar.
       - name: Tests
         run: cargo test --release
+
+  # The version in Cargo.toml is a promise, and stable alone never tests it: a
+  # dependency that raises its own floor breaks the oldest supported toolchain
+  # while every green build says otherwise.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install the libraries the build links
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            pkg-config \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libpipewire-0.3-dev
+
+      - name: Read the minimum version from Cargo.toml
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Building is the whole test: what breaks on an old toolchain breaks at
+      # compile time, and the locked versions are what a user gets.
+      - name: Build against the minimum
+        run: cargo build --locked --all-targets
