@@ -10,6 +10,7 @@
 //! one that is actually playing, so that is what is preferred, and a paused player only
 //! speaks when nothing else does.
 
+use std::collections::HashMap;
 use std::os::fd::{AsRawFd as _, OwnedFd};
 
 use anyhow::{Context as _, Result};
@@ -168,7 +169,9 @@ fn run(sender: calloop::channel::Sender<Reading>, commands: OwnedFd) -> Result<(
     log::info!("watching the session bus for a player");
     let mut showing: Option<Playing> = None;
     let mut name: Option<String> = None;
-    publish(&mut bus, &sender, &mut showing, &mut name);
+    // What each player calls itself, which it will go on calling itself.
+    let mut identities = Identities::new();
+    publish(&mut bus, &sender, &mut showing, &mut name, &mut identities);
 
     loop {
         let mut fds = [
@@ -208,13 +211,22 @@ fn run(sender: calloop::channel::Sender<Reading>, commands: OwnedFd) -> Result<(
         }
 
         if fds[0].revents != 0 {
-            let message = bus.receive()?;
+            // Everything the bus has to say is taken before anything is asked of anyone.
             // Any of these can change which player is worth showing, and all of them are
-            // rare enough to answer by asking again rather than by tracking deltas.
-            if message.is_signal(PROPERTIES, "PropertiesChanged")
-                || message.is_signal("org.freedesktop.DBus", "NameOwnerChanged")
-            {
-                publish(&mut bus, &sender, &mut showing, &mut name);
+            // rare enough to answer by asking again rather than by tracking deltas - but a
+            // player that changes three properties sends three signals, and answering each
+            // one separately is three passes over every player on the bus for one event.
+            let mut stale = false;
+            loop {
+                let message = bus.receive()?;
+                stale |= message.is_signal(PROPERTIES, "PropertiesChanged")
+                    || message.is_signal("org.freedesktop.DBus", "NameOwnerChanged");
+                if !bus.has_message() && !readable(bus.fd()) {
+                    break;
+                }
+            }
+            if stale {
+                publish(&mut bus, &sender, &mut showing, &mut name, &mut identities);
             }
         }
 
@@ -254,8 +266,9 @@ fn publish(
     sender: &calloop::channel::Sender<Reading>,
     showing: &mut Option<Playing>,
     name: &mut Option<String>,
+    identities: &mut Identities,
 ) {
-    let (found, playing) = match look(bus) {
+    let (found, playing) = match look(bus, identities) {
         Ok(found) => found,
         Err(e) => {
             log::debug!("the players could not be read: {e:#}");
@@ -291,7 +304,10 @@ fn publish(
 }
 
 /// The most interesting player on the bus, and what it is playing.
-fn look(bus: &mut Connection) -> Result<(Option<String>, Option<Playing>)> {
+fn look(
+    bus: &mut Connection,
+    identities: &mut Identities,
+) -> Result<(Option<String>, Option<Playing>)> {
     let names = bus.call(
         "org.freedesktop.DBus",
         "/org/freedesktop/DBus",
@@ -303,12 +319,18 @@ fn look(bus: &mut Connection) -> Result<(Option<String>, Option<Playing>)> {
         return Ok((None, None));
     };
 
+    let players: Vec<&str> = names
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|name| name.starts_with(PREFIX))
+        .collect();
+    // A player that has left the bus takes what it called itself with it, so the cache is
+    // the size of what is running rather than of everything that ever ran.
+    identities.retain(|known, _| players.contains(&known.as_str()));
+
     let mut best: Option<(String, Playing)> = None;
-    for name in names.iter().filter_map(Value::as_str) {
-        if !name.starts_with(PREFIX) {
-            continue;
-        }
-        let Ok(playing) = ask(bus, name) else {
+    for name in players {
+        let Ok(playing) = ask(bus, name, identities) else {
             continue;
         };
         let better = match &best {
@@ -330,7 +352,7 @@ fn look(bus: &mut Connection) -> Result<(Option<String>, Option<Playing>)> {
 }
 
 /// What one player says about itself.
-fn ask(bus: &mut Connection, name: &str) -> Result<Playing> {
+fn ask(bus: &mut Connection, name: &str, identities: &mut Identities) -> Result<Playing> {
     let reply = bus.call(name, OBJECT, PROPERTIES, "GetAll", &[Arg::Str(PLAYER)])?;
     let properties = reply.first().context("a player that answered nothing")?;
     let metadata = properties.get("Metadata");
@@ -351,12 +373,33 @@ fn ask(bus: &mut Connection, name: &str) -> Result<Playing> {
             .and_then(Value::as_str)
             .unwrap_or("stopped")
             .to_lowercase(),
-        player: identity(bus, name),
+        player: identity(bus, name, identities),
     })
 }
 
+/// What each player on the bus calls itself, by the name it is on the bus under.
+type Identities = HashMap<String, String>;
+
 /// The player's own name for itself, which is friendlier than its bus name.
-fn identity(bus: &mut Connection, name: &str) -> Option<String> {
+///
+/// Asked once per player and then remembered. A well-known name on the bus is one
+/// application and an application does not rename itself, so this is the one property of
+/// the three that can be kept - and it is a round trip like any other, which is half of
+/// what a single property change costs when every player is asked again for all of it.
+///
+/// A player that does not answer is not remembered as having no name: an application that
+/// is still starting up answers nothing for a moment, and it would be called nothing for
+/// as long as it ran.
+fn identity(bus: &mut Connection, name: &str, identities: &mut Identities) -> Option<String> {
+    if let Some(known) = identities.get(name) {
+        return Some(known.clone());
+    }
+    let asked = ask_identity(bus, name)?;
+    identities.insert(name.to_string(), asked.clone());
+    Some(asked)
+}
+
+fn ask_identity(bus: &mut Connection, name: &str) -> Option<String> {
     let reply = bus
         .call(
             name,
@@ -367,6 +410,18 @@ fn identity(bus: &mut Connection, name: &str) -> Option<String> {
         )
         .ok()?;
     reply.first()?.as_str().map(str::to_string)
+}
+
+/// Whether the bus has more to say without waiting for it.
+fn readable(fd: std::os::fd::RawFd) -> bool {
+    let mut poll = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one descriptor owned by the caller for the length of the call, a count that
+    // matches, and no wait at all.
+    unsafe { libc::poll(&mut poll, 1, 0) > 0 && poll.revents != 0 }
 }
 
 #[cfg(test)]
