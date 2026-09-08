@@ -98,7 +98,14 @@ fn parse(text: &str) -> Result<Times> {
         let value: u64 = field
             .parse()
             .with_context(|| format!("field {i} of the cpu line is not a number: {field:?}"))?;
-        total += value;
+        // Fields 8 and 9 are guest and guest_nice, and the kernel has already counted both
+        // in user and nice - `account_guest_time` adds the tick to one of those as well as
+        // to its own counter. Adding them here again would count that time twice, in the
+        // busy part and in the total, and report a machine running a guest as busier than
+        // it is.
+        if i != 8 && i != 9 {
+            total += value;
+        }
         // Fields 3 and 4 are idle and iowait: both are time with nothing to do.
         if i == 3 || i == 4 {
             idle += value;
@@ -127,6 +134,23 @@ intr 12345
         assert_eq!(times.total, 10 + 20 + 30 + 40 + 50 + 60 + 70 + 80);
         // Idle plus iowait.
         assert_eq!(times.idle, 40 + 50);
+    }
+
+    /// The kernel counts guest time twice on purpose: once in its own counter and once in
+    /// user or nice, whichever the guest thread was running as. Summing every column would
+    /// take that second copy as more work done and more time passed, so a machine running a
+    /// virtual machine would read as busier than it is.
+    #[test]
+    fn guest_time_is_not_counted_a_second_time() {
+        // user 100 (60 of which was a guest), nice 20 (10 a guest), then the rest.
+        let with_guests = "cpu  100 20 30 100 50 0 0 0 60 10\n";
+        let times = parse(with_guests).expect("the sample parses");
+        assert_eq!(times.total, 100 + 20 + 30 + 100 + 50);
+        assert_eq!(times.idle, 100 + 50);
+
+        // Half the interval idle, whatever share of the busy half was a guest.
+        let before = parse("cpu  0 0 0 0 0 0 0 0 0 0\n").expect("the sample parses");
+        assert_eq!(utilization(before, times), Some(50.0));
     }
 
     #[test]
