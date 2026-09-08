@@ -9,6 +9,7 @@ mod format;
 mod icon;
 mod layout;
 mod lines;
+mod proc;
 mod render;
 mod signal;
 mod status;
@@ -247,6 +248,10 @@ fn main() -> Result<()> {
     let (globals, mut event_queue) =
         registry_queue_init::<App>(&conn).context("initializing the Wayland registry")?;
     let qh = event_queue.handle();
+
+    // Everything dbar started stops when this goes, which is on every way out of here: the
+    // loop ending, and an error before or after it.
+    let _stop = crate::proc::StopEverything;
 
     let mut event_loop: EventLoop<App> = EventLoop::try_new().context("creating the event loop")?;
     let handle = event_loop.handle();
@@ -524,8 +529,5 @@ fn main() -> Result<()> {
         app.draw_if_needed();
     }
 
-    // A command outlives the thread that was reading it, and what a command forked outlives
-    // the command, so the last thing the bar does is take them with it.
-    crate::collect::command::stop_all();
     Ok(())
 }

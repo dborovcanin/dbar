@@ -1649,7 +1649,7 @@ impl Config {
 
         share_command_fields(&mut positions)?;
 
-        Ok(Config {
+        let config = Config {
             bar,
             menu,
             i3bar: I3Bar {
@@ -1658,7 +1658,31 @@ impl Config {
                 names: raw.i3bar.names.clone(),
             },
             positions,
-        })
+        };
+        config.check_how_many_programs()?;
+        Ok(config)
+    }
+
+    /// Refuse a config that could run more programs than dbar can stop.
+    ///
+    /// The table of what is running is a fixed size, because a signal handler reads it and
+    /// a handler may not take a lock. A module that runs a program runs one at a time, and
+    /// the provider is one more, so counting them here is what makes the table enough -
+    /// and a bar that would silently leave a program behind at shutdown never starts.
+    fn check_how_many_programs(&self) -> Result<()> {
+        let commands = self
+            .modules()
+            .filter(|module| matches!(module.source, Source::Native(Which::Command(_))))
+            .count();
+        let wanted = commands + usize::from(self.needs_provider());
+        if wanted > crate::proc::AT_ONCE {
+            bail!(
+                "this config runs {wanted} programs at once, and dbar can keep track of {}; \
+                 use fewer command modules",
+                crate::proc::AT_ONCE
+            );
+        }
+        Ok(())
     }
 
     pub fn load(path: Option<&Path>) -> Result<Config> {
@@ -2749,8 +2773,37 @@ format = "$load"
         assert_eq!(spec.timeout, Duration::from_secs(2));
     }
 
+    /// The table of running programs is a fixed size, because a signal handler reads it and
+    /// a handler may not take a lock. A config that could overrun it is refused when it is
+    /// read: the alternative is a program silently left behind when the bar stops.
+    #[test]
+    fn a_config_that_runs_more_programs_than_can_be_stopped_is_refused() {
+        let modules = |how_many: usize| {
+            let names: Vec<String> = (0..how_many).map(|n| format!("run{n}")).collect();
+            let mut text = format!(
+                "[left]\ngroups = [\"g\"]\n[group.g]\nmodules = {:?}\n",
+                names
+            );
+            for name in &names {
+                text += &format!(
+                    "[module.{name}]\nsource = \"command\"\ncommand = [\"true\"]\nformat = \"$text\"\n"
+                );
+            }
+            text
+        };
+        Config::parse(&modules(crate::proc::AT_ONCE)).expect("as many as dbar can keep track of");
+        let e = Config::parse(&modules(crate::proc::AT_ONCE + 1))
+            .expect_err("one more than dbar can keep track of");
+        let message = format!("{e:#}");
+        assert!(
+            message.contains(&format!("{}", crate::proc::AT_ONCE)),
+            "{message}"
+        );
+        assert!(message.contains("command modules"), "{message}");
+    }
+
     /// A streaming command is meant to sit there, so a deadline on one would mean killing
-    /// a working program for doing its job.
+    /// a working program for doing its job.""
     #[test]
     fn a_streaming_command_cannot_be_given_a_deadline() {
         let e = Config::parse(&one_module(
