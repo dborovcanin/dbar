@@ -1666,13 +1666,16 @@ impl Config {
     /// Refuse a config that could run more programs than dbar can stop.
     ///
     /// The table of what is running is a fixed size, because a signal handler reads it and
-    /// a handler may not take a lock. A module that runs a program runs one at a time, and
-    /// the provider is one more, so counting them here is what makes the table enough -
-    /// and a bar that would silently leave a program behind at shutdown never starts.
+    /// a handler may not take a lock. What fills it is a collector rather than a module:
+    /// two modules asking for the same command share one, the way they share every other
+    /// source, and each collector runs one program at a time. Counting them here, plus the
+    /// provider, is what makes the table enough - and a bar that would silently leave a
+    /// program behind at shutdown never starts.
     fn check_how_many_programs(&self) -> Result<()> {
         let commands = self
-            .modules()
-            .filter(|module| matches!(module.source, Source::Native(Which::Command(_))))
+            .collectors()
+            .keys()
+            .filter(|which| matches!(which, Which::Command(_)))
             .count();
         let wanted = commands + usize::from(self.needs_provider());
         if wanted > crate::proc::AT_ONCE {
@@ -2776,29 +2779,37 @@ format = "$load"
     /// The table of running programs is a fixed size, because a signal handler reads it and
     /// a handler may not take a lock. A config that could overrun it is refused when it is
     /// read: the alternative is a program silently left behind when the bar stops.
+    ///
+    /// What counts is the collector, not the module. Two modules that name the same command
+    /// share one collector and so one program, the way two modules reading the processor
+    /// share one reading.
     #[test]
     fn a_config_that_runs_more_programs_than_can_be_stopped_is_refused() {
-        let modules = |how_many: usize| {
+        // `how_many` modules, each running its own program unless `share` is set, in which
+        // case they all name the same one.
+        let modules = |how_many: usize, share: bool| {
             let names: Vec<String> = (0..how_many).map(|n| format!("run{n}")).collect();
-            let mut text = format!(
-                "[left]\ngroups = [\"g\"]\n[group.g]\nmodules = {:?}\n",
-                names
-            );
-            for name in &names {
+            let mut text = format!("[left]\ngroups = [\"g\"]\n[group.g]\nmodules = {names:?}\n");
+            for (n, name) in names.iter().enumerate() {
+                let argv = match share {
+                    true => "\"true\"".to_string(),
+                    false => format!("\"true\", \"{n}\""),
+                };
                 text += &format!(
-                    "[module.{name}]\nsource = \"command\"\ncommand = [\"true\"]\nformat = \"$text\"\n"
+                    "[module.{name}]\nsource = \"command\"\ncommand = [{argv}]\nformat = \"$text\"\n"
                 );
             }
             text
         };
-        Config::parse(&modules(crate::proc::AT_ONCE)).expect("as many as dbar can keep track of");
-        let e = Config::parse(&modules(crate::proc::AT_ONCE + 1))
-            .expect_err("one more than dbar can keep track of");
+        let all = crate::proc::AT_ONCE;
+        Config::parse(&modules(all, false)).expect("as many programs as dbar can keep track of");
+        // Sharing one command is one program, however many modules show it.
+        Config::parse(&modules(all + 20, true)).expect("many modules, one program");
+
+        let e = Config::parse(&modules(all + 1, false))
+            .expect_err("one more program than dbar can keep track of");
         let message = format!("{e:#}");
-        assert!(
-            message.contains(&format!("{}", crate::proc::AT_ONCE)),
-            "{message}"
-        );
+        assert!(message.contains(&format!("{all}")), "{message}");
         assert!(message.contains("command modules"), "{message}");
     }
 
