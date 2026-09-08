@@ -257,6 +257,10 @@ right = "round"
 # Right click anywhere in this island to fold it; right click Tux to expand again.
 collapsible = true
 collapse_button = "right"
+# The island travels between its two widths instead of jumping between them. Leave
+# this out and the fold is one redraw, which is what it costs at rest either way:
+# the timer runs only while an island is moving and stops when it arrives.
+collapse_animation = "250ms"
 modules = ["cpu", "memory", "temperature"]
 radius = 16
 # opacity = 0.8

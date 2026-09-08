@@ -235,6 +235,24 @@ fn schedule_spin(handle: &calloop::LoopHandle<'static, App>) -> Result<()> {
     Ok(())
 }
 
+/// Start the timer that moves a fold along, if one is not already going.
+///
+/// Its own timer for the same reason the spinner has one: it exists only while an island
+/// is travelling and drops itself the moment the last one arrives, so a bar nobody is
+/// clicking on never wakes for it.
+fn schedule_fold(handle: &calloop::LoopHandle<'static, App>) -> Result<()> {
+    handle
+        .insert_source(
+            calloop::timer::Timer::from_duration(std::time::Duration::from_millis(0)),
+            |_, _, app: &mut App| match app.on_fold() {
+                Some(next) => calloop::timer::TimeoutAction::ToInstant(next),
+                None => calloop::timer::TimeoutAction::Drop,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("inserting the fold timer: {e}"))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
@@ -518,6 +536,7 @@ fn main() -> Result<()> {
     // point at which the cheapest one can be chosen.
     app.choose_pixel_format();
 
+    let handle_for_fold = handle.clone();
     WaylandSource::new(conn, event_queue)
         .insert(handle)
         .map_err(|e| anyhow::anyhow!("inserting the Wayland source: {e}"))?;
@@ -526,6 +545,13 @@ fn main() -> Result<()> {
         event_loop
             .dispatch(None, &mut app)
             .context("dispatching events")?;
+        // A click is a Wayland event, and the pointer handler has no way to reach the
+        // loop from inside a dispatch, so a fold it started is picked up here instead.
+        if app.take_fold_timer()
+            && let Err(e) = schedule_fold(&handle_for_fold)
+        {
+            log::error!("{e}");
+        }
         // Anything the handlers marked dirty but could not draw yet gets drawn here.
         app.draw_if_needed();
     }

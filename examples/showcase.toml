@@ -288,6 +288,11 @@ radius = 12
 # Reserve right click throughout this group; click the CPU icon with right to expand.
 collapsible = true
 collapse_button = "right"
+# How long the island takes to travel between its two widths. Leave it out and the
+# fold happens in one redraw, which is the default and costs nothing at idle. While
+# a fold is on its way the bar redraws at about the rate the screen refreshes, and
+# stops the moment it arrives.
+collapse_animation = "150ms"
 modules = ["cpu", "memory", "load", "temperature", "disk"]
 background = "$surface"
 radius = 12

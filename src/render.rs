@@ -357,6 +357,8 @@ fn draw_icon_cached(
         oy as i32,
         color,
         true,
+        None,
+        None,
     );
 }
 
@@ -364,6 +366,13 @@ fn draw_icon_cached(
 ///
 /// The backend does the placing and the colouring: the text side hands back pixels and
 /// where they sit relative to the origin, and knows nothing about what they land on.
+///
+/// Glyphs are the one thing tiny-skia's clip cannot catch, because the backend rasterises
+/// and places them itself rather than filling a path. An island that cuts its contents off
+/// at its own edge therefore has to catch them here: `clip` is the island's outline, which
+/// is what takes the corners, and `stop` is the device column past which nothing is
+/// written at all, which is what holds where the outline's coverage does not reach.
+#[allow(clippy::too_many_arguments)]
 fn draw_text(
     pixmap: &mut PixmapMut<'_>,
     text: &mut dyn DrawText,
@@ -372,6 +381,8 @@ fn draw_text(
     y: f32,
     scale: f32,
     color: Color,
+    clip: Option<&Mask>,
+    stop: Option<i32>,
 ) {
     if color.is_transparent() {
         return;
@@ -386,15 +397,15 @@ fn draw_text(
         // drops the base's alpha, so an alpha on a text colour has never reached the screen
         // and is not honoured here either.
         RunPixels::Coverage(coverage) => blend_coverage(
-            pixmap, coverage, run.width, run.height, rx, ry, color, false,
+            pixmap, coverage, run.width, run.height, rx, ry, color, false, clip, stop,
         ),
         // The text tinted first and what carries its own colour laid over it, which is
         // how `☀ Clear` keeps the sun's colours and the module's own wording.
         RunPixels::Mixed { coverage, rgba } => {
             blend_coverage(
-                pixmap, coverage, run.width, run.height, rx, ry, color, false,
+                pixmap, coverage, run.width, run.height, rx, ry, color, false, clip, stop,
             );
-            blend_rgba(pixmap, rgba, run.width, run.height, rx, ry);
+            blend_rgba(pixmap, rgba, run.width, run.height, rx, ry, clip, stop);
         }
     }
 }
@@ -402,6 +413,7 @@ fn draw_text(
 /// Blend premultiplied RGBA into the pixmap, clipped to the surface.
 ///
 /// Only emoji arrive this way: they carry their own colour, so there is nothing to tint.
+#[allow(clippy::too_many_arguments)]
 fn blend_rgba(
     pixmap: &mut PixmapMut<'_>,
     rgba: &[u8],
@@ -409,33 +421,40 @@ fn blend_rgba(
     height: usize,
     ox: i32,
     oy: i32,
+    clip: Option<&Mask>,
+    stop: Option<i32>,
 ) {
     let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
     let x0 = ox.max(0);
     let y0 = oy.max(0);
-    let x1 = (ox + width as i32).min(pw);
+    let x1 = (ox + width as i32).min(pw).min(stop.unwrap_or(i32::MAX));
     let y1 = (oy + height as i32).min(ph);
     if x0 >= x1 || y0 >= y1 {
         return;
     }
+    let mask = clip.map(|m| m.data());
     let pixels = pixmap.pixels_mut();
     for py in y0..y1 {
         let src = ((py - oy) as usize * width + (x0 - ox) as usize) * 4;
         let dst = py as usize * pw as usize + x0 as usize;
         for i in 0..(x1 - x0) as usize {
             let px = &rgba[src + i * 4..src + i * 4 + 4];
-            let a = u32::from(px[3]);
+            // Premultiplied, so the mask scales all four channels together or the colour
+            // comes out brighter than its own alpha allows.
+            let cover = mask.map_or(255, |mask| u32::from(mask[dst + i]));
+            let faded = |v: u8| ((u32::from(v) * cover + 127) / 255) as u8;
+            let (r, g, b, a) = (faded(px[0]), faded(px[1]), faded(px[2]), faded(px[3]));
             if a == 0 {
                 continue;
             }
-            let inv = 255 - a;
+            let inv = 255 - u32::from(a);
             let slot = &mut pixels[dst + i];
             let under = *slot;
             let over = |s: u8, d: u8| u32::from(s) + (u32::from(d) * inv + 127) / 255;
-            let na = over(px[3], under.alpha());
-            let nr = over(px[0], under.red()).min(na);
-            let ng = over(px[1], under.green()).min(na);
-            let nb = over(px[2], under.blue()).min(na);
+            let na = over(a, under.alpha());
+            let nr = over(r, under.red()).min(na);
+            let ng = over(g, under.green()).min(na);
+            let nb = over(b, under.blue()).min(na);
             *slot = PremultipliedColorU8::from_rgba(nr as u8, ng as u8, nb as u8, na as u8)
                 .unwrap_or(under);
         }
@@ -457,11 +476,13 @@ fn blend_coverage(
     oy: i32,
     color: Color,
     honour_alpha: bool,
+    clip: Option<&Mask>,
+    stop: Option<i32>,
 ) {
     let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
     let x0 = ox.max(0);
     let y0 = oy.max(0);
-    let x1 = (ox + width as i32).min(pw);
+    let x1 = (ox + width as i32).min(pw).min(stop.unwrap_or(i32::MAX));
     let y1 = (oy + height as i32).min(ph);
     if x0 >= x1 || y0 >= y1 {
         return;
@@ -471,12 +492,23 @@ fn blend_coverage(
         true => color.a as u32,
         false => 255,
     };
+    let mask = clip.map(|m| m.data());
     let pixels = pixmap.pixels_mut();
     for py in y0..y1 {
         let src = (py - oy) as usize * width + (x0 - ox) as usize;
         let dst = py as usize * pw as usize + x0 as usize;
         for i in 0..(x1 - x0) as usize {
             let cover = coverage[src + i] as u32;
+            if cover == 0 {
+                continue;
+            }
+            // The island's outline, where one was asked for: a straight column can stop
+            // text at an edge but not at a corner, and a folding island's content runs
+            // right into its rounded ones.
+            let cover = match mask {
+                Some(mask) => (cover * u32::from(mask[dst + i]) + 127) / 255,
+                None => cover,
+            };
             if cover == 0 {
                 continue;
             }
@@ -830,6 +862,8 @@ fn render_menu(
             row.text_y,
             scale,
             row.foreground,
+            None,
+            None,
         );
     }
 }
@@ -1063,13 +1097,20 @@ fn draw_group(
     // that are worth avoiding: building the mask costs a path fill, and every fill drawn
     // through one takes a slower blend, which together are a third of a frame.
     let (pw, ph) = (pixmap.width(), pixmap.height());
-    let clip = match (rl > 0.0 || rr > 0.0) && spills(group) {
+    // A folding island is the other case: what it holds was measured for the width it had
+    // when it was open, so the outline is what stops it as the edge travels over it.
+    let clip = match group.clipped || ((rl > 0.0 || rr > 0.0) && spills(group)) {
         true => {
             let bounds = drawn_bounds(group, transform, pw, ph);
             bounds.and_then(|b| clip_mask(tools.mask, pw, ph, b, &outline, transform))
         }
         false => None,
     };
+    // The mask catches every fill and every icon; text is placed by the backend and has
+    // to be told where the edge is.
+    let stop = group
+        .clipped
+        .then(|| (((group.x + group.width + offset.0) * scale).round()) as i32);
 
     // Separators go down before the modules, so any overlap is covered by them.
     for separator in &group.separators {
@@ -1112,6 +1153,8 @@ fn draw_group(
             ty,
             scale,
             module.foreground,
+            clip,
+            stop,
         );
     }
 }
@@ -1561,6 +1604,7 @@ format = "$text"
                         alt: &Default::default(),
                         pages: &Default::default(),
                         collapsed_groups: &Default::default(),
+                        folding: &Default::default(),
                         collapsed: &Default::default(),
                         waiting: &Default::default(),
                         spin: 0,
@@ -1846,6 +1890,7 @@ format = "$text"
         Frame {
             groups: vec![PlacedGroup {
                 collapse: None,
+                clipped: false,
                 x,
                 y: 0.0,
                 width: first + gap + second,
@@ -2164,6 +2209,7 @@ format = '$text'
                 pages: &Default::default(),
                 collapsed: &Default::default(),
                 collapsed_groups: &Default::default(),
+                folding: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
                 tray: &Default::default(),
@@ -2173,7 +2219,7 @@ format = '$text'
                 &cfg,
                 &inputs,
                 480.0,
-                20.0,
+                12.0,
                 &mut Blocks {
                     scale: 1.0,
                     run: None,
@@ -2283,6 +2329,7 @@ format = '$text'
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
+            folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -2475,6 +2522,110 @@ background = "#83a598"
             }
         }
     }
+    /// A folding island holds content measured for the width it had when it was open, and
+    /// the edge travels over it. Everything that reaches the screen has to stop at that
+    /// edge, corners included - the fills through the mask, and the glyphs through it too,
+    /// since the backend rasterises and places those itself and a straight column can stop
+    /// text at an edge but not at a rounded corner.
+    #[test]
+    fn a_folding_island_paints_nothing_outside_its_own_outline() {
+        use crate::{
+            collect::Registry,
+            layout::Inputs,
+            status::{Fields, StatusItem, Value},
+        };
+        let cfg = Config::parse(
+            "[left]\ngroups = ['a']\n[group.a]\nmodules = ['a']\ncollapsible = true\n             collapse_button = 'right'\ncollapse_animation = '150ms'\nbackground = '#3c3836'\n             radius = 8\npadding = 2\ncollapsed = { icon = 'cpu', icon_size = 10, padding = 3,              background = '#83a598' }\n[module.a]\nbackground = '#cc241d'\npadding = 12\n             format = '$text'\n",
+        )
+        .unwrap();
+        let mut fields = Fields::default();
+        fields.set("text", Value::Text("a very long wording indeed".into()));
+        let items = [StatusItem {
+            id: Some("a".into()),
+            fields,
+            state: Default::default(),
+            urgent: false,
+            foreground: None,
+            background: None,
+            action: None,
+        }];
+        let native = Registry::new(&Default::default());
+        let frame = |folding: &std::collections::HashMap<String, f32>| {
+            let inputs = Inputs {
+                items: &items,
+                native: &native,
+                sway: &Default::default(),
+                alt: &Default::default(),
+                pages: &Default::default(),
+                collapsed: &Default::default(),
+                collapsed_groups: &Default::default(),
+                folding,
+                waiting: &Default::default(),
+                spin: 0,
+                tray: &Default::default(),
+                output: None,
+            };
+            crate::layout::compute(
+                &cfg,
+                &inputs,
+                480.0,
+                12.0,
+                &mut Blocks {
+                    scale: 1.0,
+                    run: None,
+                },
+                None,
+            )
+        };
+        let open = frame(&Default::default());
+        for at in [0.25, 0.5, 0.75] {
+            let travelling = frame(&[("a".to_string(), at)].into());
+            let island = &travelling.groups[0];
+            assert!(island.width < open.groups[0].width);
+            let last = island.modules.last().unwrap();
+            assert!(
+                last.x + last.width > island.x + island.width,
+                "nothing to clip at {at}"
+            );
+            // Inside the island's own rounded rectangle. A straight column can stop text
+            // at an edge but not at a corner, and the content of a folding island runs
+            // right into its rounded ones.
+            let radius = 6.0f32;
+            let outside = |px: f32, py: f32| {
+                let (x0, x1) = (island.x, island.x + island.width);
+                let (y0, y1) = (island.y, island.y + island.height);
+                if px < x0 - 0.5 || px > x1 + 0.5 || py < y0 - 0.5 || py > y1 + 0.5 {
+                    return true;
+                }
+                let cx = px.clamp(x0 + radius, (x1 - radius).max(x0 + radius));
+                let cy = py.clamp(y0 + radius, (y1 - radius).max(y0 + radius));
+                let (dx, dy) = (px - cx, py - cy);
+                (dx * dx + dy * dy).sqrt() > radius + 0.5
+            };
+            for scale in [1.0, 2.0] {
+                let shot = shot(&travelling, scale);
+                let width = shot.width();
+                let mut drew = false;
+                for (n, pixel) in shot.pixels().iter().enumerate() {
+                    // Only what is solidly painted: every outline in the frame is
+                    // antialiased, so a partly covered pixel on a boundary says nothing
+                    // about whether the island kept its contents in.
+                    if pixel.alpha() < 250 {
+                        continue;
+                    }
+                    drew = true;
+                    let px = (n as u32 % width) as f32 / scale;
+                    let py = (n as u32 / width) as f32 / scale;
+                    assert!(
+                        !outside(px, py),
+                        "painted at {px},{py} at {at} scale {scale}"
+                    );
+                }
+                assert!(drew, "nothing was drawn at all");
+            }
+        }
+    }
+
     #[test]
     fn collapsed_groups_keep_islands_caps_and_damage_every_changed_pixel() {
         use crate::{
@@ -2530,6 +2681,7 @@ background = "#83a598"
                             pages: &Default::default(),
                             collapsed: &Default::default(),
                             collapsed_groups: groups,
+                            folding: &Default::default(),
                             waiting: &Default::default(),
                             spin: 0,
                             tray: &Default::default(),

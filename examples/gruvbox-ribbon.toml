@@ -183,6 +183,13 @@ direction = "right"
 # Reserve right click throughout this group; click the CPU icon with right to expand.
 collapsible = true
 collapse_button = "right"
+# The fold travels instead of jumping. This group sits in the middle of a joined
+# run, which is where a fold has the most to get right: the slant it shares with
+# `connections` belongs to the island rather than to the last module inside it, so
+# it moves in with the edge while the readings slide underneath and are cut off at
+# it. Leave the line out and the fold is one redraw, which is what it costs at rest
+# either way - the timer runs only while the island is moving.
+collapse_animation = "140ms"
 modules = ["cpu", "memory", "temperature"]
 background = "#00000000"
 radius = 0

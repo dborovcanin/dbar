@@ -68,6 +68,47 @@ const SPIN_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
 /// also the whole price of the spinner, since every step is a redraw, which is why it is
 /// paid only while a program is actually out and never at idle.
 const SPIN_STEP: std::time::Duration = std::time::Duration::from_millis(60);
+/// How often a fold on its way is moved along.
+///
+/// A fold lasts a fraction of a second and is the only thing on the bar that has to look
+/// continuous, so it is stepped at about the rate a screen refreshes rather than at the
+/// spinner's. The redraw it asks for is still held back by the frame callback, so a
+/// compositor that draws more slowly than this simply drops the steps in between.
+const FOLD_STEP: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// A group on its way between open and shut.
+///
+/// The settled state is flipped the moment the click lands; this only says how the island
+/// gets from the width it had to the width it is owed, and stops existing when it arrives.
+struct Fold {
+    /// Where the island was when the click landed, 0.0 open and 1.0 shut.
+    from: f32,
+    /// Which of those it is going to.
+    to: f32,
+    started: std::time::Instant,
+    over: std::time::Duration,
+}
+
+impl Fold {
+    /// Where the fold has got to, eased so it leaves and arrives slowly.
+    ///
+    /// Smoothstep rather than anything configurable: an easing curve is a knob, and the
+    /// difference between this and a linear ramp is the whole of what a fold is for.
+    fn at(&self, now: std::time::Instant) -> f32 {
+        let over = self.over.as_secs_f32();
+        let gone = now.saturating_duration_since(self.started).as_secs_f32();
+        let linear = match over > 0.0 {
+            true => (gone / over).clamp(0.0, 1.0),
+            false => 1.0,
+        };
+        let eased = linear * linear * (3.0 - 2.0 * linear);
+        self.from + (self.to - self.from) * eased
+    }
+
+    fn arrived(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.started) >= self.over
+    }
+}
 
 /// What a menu hangs from.
 enum Anchor2 {
@@ -291,6 +332,15 @@ pub struct App {
     collapsed: std::collections::HashSet<String>,
     /// Group state is shared by all outputs and independent of child gestures.
     collapsed_groups: std::collections::HashSet<String>,
+    /// Groups still travelling towards that state, by name.
+    folds: std::collections::HashMap<String, Fold>,
+    /// How far each of them has got, which is the only part layout is shown.
+    ///
+    /// Kept beside `folds` rather than worked out while laying out, so that a frame is a
+    /// function of what it is given and the clock stays up here where the timer is.
+    folding: std::collections::HashMap<String, f32>,
+    /// Whether a timer is already moving those folds along.
+    fold_scheduled: bool,
     /// Which sources each realtime signal reads again.
     signals: std::collections::HashMap<i32, Vec<Which>>,
     /// The way to ask a command module's program for another reading, by source.
@@ -403,6 +453,9 @@ impl App {
             children: Vec::new(),
             collapsed: std::collections::HashSet::new(),
             collapsed_groups: std::collections::HashSet::new(),
+            folds: std::collections::HashMap::new(),
+            folding: std::collections::HashMap::new(),
+            fold_scheduled: false,
             signals: config_signals,
             triggers: std::collections::HashMap::new(),
             running: std::collections::HashMap::new(),
@@ -1196,6 +1249,90 @@ impl App {
         next
     }
 
+    /// Turn a group's fold around, and set it travelling if the config asked for that.
+    ///
+    /// The settled state flips at once whether or not anything is animated, so a click is
+    /// never lost and a fold caught half way still knows which end it is heading for.
+    fn fold_group(&mut self, name: String) {
+        let shut = !self.collapsed_groups.remove(&name);
+        if shut {
+            self.collapsed_groups.insert(name.clone());
+        }
+        let Some(over) = self.fold_time(&name) else {
+            // Nothing to unwind: a group whose config never asked for a fold cannot have
+            // one in flight, but one whose config changed under a reload could.
+            self.folds.remove(&name);
+            self.folding.remove(&name);
+            return;
+        };
+        let to = f32::from(u8::from(shut));
+        // From wherever it had got to, so turning around half way carries on from there
+        // rather than jumping to the end it was leaving.
+        let from = self.folding.get(&name).copied().unwrap_or(1.0 - to);
+        self.folds.insert(
+            name.clone(),
+            Fold {
+                from,
+                to,
+                started: std::time::Instant::now(),
+                over,
+            },
+        );
+        self.folding.insert(name, from);
+    }
+
+    /// How long this group's fold is meant to take, if it takes any time at all.
+    fn fold_time(&self, name: &str) -> Option<std::time::Duration> {
+        self.config
+            .positions
+            .iter()
+            .flat_map(|position| &position.groups)
+            .find(|group| group.name == name)
+            .and_then(|group| group.collapse.as_ref())
+            .and_then(|collapse| collapse.animation)
+    }
+
+    /// Move every fold along, and say when the next step is wanted.
+    ///
+    /// Returning nothing stops the timer, which is the frame the last fold arrives on: a
+    /// bar with nothing travelling is back to costing nothing.
+    pub fn on_fold(&mut self) -> Option<std::time::Instant> {
+        let now = std::time::Instant::now();
+        let was = self.folds.len();
+        let App { folds, folding, .. } = self;
+        folds.retain(|_, fold| !fold.arrived(now));
+        // Arriving takes a group out of here entirely, and layout reads the settled state
+        // again - which is what brings back the fast path that never formats a shut
+        // group's children.
+        folding.retain(|name, _| folds.contains_key(name));
+        for (name, fold) in folds.iter() {
+            // Put there by `fold_group` alongside the fold itself, so this only ever
+            // writes over a number and never allocates a name.
+            if let Some(at) = folding.get_mut(name) {
+                *at = fold.at(now);
+            }
+        }
+        let travelling = !self.folds.is_empty();
+        // The frame a fold arrives on is as much a change as any it moved through.
+        if travelling || was > 0 {
+            self.invalidate();
+        }
+        self.fold_scheduled = travelling;
+        travelling.then(|| now + FOLD_STEP)
+    }
+
+    /// Whether a fold has started that nothing is moving along yet.
+    ///
+    /// Says so once and then claims the job, the way a command starting claims the
+    /// spinner: two timers on one fold would step it twice as fast.
+    pub fn take_fold_timer(&mut self) -> bool {
+        if self.folds.is_empty() || self.fold_scheduled {
+            return false;
+        }
+        self.fold_scheduled = true;
+        true
+    }
+
     /// Take the sources a watcher covers off the timer.
     pub fn on_watching(&mut self, covered: &[Which]) {
         for which in covered {
@@ -1371,6 +1508,7 @@ impl App {
             pages,
             collapsed,
             collapsed_groups,
+            folding,
             waiting,
             spin,
             tray,
@@ -1390,6 +1528,7 @@ impl App {
             pages,
             collapsed,
             collapsed_groups,
+            folding,
             waiting,
             spin: *spin,
             tray,
@@ -1540,9 +1679,7 @@ impl App {
         let module = match self.bars[i].frame.click_at(x as f32, y as f32, button) {
             Some(layout::ClickTarget::Group(name)) => {
                 let name = name.to_string();
-                if !self.collapsed_groups.remove(&name) {
-                    self.collapsed_groups.insert(name);
-                }
+                self.fold_group(name);
                 self.invalidate();
                 return;
             }
@@ -2140,6 +2277,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_fold_eases_between_its_two_ends_and_stops_at_them() {
+        let started = std::time::Instant::now();
+        let over = std::time::Duration::from_millis(200);
+        let fold = Fold {
+            from: 0.0,
+            to: 1.0,
+            started,
+            over,
+        };
+        assert_eq!(fold.at(started), 0.0);
+        assert_eq!(fold.at(started + over), 1.0);
+        // Past the end it stays there rather than running on, which is what makes the
+        // frame a fold arrives on the same picture as every frame after it.
+        assert_eq!(fold.at(started + over * 3), 1.0);
+        assert!(fold.arrived(started + over) && !fold.arrived(started + over / 2));
+
+        // Eased: slow away from each end and quickest through the middle.
+        let quarter = fold.at(started + over / 4);
+        let half = fold.at(started + over / 2);
+        assert!((half - 0.5).abs() < 0.001);
+        assert!(quarter < 0.25, "a fold leaves slowly, got {quarter}");
+
+        // The other way round is the same curve read backwards.
+        let back = Fold {
+            from: 1.0,
+            to: 0.0,
+            started,
+            over,
+        };
+        assert!((back.at(started + over / 4) - (1.0 - quarter)).abs() < 0.001);
+
+        // Turned around half way, it carries on from where it had got to.
+        let turned = Fold {
+            from: half,
+            to: 0.0,
+            started,
+            over,
+        };
+        assert_eq!(turned.at(started), half);
+        assert_eq!(turned.at(started + over), 0.0);
+    }
+
     /// The wheel turns pages on a module that has them. It used to be answered by
     /// whatever the module's buttons did, because a notch has no button to compare.
     #[test]
@@ -2369,6 +2549,7 @@ mod tests {
                     next.x = 20.0;
                     let group = PlacedGroup {
                         collapse: Some(("system".into(), reserved)),
+                        clipped: false,
                         x: 0.0,
                         y: 0.0,
                         width: 40.0,
