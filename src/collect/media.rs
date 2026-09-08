@@ -219,8 +219,18 @@ fn run(sender: calloop::channel::Sender<Reading>, commands: OwnedFd) -> Result<(
             let mut stale = false;
             loop {
                 let message = bus.receive()?;
-                stale |= message.is_signal(PROPERTIES, "PropertiesChanged")
-                    || message.is_signal("org.freedesktop.DBus", "NameOwnerChanged");
+                if message.is_signal("org.freedesktop.DBus", "NameOwnerChanged") {
+                    // The name is the same name whoever holds it, so what the last holder
+                    // called itself is not what this one is called. Taking it out here
+                    // rather than when the name leaves the bus is the difference that
+                    // matters now that a burst is answered once: a player restarting
+                    // inside one is a name that never appeared to go away.
+                    if let Some(name) = message.body.first().and_then(Value::as_str) {
+                        identities.remove(name);
+                    }
+                    stale = true;
+                }
+                stale |= message.is_signal(PROPERTIES, "PropertiesChanged");
                 if !bus.has_message() && !readable(bus.fd()) {
                     break;
                 }
