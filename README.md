@@ -4,9 +4,9 @@ A small, event-driven Wayland status bar for Sway/SwayFX. It renders with
 `tiny-skia` on a `wlr-layer-shell` surface and reads what it shows itself, from
 `/proc`, `/sys` and PipeWire. Any i3bar-compatible provider can supply the rest.
 
-![dbar running examples/advanced.toml](docs/gallery/advanced.png)
+![dbar running examples/gruvbox-islands.toml](docs/gallery/gruvbox-islands.png)
 
-*[examples/advanced.toml](examples/advanced.toml): Gruvbox islands with curved
+*[examples/gruvbox-islands.toml](examples/gruvbox-islands.toml): Gruvbox islands with curved
 transitions between the modules inside each one, and what is playing shown only
 while something is.*
 
@@ -51,13 +51,13 @@ opt-in, and a bar that does not name one never starts one.
 ```sh
 git clone https://github.com/dborovcanin/dbar && cd dbar
 make prod                                          # optimized build
-./target/release/dbar -c examples/advanced.toml    # try one of the example bars
+./target/release/dbar -c examples/gruvbox-islands.toml    # try one of the example bars
 sudo make install                                  # keep it: /usr/bin/dbar
 ```
 
 ### What it needs
 
-A compositor with `wlr-layer-shell` — Sway or SwayFX — and Rust 1.88 or newer.
+A compositor with `wlr-layer-shell` — Sway or SwayFX — and Rust 1.89 or newer.
 The build links xkbcommon, Wayland and PipeWire, and generates bindings for the
 last of those with `clang`:
 
@@ -81,7 +81,7 @@ Once you like one, keep it as your own and let Sway start it:
 
 ```sh
 mkdir -p ~/.config/dbar
-cp examples/advanced.toml ~/.config/dbar/config.toml
+cp examples/gruvbox-islands.toml ~/.config/dbar/config.toml
 ```
 
 ```sh
@@ -211,7 +211,7 @@ than another. CPU is `utime + stime` from `/proc/PID/stat` differenced across th
 window; memory is read from `/proc/PID/status` at the end of it. Both bars that
 run helpers are counted whole - swaybar plus the `i3status-rs` it starts.
 
-dbar ran [examples/advanced.toml](examples/advanced.toml): fifteen modules -
+dbar ran [examples/gruvbox-islands.toml](examples/gruvbox-islands.toml): fifteen modules -
 workspaces, binding mode, window title, media, weather, tray, cpu, memory,
 temperature, keyboard layout, network, volume, brightness, battery and the clock.
 
@@ -271,13 +271,30 @@ The rest of `examples/` is a gallery. Each is a complete bar in a different
 style, annotated with why it looks the way it does, and each runs with nothing
 else installed. Every screenshot below is that file, unedited:
 
-### [advanced.toml](examples/advanced.toml)
+### [gruvbox-islands.toml](examples/gruvbox-islands.toml)
 
 Gruvbox islands, a `curve` between the modules inside each one, and the
 compositor's binding mode appearing between the workspaces and the window only
 while a mode is held.
 
-![advanced.toml](docs/gallery/advanced.png)
+![gruvbox-islands.toml](docs/gallery/gruvbox-islands.png)
+
+Two of its modules reach outside dbar, and both are optional - the bar is whole
+without either, and neither has to be set up before trying it:
+
+- **The weather** runs [`examples/weather.sh`](examples/weather.sh), which needs
+  `curl`, `jq` and a free [OpenWeatherMap](https://openweathermap.org/api) key in
+  `~/.config/dbar/owm.key`. Without one the module draws *unavailable* and stays
+  clickable; a middle click asks again once the key is there.
+- **The clock's left click** opens
+  [`examples/sway_calendar.sh`](examples/sway_calendar.sh), three months in a
+  floating `foot` window. Any other program is one line: `on_click = { left =
+  [...] }` takes an argv and runs it directly.
+
+Both are named by a path relative to the repository, so they work when dbar is
+started from a checkout. A config kept in `~/.config/dbar` wants the absolute
+path to wherever you put the script - dbar runs argv directly, with no shell
+anywhere, so nothing in it is expanded.
 
 ### [nord.toml](examples/nord.toml)
 
@@ -326,6 +343,20 @@ centre where the eye finds it without looking.
 | [separators.toml](examples/separators.toml) | all seven separator shapes, side by side               |
 | [showcase.toml](examples/showcase.toml)     | every key dbar understands, as a reference             |
 | [weather.sh](examples/weather.sh)           | a `command` module's program, a page per city          |
+| [sway_calendar.sh](examples/sway_calendar.sh) | three months in a floating window, for the clock's click |
+
+The same fifteen modules arranged seven other ways - same readings, same
+intervals, same clicks, a different bar:
+
+|                                                             |                                                       |
+| ----------------------------------------------------------- | ----------------------------------------------------- |
+| [mocha-floating.toml](examples/mocha-floating.toml)         | Catppuccin Mocha, floating, soft pills and no fills   |
+| [nord-rail.toml](examples/nord-rail.toml)                   | Nord along the bottom, one rail with thin dividers    |
+| [gruvbox-ribbon.toml](examples/gruvbox-ribbon.toml)         | groups joined into two ribbons, colours blending      |
+| [latte-panel.toml](examples/latte-panel.toml)               | Catppuccin Latte, opaque and light, square with notches |
+| [tokyonight-capsules.toml](examples/tokyonight-capsules.toml) | Tokyo Night, a capsule per reading                    |
+| [everforest-desk.toml](examples/everforest-desk.toml)       | Everforest along the bottom, grouped by what it is for |
+| [rosepine-curves.toml](examples/rosepine-curves.toml)       | Rosé Pine, asymmetric islands, left-facing curves     |
 
 ```sh
 dbar -c examples/islands.toml
@@ -705,7 +736,7 @@ while hidden, so expansion shows current data. A collapsed group stays visible
 even if its children become empty, provided the icon fits the available width;
 an expanded empty group disappears as usual. Group background, opacity, padding,
 edges and caps remain in effect, and neighboring joins use the icon's style.
-[advanced.toml](examples/advanced.toml) uses right click to fold CPU, RAM and
+[gruvbox-islands.toml](examples/gruvbox-islands.toml) uses right click to fold CPU, RAM and
 temperature into a Tux penguin.
 
 Groups in one alignment can also share transitions, without merging their module
@@ -737,7 +768,7 @@ last visible block on the left and the first on the right, including their state
 and hover colors. `color = "background"` refers to the bar background here, and
 `line` leaves that background visible around the stroke. Width must be finite
 and positive. Joins do not receive clicks. See
-[advanced_3.toml](examples/advanced_3.toml) for a complete example. Groups remain
+[gruvbox-ribbon.toml](examples/gruvbox-ribbon.toml) for a complete example. Groups remain
 independently drawn: transparent group backgrounds and square block fills are
 the cheapest ribbon style; separate filled, rounded group backgrounds add paint
 work compared with a merged group.
