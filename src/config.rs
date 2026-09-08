@@ -1797,6 +1797,9 @@ fn parse_duration(written: &str) -> Result<Duration> {
              can be read"
         );
     }
+    if seconds > LONGEST_INTERVAL.as_secs_f64() {
+        bail!("{text:?} is longer than a year, which is longer than dbar can schedule");
+    }
     Duration::try_from_secs_f64(seconds)
         .map_err(|_| anyhow!("{text:?} is longer than a length of time dbar can schedule"))
 }
@@ -1807,6 +1810,15 @@ fn parse_duration(written: &str) -> Result<Duration> {
 /// is a length a person can write on purpose. Below it lies the range where a rounding
 /// error is the whole value.
 const SHORTEST_INTERVAL: Duration = Duration::from_millis(1);
+
+/// The longest interval a source may be given.
+///
+/// Fitting in a `Duration` is not the same as being a schedule. A deadline is `Instant`
+/// plus the wait, and a wait that fails is doubled up to thirty-two times over - both of
+/// which panic on overflow, so a length that only just fits is a bar that stops the first
+/// time its collector is due. A year is already far longer than anything a bar is waiting
+/// for, and a year doubled thirty-two times is still nowhere near the end of the range.
+const LONGEST_INTERVAL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 
 /// Every source a module can be built on, under the name a config writes for it.
 ///
@@ -3238,10 +3250,28 @@ source = "sway:window"
         }
         // Scientific notation is refused a step earlier - "e300s" is not a unit - so the
         // cases here are the ones that reach the conversion as a number.
-        for longer in ["999999999999999999999999999s", "99999999999999999999h"] {
+        //
+        // The last two fit in a `Duration` and are still not schedules: a deadline is an
+        // `Instant` plus the wait, and a wait that keeps failing is doubled, and both of
+        // those panic on overflow rather than saturating. A bar that started would stop
+        // the first time that collector came due.
+        for longer in [
+            "999999999999999999999999999s",
+            "99999999999999999999h",
+            "9223372036854775808s",
+            "1000000000000000000s",
+        ] {
             let e = parse_duration(longer).expect_err("longer than dbar can schedule");
             assert!(format!("{e:#}").contains("longer"), "{e:#}");
         }
+
+        // A year is allowed, and survives everything scheduling does to it.
+        let year = parse_duration("8760h").expect("a year is a length of time");
+        let latest = crate::collect::backoff(year, u32::MAX);
+        assert!(
+            std::time::Instant::now().checked_add(latest).is_some(),
+            "the longest allowed interval does not survive being backed off"
+        );
     }
 
     #[test]
