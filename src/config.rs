@@ -2000,9 +2000,25 @@ fn resolve_group(
             anyhow!("[group.{name}]: collapsible requires an explicit collapse_button")
         })?;
         let style = collapsed_style.unwrap_or(base);
-        if style.icon.is_none() || !style.icon_size.is_finite() || style.icon_size <= 0.0 {
+        let Some(icon) = style.icon else {
             bail!(
                 "[group.{name}.collapsed]: collapsible requires an icon with positive finite icon_size"
+            );
+        };
+        if !style.icon_size.is_finite() || style.icon_size <= 0.0 {
+            bail!(
+                "[group.{name}.collapsed]: collapsible requires an icon with positive finite icon_size"
+            );
+        }
+        // The collapsed icon is the only thing left to click on to expand the group again,
+        // so a width it can never fit into is not a group that renders narrow - it is a
+        // group that disappears until dbar is restarted. Worked out the way layout does.
+        let width = (style.icon_size * icon.width() + style.padding * 2.0).max(style.min_width);
+        if style.max_width > 0.0 && width > style.max_width {
+            bail!(
+                "[group.{name}.collapsed]: the collapsed icon needs {width}px but max_width \
+                 is {max}px, so the group would have nothing left to expand it with",
+                max = style.max_width
             );
         }
         Some(GroupCollapse { button, style })

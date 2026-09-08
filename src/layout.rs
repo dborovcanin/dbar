@@ -4109,11 +4109,13 @@ format_alt = 'alt $text'
                 assert_eq!(icon.y, 10.0);
             }
         }
-        let capped = Config::parse(&config.replace("min_width = 22", "max_width = 17")).unwrap();
+        // A cap the collapsed icon cannot fit into leaves the group nothing to expand it
+        // with, so it is refused when the config is read rather than at the first click.
+        let capped = Config::parse(&config.replace("min_width = 22", "max_width = 17"));
+        let refused = format!("{:#}", capped.expect_err("a cap the icon cannot fit"));
         assert!(
-            compute(&capped, &inputs, 100.0, 30.0, &mut Fixed, None)
-                .groups
-                .is_empty()
+            refused.contains("nothing left to expand it with"),
+            "unexpected error: {refused}"
         );
         let items = [item("a", "first"), item("b", "second")];
         let empty = Default::default();
