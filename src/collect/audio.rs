@@ -159,7 +159,19 @@ struct Sinks {
     cards: HashMap<u32, Card>,
     sender: calloop::channel::Sender<Reading>,
     /// The last reading sent, so an event that changes nothing does not redraw the bar.
-    last: Option<(f64, bool, Option<String>, Option<&'static str>)>,
+    last: Sent,
+}
+
+/// What was last said about the default output.
+///
+/// Three states rather than two: having said nothing yet is not the same as having said
+/// there is nothing, and only the first of those may be followed by silence when the
+/// output goes away.
+#[derive(Debug, PartialEq)]
+enum Sent {
+    Nothing,
+    Absent,
+    Levels(f64, bool, Option<String>, Option<&'static str>),
 }
 
 impl Sinks {
@@ -200,18 +212,26 @@ impl Sinks {
     /// Send what the default sink is now saying, if it is saying anything new.
     fn publish(&mut self) {
         let Some(levels) = self.levels() else {
+            // The default output has gone - the last sink removed, or its card unplugged.
+            // Saying nothing here would leave the volume, the device and the port of
+            // something that is no longer there on the bar for as long as the bar runs.
+            if self.last != Sent::Absent {
+                log::debug!("no default output, so the module has nothing to show");
+                self.last = Sent::Absent;
+                self.send();
+            }
             return;
         };
         let description = self.current().and_then(|sink| sink.description.clone());
         let port = self.port();
         // Part of the reading, so plugging headphones in redraws the bar even though the
         // volume and the mute state have not moved.
-        let current = (levels.volume, levels.muted, description.clone(), port);
+        let current = Sent::Levels(levels.volume, levels.muted, description.clone(), port);
         let (volume, muted) = (levels.volume, levels.muted);
-        if self.last.as_ref() == Some(&current) {
+        if self.last == current {
             return;
         }
-        self.last = Some(current);
+        self.last = current;
         log::debug!(
             "volume {volume:.1}%, muted {muted}, port {}, from {}",
             port.unwrap_or("unknown"),
@@ -226,35 +246,53 @@ impl Sinks {
             }
         );
 
+        self.send();
+    }
+
+    /// Send what was last worked out about the default output.
+    ///
+    /// An output that is not there publishes every field as absent rather than nothing at
+    /// all. A format whose fields are all absent draws nothing, which is the honest picture
+    /// of a machine with no sound card left in it.
+    fn send(&self) {
         let mut fields = Fields::default();
-        fields.set(
-            "volume",
-            Field::Num {
-                v: volume,
-                unit: Unit::Percent,
-            },
-        );
-        fields.set(
-            "muted",
-            Field::Text(match muted {
-                true => "yes".to_string(),
-                false => "no".to_string(),
-            }),
-        );
-        fields.set(
-            "device",
-            match description {
-                Some(description) => Field::Text(description),
-                None => Field::Absent,
-            },
-        );
-        fields.set(
-            "port",
-            match port {
-                Some(port) => Field::Text(port.to_string()),
-                None => Field::Absent,
-            },
-        );
+        match &self.last {
+            Sent::Levels(volume, muted, description, port) => {
+                fields.set(
+                    "volume",
+                    Field::Num {
+                        v: *volume,
+                        unit: Unit::Percent,
+                    },
+                );
+                fields.set(
+                    "muted",
+                    Field::Text(match muted {
+                        true => "yes".to_string(),
+                        false => "no".to_string(),
+                    }),
+                );
+                fields.set(
+                    "device",
+                    match description {
+                        Some(description) => Field::Text(description.clone()),
+                        None => Field::Absent,
+                    },
+                );
+                fields.set(
+                    "port",
+                    match port {
+                        Some(port) => Field::Text(port.to_string()),
+                        None => Field::Absent,
+                    },
+                );
+            }
+            _ => {
+                for spec in FIELDS {
+                    fields.set(spec.name, Field::Absent);
+                }
+            }
+        }
         fields.set_primary("volume");
 
         // The channel closes when the bar is shutting down, and a volume nobody is going
@@ -286,7 +324,7 @@ fn run(
         by_id: HashMap::new(),
         cards: HashMap::new(),
         sender,
-        last: None,
+        last: Sent::Nothing,
     }));
 
     let proxies: Bound = Rc::new(RefCell::new(HashMap::new()));
