@@ -260,9 +260,11 @@ struct Tray {
 /// announcements costs one walk rather than one each.
 ///
 /// A miss is kept differently from a find. An application may name its icon before the file
-/// is there - artwork installed with it, a theme directory it is still writing - and a miss
-/// remembered for good would outlive the race and leave the item blank until dbar restarts.
-/// So a miss is looked for again, but not at once and not for ever.
+/// is there - artwork installed with it, a theme directory it is still writing, a theme
+/// somebody installs while the bar runs - and a miss remembered for good would outlive the
+/// race and leave the item blank until dbar restarts. So a miss is looked for again, but
+/// each time less often than the last: quickly enough to catch the race, seldom enough that
+/// a name nothing will ever resolve costs nothing worth measuring.
 ///
 /// Bounded, because the names come off the bus and dbar does not decide how many there are.
 /// A live item's artwork is shared with the item itself, so a cached entry for something on
@@ -295,9 +297,23 @@ impl Icons {
     /// short enough that artwork appearing a moment after its name is picked up.
     const RETRY: Duration = Duration::from_secs(5);
 
-    /// How many times one name may send us back to the theme. An icon that is not installed
-    /// is not going to be, and the walk is not free.
-    const TRIES: u8 = 3;
+    /// How far apart the looking is allowed to get.
+    ///
+    /// Each miss doubles the wait, so a name that is never going to resolve stops costing
+    /// anything worth measuring - but it is never given up on, because the reason a name
+    /// misses is sometimes a theme that is being installed while the bar runs.
+    const SELDOM: Duration = Duration::from_secs(320);
+
+    /// How long to leave a name alone after it has missed `tries` times.
+    ///
+    /// Doubling from `RETRY`, so the first look back is quick - artwork arriving a moment
+    /// after the name that asks for it is the case worth catching - and the hundredth costs
+    /// nothing.
+    fn again_in(tries: u8) -> Duration {
+        Self::RETRY
+            .saturating_mul(1u32 << tries.saturating_sub(1).min(6))
+            .min(Self::SELDOM)
+    }
 
     /// The artwork for a name, asking the icon theme only if it has not been asked before.
     ///
@@ -324,15 +340,12 @@ impl Icons {
         find: impl FnOnce() -> Option<Arc<Raster>>,
     ) -> Option<Arc<Raster>> {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.key == key) {
-            if entry.found.is_some()
-                || entry.tries >= Self::TRIES
-                || entry.looked.elapsed() < Self::RETRY
-            {
+            if entry.found.is_some() || entry.looked.elapsed() < Self::again_in(entry.tries) {
                 return entry.found.clone();
             }
             entry.found = find();
             entry.looked = Instant::now();
-            entry.tries += 1;
+            entry.tries = entry.tries.saturating_add(1);
             return entry.found.clone();
         }
         let found = find();
@@ -1078,11 +1091,10 @@ mod tests {
     }
 
     /// A name that resolves to nothing now may resolve later: an application can announce
-    /// its icon before the file it names is there - artwork installed alongside it, or a
-    /// theme directory it is still writing. A miss that stood for ever left the item blank
-    /// until dbar restarted.
+    /// its icon before the file it names is there, and a theme can be installed while the
+    /// bar runs. A miss that stood for ever left the item blank until dbar restarted.
     #[test]
-    fn a_missing_icon_is_looked_for_again_but_not_for_ever() {
+    fn a_missing_icon_is_looked_for_again_less_and_less_often() {
         let art = || {
             Some(Arc::new(Raster {
                 width: 1,
@@ -1098,9 +1110,9 @@ mod tests {
             })
         };
         // Time passing, without the test taking that long.
-        let age = |icons: &mut Icons| {
+        let age = |icons: &mut Icons, by: Duration| {
             for entry in &mut icons.entries {
-                entry.looked -= Icons::RETRY;
+                entry.looked -= by;
             }
         };
 
@@ -1112,22 +1124,28 @@ mod tests {
         assert_eq!(asked, 1, "the window did not hold");
         // Once it has passed, the name is looked for again - and the artwork that turned
         // up in the meantime is found.
-        age(&mut icons);
+        age(&mut icons, Icons::RETRY);
         assert!(look(&mut icons, &mut asked, art()).is_some());
         assert_eq!(asked, 2);
         // What was found stays found, and costs nothing to ask for again.
-        age(&mut icons);
+        age(&mut icons, Icons::SELDOM);
         assert!(look(&mut icons, &mut asked, None).is_some());
         assert_eq!(asked, 2);
 
-        // An icon that is not installed is not going to be, so the looking has an end.
+        // A name that keeps missing is looked for less and less often, and never given up
+        // on: the artwork may still be being installed.
         let mut icons = Icons::default();
         let mut asked = 0;
-        for _ in 0..Icons::TRIES + 2 {
+        for round in 0..12 {
             look(&mut icons, &mut asked, None);
-            age(&mut icons);
+            // Long enough for the first few, and not for the later ones.
+            age(&mut icons, Icons::RETRY * 4);
+            assert!(asked <= round + 1);
         }
-        assert_eq!(asked, Icons::TRIES as usize);
+        assert!(asked > 1 && asked < 12, "asked {asked} times in 12 rounds");
+        // However long it has been missing, artwork that appears is still found.
+        age(&mut icons, Icons::SELDOM);
+        assert!(look(&mut icons, &mut asked, art()).is_some());
     }
 
     /// The spec says an application passes its bus name; several pass the object path
