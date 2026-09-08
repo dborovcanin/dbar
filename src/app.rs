@@ -985,7 +985,17 @@ impl App {
     }
 
     /// Follow the pointer across a menu, and redraw only when the row under it changes.
+    ///
+    /// The pointer leaving is not the pointer moving elsewhere in the menu. Walking from a
+    /// row into the submenu it opened leaves this surface for that one, and the leave
+    /// arrives first: closing what the row opened on the way out would destroy the menu the
+    /// pointer is on its way to, before the enter that says so. So a row with something
+    /// open below it keeps its highlight and keeps what it opened, and the pointer landing
+    /// on another row is what closes it.
     fn menu_pointer(&mut self, index: usize, at: Option<(f32, f32)>) {
+        if at.is_none() && (self.menus.len() > index + 1 || self.menus[index].awaiting.is_some()) {
+            return;
+        }
         let menu = &mut self.menus[index];
         let was = menu.hover;
         menu.hover = at.and_then(|(_, y)| menu.frame.row_at(y));
