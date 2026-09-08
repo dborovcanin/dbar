@@ -1785,8 +1785,28 @@ fn parse_duration(written: &str) -> Result<Duration> {
         "h" => value * 3600.0,
         other => bail!("unknown unit {other:?} in {text:?}; use ms, s, m or h"),
     };
-    Ok(Duration::from_secs_f64(seconds))
+    // Both ends are refused rather than rounded to something that looks like an answer.
+    // A length too small to be one leaves its collector due the moment it has been read,
+    // which is a bar reading a source as fast as the machine can - what an interval
+    // exists to prevent. A length too large is not a schedule anybody wrote on purpose,
+    // and `Duration` cannot hold it: converting it panics, which took `--check-config`
+    // down with it.
+    if seconds < SHORTEST_INTERVAL.as_secs_f64() {
+        bail!(
+            "{text:?} is shorter than {SHORTEST_INTERVAL:?}, which is as often as a source \
+             can be read"
+        );
+    }
+    Duration::try_from_secs_f64(seconds)
+        .map_err(|_| anyhow!("{text:?} is longer than a length of time dbar can schedule"))
 }
+
+/// The shortest interval a source may be given.
+///
+/// A millisecond is already far more often than anything a bar shows can change, and it
+/// is a length a person can write on purpose. Below it lies the range where a rounding
+/// error is the whole value.
+const SHORTEST_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Every source a module can be built on, under the name a config writes for it.
 ///
@@ -3201,6 +3221,27 @@ source = "sway:window"
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("-1s").is_err());
         assert!(parse_duration("s").is_err());
+    }
+
+    /// A length is refused at both ends rather than rounded into something that looks
+    /// like an answer. Too small used to arrive as zero, which leaves a collector due the
+    /// moment it has been read - a bar reading a source as fast as the machine can, which
+    /// is what an interval exists to prevent. Too large used to panic in the conversion,
+    /// so a config nobody could run took `--check-config` down rather than being reported.
+    #[test]
+    fn a_length_of_time_has_two_ends() {
+        assert_eq!(parse_duration("1ms").unwrap(), Duration::from_millis(1));
+
+        for shorter in ["0.0000000001s", "0.0001ms", "0.00000001m"] {
+            let e = parse_duration(shorter).expect_err("shorter than dbar can schedule");
+            assert!(format!("{e:#}").contains("shorter"), "{e:#}");
+        }
+        // Scientific notation is refused a step earlier - "e300s" is not a unit - so the
+        // cases here are the ones that reach the conversion as a number.
+        for longer in ["999999999999999999999999999s", "99999999999999999999h"] {
+            let e = parse_duration(longer).expect_err("longer than dbar can schedule");
+            assert!(format!("{e:#}").contains("longer"), "{e:#}");
+        }
     }
 
     #[test]
