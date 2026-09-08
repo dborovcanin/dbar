@@ -265,9 +265,10 @@ fn windows_by_output(tree: &serde_json::Value) -> HashMap<String, Window> {
 /// The window a node is, if it is one at all.
 ///
 /// The root, the outputs and the workspace containers all have a name and none of them is
-/// a window; an application id, or the properties an X11 client brings, is what tells them
-/// apart - and is also what the window calls itself, so the test and the answer are the
-/// same two fields.
+/// a window; what tells them apart is the kind sway gives every node, and a window is a
+/// container with nothing inside it. What the window calls itself is read afterwards and
+/// separately: a Wayland client that never set an app id, and an X11 one whose properties
+/// carry no class, are both still windows with a title worth showing.
 fn window_of(node: &serde_json::Value) -> Option<Window> {
     let text = |value: Option<&serde_json::Value>| {
         value
@@ -275,13 +276,14 @@ fn window_of(node: &serde_json::Value) -> Option<Window> {
             .unwrap_or_default()
             .to_string()
     };
-    let app_id = node.get("app_id").filter(|v| !v.is_null());
+    let kind = node.get("type").and_then(|v| v.as_str());
+    if !matches!(kind, Some("con" | "floating_con")) || children(node).next().is_some() {
+        return None;
+    }
+    let app_id = node.get("app_id");
     let class = node
         .get("window_properties")
         .and_then(|properties| properties.get("class"));
-    if app_id.is_none() && class.is_none() {
-        return None;
-    }
     Some(Window {
         title: text(node.get("name")),
         app_id: text(app_id),
@@ -640,14 +642,15 @@ mod tests {
         { "id": 3, "name": "DP-1", "type": "output", "focus": [6],
           "nodes": [
             { "id": 6, "name": "1", "type": "workspace", "focus": [9], "nodes": [
-              { "id": 9, "name": "vim", "app_id": "foot", "focused": true, "focus": [] },
-              { "id": 10, "name": "mail", "app_id": "thunderbird", "focus": [] }
+              { "id": 9, "name": "vim", "type": "con", "app_id": "foot", "focused": true,
+                "focus": [] },
+              { "id": 10, "name": "mail", "type": "con", "app_id": "thunderbird", "focus": [] }
             ]}
           ]},
         { "id": 4, "name": "HDMI-A-1", "type": "output", "focus": [7],
           "nodes": [
             { "id": 7, "name": "2", "type": "workspace", "focus": [11], "nodes": [
-              { "id": 11, "name": "a page", "app_id": "firefox", "focus": [] }
+              { "id": 11, "name": "a page", "type": "con", "app_id": "firefox", "focus": [] }
             ]}
           ]},
         { "id": 5, "name": "__i3", "type": "output", "focus": [] }
@@ -684,7 +687,7 @@ mod tests {
             r#"{"id":1,"focus":[3],"nodes":[
                  {"id":3,"name":"DP-1","type":"output","focus":[6],"nodes":[
                    {"id":6,"name":"1","type":"workspace","focus":[9],"nodes":[
-                     {"id":9,"name":"doc.pdf","app_id":null,"focus":[],
+                     {"id":9,"name":"doc.pdf","type":"con","app_id":null,"focus":[],
                       "window_properties":{"class":"Zathura"}}]}]}]}"#,
         )
         .expect("a tree parses");
@@ -693,6 +696,39 @@ mod tests {
         assert_eq!(window.class, "Zathura");
         assert_eq!(window.title, "doc.pdf");
         assert!(window.app_id.is_empty(), "an X11 client has no app_id");
+    }
+
+    /// Sway leaves `app_id` null for a Wayland client that never set one, and an X11 client
+    /// can arrive with properties that carry no class at all. Neither is any less a window,
+    /// and a title is exactly what a bar has to show for them.
+    #[test]
+    fn a_window_that_says_nothing_about_itself_still_has_a_title() {
+        let nameless: serde_json::Value = serde_json::from_str(
+            r#"{"id":1,"focus":[3],"nodes":[
+                 {"id":3,"name":"DP-1","type":"output","focus":[6],"nodes":[
+                   {"id":6,"name":"1","type":"workspace","focus":[9],"nodes":[
+                     {"id":9,"name":"a scratch window","type":"con","app_id":null,
+                      "focus":[]}]}]}]}"#,
+        )
+        .expect("a tree parses");
+        let windows = windows_by_output(&nameless);
+        let window = windows.get("DP-1").expect("a window on DP-1");
+        assert_eq!(window.title, "a scratch window");
+        assert!(window.app_id.is_empty());
+        assert!(window.class.is_empty());
+
+        let classless: serde_json::Value = serde_json::from_str(
+            r#"{"id":1,"focus":[3],"nodes":[
+                 {"id":3,"name":"DP-1","type":"output","focus":[6],"nodes":[
+                   {"id":6,"name":"1","type":"workspace","focus":[9],"nodes":[
+                     {"id":9,"name":"an X11 window","type":"con","app_id":null,"focus":[],
+                      "window_properties":{"instance":"xterm"}}]}]}]}"#,
+        )
+        .expect("a tree parses");
+        let windows = windows_by_output(&classless);
+        let window = windows.get("DP-1").expect("an X11 window on DP-1");
+        assert_eq!(window.title, "an X11 window");
+        assert!(window.class.is_empty());
     }
 
     /// The root, the outputs and the workspace containers all have names, and none of them
