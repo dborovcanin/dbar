@@ -107,6 +107,18 @@ struct OpenMenu {
     dirty: bool,
 }
 
+/// Close every menu deeper than `level`, innermost first.
+///
+/// The order is the point. The stack holds a menu before anything it opened, and xdg-shell
+/// requires a popup to be destroyed before its parent - `not_the_topmost_popup` is the
+/// error for getting it wrong, and the answer to a protocol error is a closed connection.
+/// Dropping the vector, or truncating it, destroys the outermost first; popping does not.
+fn close_below(menus: &mut Vec<OpenMenu>, level: usize) {
+    while menus.len() > level {
+        menus.pop();
+    }
+}
+
 /// The bound `xdg_wm_base`, which is all of the xdg shell a menu needs.
 struct WmBase(xdg_wm_base::XdgWmBase);
 
@@ -671,7 +683,7 @@ impl App {
         let output = self.bars[bar].output.clone();
         let request = self.menu_request.wrapping_add(1);
         self.menu_request = request;
-        self.menus.clear();
+        close_below(&mut self.menus, 0);
         self.opening = Some((output, key.clone(), x, width, request));
         commands.send(crate::tray::Command::Menu {
             key,
@@ -748,10 +760,9 @@ impl App {
         }
 
         // A submenu replaces anything already open below the level it came from.
-        if let Anchor2::Row { level, .. } = anchor {
-            self.menus.truncate(level + 1);
-        } else {
-            self.menus.clear();
+        match anchor {
+            Anchor2::Row { level, .. } => close_below(&mut self.menus, level + 1),
+            _ => close_below(&mut self.menus, 0),
         }
 
         let (line, icon_size) = (
@@ -886,7 +897,7 @@ impl App {
 
     /// Close every menu that is open.
     fn close_menus(&mut self) {
-        self.menus.clear();
+        close_below(&mut self.menus, 0);
         self.opening = None;
     }
 
@@ -990,7 +1001,7 @@ impl App {
             .filter(|row| row.submenu)
             .map(|row| row.id);
         let key = menu.key.clone();
-        self.menus.truncate(index + 1);
+        close_below(&mut self.menus, index + 1);
         // Whatever the last row asked for is no longer wanted: the pointer has moved.
         self.menus[index].awaiting = None;
         if let Some(id) = opening
@@ -1925,8 +1936,8 @@ impl PopupHandler for App {
     /// The compositor took the menu away, which is what a click anywhere else looks like.
     fn done(&mut self, _conn: &Connection, _qh: &QueueHandle<Self>, popup: &Popup) {
         if let Some(index) = self.menu_of(popup.wl_surface()) {
-            // Everything opened from it goes with it.
-            self.menus.truncate(index);
+            // Everything opened from it goes with it, innermost first.
+            close_below(&mut self.menus, index);
         }
     }
 }
