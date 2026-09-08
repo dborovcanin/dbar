@@ -369,6 +369,21 @@ fn run(
         .get_registry_rc()
         .context("asking PipeWire what it has")?;
 
+    // The loop runs until it is told to stop, and nothing tells it when the server it is
+    // listening to goes away: an error on the core is how a client learns that, and
+    // without one the thread sits in a loop with nothing on the other end of it for as
+    // long as the bar runs. Ending the loop is what lets the thread try again.
+    let quit = {
+        let main_loop = main_loop.downgrade();
+        move |_id: u32, _seq: i32, res: i32, message: &str| {
+            log::debug!("PipeWire reported {message} ({res}); the connection is finished");
+            if let Some(main_loop) = main_loop.upgrade() {
+                main_loop.quit();
+            }
+        }
+    };
+    let _core_listener = core.add_listener_local().error(quit).register();
+
     let sinks = Rc::new(RefCell::new(Sinks {
         default: None,
         by_id: HashMap::new(),
