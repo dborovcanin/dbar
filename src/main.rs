@@ -344,7 +344,8 @@ fn main() -> Result<()> {
     // between, so they are taken off the timer before it is first set.
     if collectors {
         let (watch_tx, watch_rx) = calloop::channel::channel();
-        let watching = crate::collect::watch::spawn(watch_tx);
+        let asked: Vec<crate::collect::Which> = config_collectors.keys().cloned().collect();
+        let watching = crate::collect::watch::spawn(watch_tx, &asked);
         if watching.running {
             app.on_watching(&watching.covered);
             let handle_for_timer = handle.clone();

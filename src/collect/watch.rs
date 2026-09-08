@@ -53,14 +53,19 @@ struct Uevents {
     wanted: Vec<(&'static str, Which)>,
 }
 
-/// Watch every source that can be watched, and say which of them no longer need a timer.
+/// Watch every source in `asked` that can be watched, and say which of them no longer need
+/// a timer.
+///
+/// `asked` is what the config actually reads, so a bar with no battery on it opens no
+/// netlink socket and waits on no attribute. Watching everything watchable would cost a
+/// thread and a wake-up per uevent for a source nobody is drawing.
 ///
 /// A watch that cannot be set up is not an error: the source keeps its interval, which is
 /// what it would have had anyway.
-pub fn spawn(sender: calloop::channel::Sender<Event>) -> Watching {
+pub fn spawn(sender: calloop::channel::Sender<Event>, asked: &[Which]) -> Watching {
     let mut attributes = Vec::new();
     let mut wanted = Vec::new();
-    for which in Which::WATCHABLE {
+    for which in Which::WATCHABLE.iter().filter(|w| asked.contains(w)) {
         match which.watch() {
             Some(Watch::Attribute(path)) => match arm(&path) {
                 Ok(file) => {
