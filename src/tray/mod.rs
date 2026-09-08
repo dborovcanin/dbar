@@ -28,6 +28,22 @@ use crate::status::{FieldSpec, Kind as FieldKind};
 const WATCHER_NAME: &str = "org.kde.StatusNotifierWatcher";
 const WATCHER_PATH: &str = "/StatusNotifierWatcher";
 const ITEM_INTERFACE: &str = "org.kde.StatusNotifierItem";
+
+/// The names an application takes when it wants to be findable in a tray.
+///
+/// The spec has an item register under either a name of its own or its connection's, and
+/// these are what the first of those looks like: `<prefix><pid>-<n>`. Such a name is the
+/// only one of the two that can be recognised on sight, which is what makes a tray able to
+/// find what was there before it.
+///
+/// Both prefixes are real. KDE's is what the specification was written around; the other is
+/// what several toolkits took to using once the specification moved to freedesktop, and it
+/// is what an Electron application registers under - which is most of the tray icons
+/// anybody actually has.
+const ITEM_NAME_PREFIXES: [&str; 2] = [
+    "org.kde.StatusNotifierItem-",
+    "org.freedesktop.StatusNotifierItem-",
+];
 const ITEM_PATH: &str = "/StatusNotifierItem";
 const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 const INTROSPECTABLE: &str = "org.freedesktop.DBus.Introspectable";
@@ -422,6 +438,7 @@ fn run(
             "StatusNotifierHostRegistered",
             &[],
         );
+        adopt_from_bus(&mut bus, &mut tray);
     } else {
         let _ = bus.call(
             WATCHER_NAME,
@@ -519,6 +536,54 @@ fn adopt_existing(bus: &mut Connection, tray: &mut Tray) {
         let (service, path) = split_registration(&name, &name);
         add(bus, tray, &service, &path);
     }
+}
+
+/// Find the items that were already on the bus before dbar was watching it.
+///
+/// An application registers once, with whichever watcher was there at the time, and has no
+/// reason to do it again: the registration belongs to the watcher, and a watcher that
+/// restarts has lost it. So a bar that restarted showed an empty tray until something new
+/// was started, however much was still running - which is most of what a tray is for.
+///
+/// The bus itself is the record that survives. An item takes a name of its own to be found
+/// by, and that name is the application's, held for as long as it wants to be in a tray and
+/// entirely unaffected by watchers coming and going. Asking who is on the bus finds
+/// everything that named itself this way.
+///
+/// What it cannot find is an item that registered under its connection's own name rather
+/// than taking one - there is nothing in that name to recognise. Those come back when the
+/// application notices a watcher has appeared and says so again, which is the half of this
+/// that was already working.
+fn adopt_from_bus(bus: &mut Connection, tray: &mut Tray) {
+    let reply = bus.call(BUS, "/org/freedesktop/DBus", BUS, "ListNames", &[]);
+    let Ok(values) = reply else {
+        log::debug!("could not ask the bus who is on it; the tray starts empty");
+        return;
+    };
+    let names = items_among(values.first().map(Value::items).unwrap_or_default());
+    for name in names {
+        let (service, path) = split_registration(&name, &name);
+        if add(bus, tray, &service, &path) {
+            log::info!("adopted {service}, which was in the tray before dbar was");
+            // Any other host is watching for this, and has the same gap to fill.
+            let _ = bus.emit(
+                WATCHER_PATH,
+                WATCHER_NAME,
+                "StatusNotifierItemRegistered",
+                &[Arg::Str(&name)],
+            );
+        }
+    }
+}
+
+/// The names on the bus that belong to tray items, out of everything else that is on it.
+fn items_among(names: &[Value]) -> Vec<String> {
+    names
+        .iter()
+        .filter_map(Value::as_str)
+        .filter(|name| ITEM_NAME_PREFIXES.iter().any(|p| name.starts_with(p)))
+        .map(str::to_string)
+        .collect()
 }
 
 /// Deal with one message, and say whether what the bar draws has changed.
@@ -691,17 +756,34 @@ fn split_registration(argument: &str, sender: &str) -> (String, String) {
     }
 }
 
+/// Whether this item is one already on the bar, under either of the names it has.
+///
+/// The same application is one item however it was found. Discovery finds it by the name it
+/// took for itself; its own registration usually names the connection it sent from, and
+/// comparing those two strings would put one icon on the bar twice. What settles it is who
+/// owns the name and which object was named: an application answering at one path is one
+/// item, whatever it is called on the way there.
+///
+/// An owner that could not be resolved matches nothing rather than everything - two items
+/// nobody can name are not thereby the same item.
+fn already_following(items: &[Tracked], service: &str, owner: Option<&str>, path: &str) -> bool {
+    items.iter().any(|t| {
+        t.path == path && (t.service == service || (owner.is_some() && t.owner.as_deref() == owner))
+    })
+}
+
 /// Start following an item, reading everything about it once.
+///
+/// An item that cannot be read is not followed. Discovery finds a name the moment dbar
+/// starts, which may be before the object behind it exists; keeping the row anyway would
+/// leave it blank for ever, because the application's own registration would then be
+/// turned away as something already known and nothing asks a second time.
 fn add(bus: &mut Connection, tray: &mut Tray, service: &str, path: &str) -> bool {
-    if tray
-        .items
-        .iter()
-        .any(|t| t.service == service && t.path == path)
-    {
-        return false;
-    }
     let key = format!("{service}{path}");
     let owner = owner_of(bus, service);
+    if already_following(&tray.items, service, owner.as_deref(), path) {
+        return false;
+    }
     tray.items.push(Tracked {
         service: service.to_string(),
         owner,
@@ -719,7 +801,11 @@ fn add(bus: &mut Connection, tray: &mut Tray, service: &str, path: &str) -> bool
         seen: None,
     });
     let at = tray.items.len() - 1;
-    read_item(bus, tray, at);
+    if read_properties(bus, tray, at).is_none() {
+        tray.items.pop();
+        log::debug!("{service}{path} is on the bus but has nothing to say yet");
+        return false;
+    }
     log::debug!("tray item {service}{path}");
     true
 }
@@ -817,6 +903,17 @@ fn owner_of(bus: &mut Connection, service: &str) -> Option<String> {
 /// the connection - so a change that changes nothing must cost a property read on this
 /// thread and nothing at all on the bar's.
 fn read_item(bus: &mut Connection, tray: &mut Tray, at: usize) -> bool {
+    read_properties(bus, tray, at).unwrap_or(false)
+}
+
+/// The same, saying whether the item answered at all.
+///
+/// `None` is an item that could not be read - the name is on the bus but the object behind
+/// it is not there yet, or not there at all. That is a different thing from an item that
+/// answered and said nothing new, and the caller that has just started following it needs
+/// to tell them apart: one is worth keeping and the other is a row that would sit blank on
+/// the bar for ever, since nothing asks twice.
+fn read_properties(bus: &mut Connection, tray: &mut Tray, at: usize) -> Option<bool> {
     let (service, path) = (tray.items[at].service.clone(), tray.items[at].path.clone());
     let reply = bus.call(
         &service,
@@ -826,13 +923,10 @@ fn read_item(bus: &mut Connection, tray: &mut Tray, at: usize) -> bool {
         &[Arg::Str(ITEM_INTERFACE)],
     );
     let properties = match reply {
-        Ok(values) => match values.into_iter().next() {
-            Some(value) => value,
-            None => return false,
-        },
+        Ok(values) => values.into_iter().next()?,
         Err(e) => {
             log::debug!("{service} did not answer for its tray item: {e:#}");
-            return false;
+            return None;
         }
     };
 
@@ -887,7 +981,7 @@ fn read_item(bus: &mut Connection, tray: &mut Tray, at: usize) -> bool {
         && tracked.menu == menu_path
         && tracked.item.is_menu == is_menu;
     if unchanged {
-        return false;
+        return Some(false);
     }
     log::debug!(
         "tray item {} changed:{}{}{}{}",
@@ -925,7 +1019,7 @@ fn read_item(bus: &mut Connection, tray: &mut Tray, at: usize) -> bool {
         }
         tracked.seen = wanted;
     }
-    true
+    Some(true)
 }
 
 /// A cheap summary of a pixmap bundle, for telling one icon from another without keeping
@@ -1156,6 +1250,86 @@ mod tests {
         // However long it has been missing, artwork that appears is still found.
         age(&mut icons, Icons::SELDOM);
         assert!(look(&mut icons, &mut asked, art()).is_some());
+    }
+
+    /// Finding an item on the bus and being told about it by the application are two ways
+    /// to the same icon, and they name it differently: discovery has the name the
+    /// application took, while a registration usually carries the connection it was sent
+    /// from. Comparing those strings alone drew the same application twice.
+    #[test]
+    fn one_application_is_one_item_under_either_of_its_names() {
+        let well_known = "org.kde.StatusNotifierItem-42-1";
+        let items = vec![tracked(well_known, Some(":1.42"), ITEM_PATH)];
+
+        // What discovery found, offered again by the application under its own name.
+        assert!(already_following(&items, ":1.42", Some(":1.42"), ITEM_PATH));
+        // And the other way round, which is the same registration arriving twice.
+        assert!(already_following(
+            &items,
+            well_known,
+            Some(":1.42"),
+            ITEM_PATH
+        ));
+
+        // A second object from the same application is a second item: a mail client with
+        // an account each offers several, and a watcher follows them one at a time.
+        assert!(!already_following(
+            &items,
+            ":1.42",
+            Some(":1.42"),
+            "/items/two"
+        ));
+        // So is another application, however alike the paths.
+        assert!(!already_following(
+            &items,
+            ":1.99",
+            Some(":1.99"),
+            ITEM_PATH
+        ));
+        // An owner nobody could resolve matches on the name alone: two items that cannot
+        // be traced to anyone are not thereby the same item.
+        assert!(!already_following(&items, ":1.99", None, ITEM_PATH));
+        assert!(already_following(&items, well_known, None, ITEM_PATH));
+    }
+
+    /// An application registers with whichever watcher was there at the time and has no
+    /// reason to do it again, so a bar that restarted used to show an empty tray until
+    /// something new started - however much was still running. The bus is the record that
+    /// survived: an item holds a name of its own for as long as it wants to be in a tray.
+    #[test]
+    fn what_was_in_the_tray_before_the_bar_is_found_on_the_bus() {
+        let bus = |names: &[&str]| -> Vec<Value> {
+            names.iter().map(|n| Value::Str(n.to_string())).collect()
+        };
+        let found = items_among(&bus(&[
+            "org.freedesktop.DBus",
+            "org.kde.StatusNotifierItem-352553-1",
+            "org.kde.StatusNotifierWatcher",
+            "org.kde.StatusNotifierHost-99",
+            // What an Electron application takes, which is most of the tray icons
+            // anybody has.
+            "org.freedesktop.StatusNotifierItem-395577-1",
+            "org.kde.StatusNotifierItem-42-2",
+            ":1.17",
+            "org.mpris.MediaPlayer2.spotify",
+        ]));
+        assert_eq!(
+            found,
+            [
+                "org.kde.StatusNotifierItem-352553-1",
+                "org.freedesktop.StatusNotifierItem-395577-1",
+                "org.kde.StatusNotifierItem-42-2"
+            ]
+        );
+        // The watcher and a host are not items, however much they look like one.
+        assert!(items_among(&bus(&["org.kde.StatusNotifierWatcher"])).is_empty());
+        assert!(items_among(&bus(&["org.kde.StatusNotifierHost-1"])).is_empty());
+        // And a name of that shape carries the standard path when nothing says otherwise.
+        let name = "org.kde.StatusNotifierItem-352553-1";
+        assert_eq!(
+            split_registration(name, name),
+            (name.to_string(), "/StatusNotifierItem".to_string())
+        );
     }
 
     /// The spec says an application passes its bus name; several pass the object path
