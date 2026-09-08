@@ -617,21 +617,30 @@ style = "critical"
 # click goes on working.
 [module.weather]
 source = "command"
-command = ["/home/dusan/dotfiles/scripts/dbar/weather.sh"]
+# Relative to wherever dbar was started, which is the repository root if you are
+# trying this out of a checkout. An installed bar wants the absolute path to
+# wherever you keep the script - there is no shell here to expand anything.
+command = ["examples/weather.sh"]
 # The knobs, in the order the script reads them: $1, $2, then everything left.
 # They live here rather than in the script, so moving city is a line in the config
 # and the script stays the same script.
 params = [
   "metric", # units
-  # The key itself, or a file holding it - which is the one worth using, since a
+  # The key itself, or a file holding one - which is the one worth using, since a
   # config that goes into a git repository should not be carrying a credential.
-  # No shell runs here, so the path is a real path: `~` is not expanded.
-  "/home/dusan/.config/dbar/owm.key",
+  # dbar runs argv directly, with no shell anywhere, so nothing here is expanded
+  # by dbar; the `~` below is expanded by weather.sh, which is a script and can
+  # afford to be forgiving about a path it was handed.
+  #
+  # Nothing is installed there, and that is deliberate: with no key the script
+  # says so, the module draws "unavailable" and stays clickable, and the rest of
+  # the bar is unaffected. Put a free OpenWeatherMap key in that file to see it.
+  "~/.config/dbar/owm.key",
   # Where. The places come last because they are the part that grows: add one and
   # the module grows a page, while the fetch stays one fetch.
   "45.2517,19.8369", # Novi Sad
-  "44.8147,20.4143", # Novi Beograd
-  "43.9365,18.7986", # Sokolac
+  "44.8147,20.4143", # Belgrade
+  "43.9365,18.7986", # Sarajevo
 ]
 interval = "once"
 # One line per place, and the wheel turns them. Both wordings below are about
@@ -674,7 +683,7 @@ format = "$now.time(f:'%a %d %b  %H:%M')"
 # A bar shows the time; a calendar is a different thing, and it belongs to a program of
 # your own rather than to dbar. The argv is run directly, so there is no shell here and
 # nothing to quote.
-on_click = { left = ["/home/dusan/dotfiles/scripts/dbar/sway_calendar.sh"] }
+on_click = { left = ["examples/sway_calendar.sh"] }
 style = "panel"
 foreground = "$background"
 icon = "clock"

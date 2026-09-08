@@ -26,6 +26,12 @@ units=${1:-metric}
 if [ "$#" -gt 0 ]; then shift; fi
 key=${1:-}
 if [ "$#" -gt 0 ]; then shift; fi
+# A leading ~ is expanded here rather than by dbar: dbar runs argv directly, with no
+# shell anywhere, so what it hands over is exactly what the config wrote. A script that
+# takes a path is the right place to be forgiving about one.
+case $key in
+	"~/"*) key=$HOME/${key#"~/"} ;;
+esac
 if [ -f "$key" ]; then
 	key=$(cat "$key")
 fi

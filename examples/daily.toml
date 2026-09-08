@@ -21,7 +21,8 @@ position = "top"
 layer = "bottom"
 margin = 3
 gap = 3
-# The same face as advanced.toml, which this bar is the shorter version of.
+# The same face as gruvbox-islands.toml, which this bar is the shorter
+# version of.
 # Noto Sans carries Latin, Greek and Cyrillic itself, so most window titles are
 # drawn without dbar going looking for another font at all.
 font = "Noto Sans 18"

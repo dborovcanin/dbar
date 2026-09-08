@@ -1,15 +1,15 @@
-# advanced_5 - Tokyo Night capsules.
+# Tokyo Night capsules.
 #
 # Separate capsules for individual readings. Workspaces anchor the center;
 # the left run holds the clock, weather and window, with playback on the right.
 #
-# Run: dbar -c examples/advanced_5.toml
+# Run: dbar -c examples/tokyonight-capsules.toml
 # Inspiration: https://github.com/sejjy/mechabar (rounded controls, with Tokyo Night colors)
 #
-# Same modules, readings, refresh intervals and controls as advanced.toml.
-# Weather and calendar retain its machine-specific script/key paths: adjust
-# module.weather.command, module.weather.params and module.clock.on_click locally.
-# Weather needs curl, jq and an OpenWeather key; see examples/weather.sh.
+# Same modules, readings, refresh intervals and controls as gruvbox-islands.toml.
+# Weather and the calendar click run the scripts beside this file. The weather
+# wants curl, jq and a free OpenWeatherMap key in ~/.config/dbar/owm.key; with
+# no key it draws "unavailable" and the rest of the bar is unaffected.
 # Font fallback is auto-detected. Text caps keep long titles, SSIDs and forecasts
 # from taking over the bar; alternate formats and weather paging still work.
 
@@ -290,7 +290,7 @@ separator = "$raised"
 radius = 12
 highlight_foreground = "$text"
 
-# Modules: formats, actions, state thresholds and source options come from advanced.toml.
+# Modules: formats, actions, state thresholds and source options come from gruvbox-islands.toml.
 
 [module.workspaces]
 source = "sway:workspaces"
@@ -478,8 +478,8 @@ style = "critical"
 # Middle click refreshes, right click changes wording, wheel changes location.
 [module.weather]
 source = "command"
-command = ["/home/dusan/dotfiles/scripts/dbar/weather.sh"]
-params = ["metric", "/home/dusan/.config/dbar/owm.key", "45.2517,19.8369", "44.8147,20.4143", "43.9365,18.7986"]
+command = ["examples/weather.sh"]
+params = ["metric", "~/.config/dbar/owm.key", "45.2517,19.8369", "44.8147,20.4143", "43.9365,18.7986"]
 interval = "once"
 pages = true
 refresh_button = "middle"
@@ -494,12 +494,12 @@ max_width = 130
 state = "error"
 foreground = "$subtext"
 
-# Left click opens the same external calendar as advanced.toml.
+# Left click opens the same external calendar as gruvbox-islands.toml.
 [module.clock]
 source = "time"
 interval = "1m"
 format = "$now.time(f:'%a %d %b  %H:%M')"
-on_click = { "left" = ["/home/dusan/dotfiles/scripts/dbar/sway_calendar.sh"] }
+on_click = { "left" = ["examples/sway_calendar.sh"] }
 style = "panel"
 foreground = "$accent"
 icon = "clock"
