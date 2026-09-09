@@ -1781,9 +1781,11 @@ fn parse_duration(written: &str) -> Result<Duration> {
 
 /// The longest a fold may be given to travel.
 ///
-/// Long enough for the slowest easing anybody would want to watch, and short enough that
-/// the redraws it costs are still a gesture rather than a background load.
-const LONGEST_ANIMATION: Duration = Duration::from_millis(2000);
+/// A fold is the one thing on the bar that redraws at screen rate, so this is a ceiling on
+/// how long a click can hold it there rather than a length anyone should reach for: a
+/// hundred milliseconds or two is a gesture, and seconds are for watching the travel
+/// closely enough to see what it is doing. Past this it stops reading as a fold at all.
+const LONGEST_ANIMATION: Duration = Duration::from_millis(10_000);
 
 /// The shortest interval a source may be given.
 ///
@@ -4079,7 +4081,7 @@ icon = 'cpu'",
             ),
             // A fold redraws at screen rate for the whole of its span, so a long one is
             // not a slower animation - it is the permanent tick the bar exists without.
-            (format!("{shut}\ncollapse_animation = '5s'"), "longer than"),
+            (format!("{shut}\ncollapse_animation = '15s'"), "longer than"),
             (format!("{shut}\ncollapse_animation = '1h'"), "longer than"),
         ] {
             let error = format!("{:#}", parse(&extra).unwrap_err());

@@ -350,6 +350,14 @@ pub struct PlacedGroup {
     /// take them away in one step, so text is cut short of the fills by however much empty
     /// room the island is closing on. `None` wherever `content_right` is.
     pub text_right: Option<f32>,
+    /// The transition drawn where the contents stop, for an island a fold is closing.
+    ///
+    /// Fills stop at `content_right` and this covers them, so they never needed it. Glyphs
+    /// and icons are cut rather than covered, and cutting them on a column inside a slanted
+    /// end is the one straight line left on an angled ribbon. This is the shape to cut them
+    /// with instead - the very separator drawn there, whether it is this island's own cap
+    /// or the join it shares with the next one. `None` wherever `content_right` is.
+    pub content_edge: Option<PlacedSeparator>,
     pub modules: Vec<PlacedModule>,
     pub separators: Vec<PlacedSeparator>,
 }
@@ -387,15 +395,34 @@ impl PlacedGroup {
             x0 = x0.min(first.x);
             x1 = x1.max(last.x + last.width);
         }
+        // The edge the contents are cut with reaches past them by its own width, and a join
+        // belongs to the frame rather than to either island, so this is the one separator
+        // the loop above cannot have seen.
+        if let Some(edge) = &self.content_edge {
+            x0 = x0.min(edge.x - edge.overlap);
+            x1 = x1.max(edge.x + edge.width + edge.overlap);
+        }
         (x0, self.y, x1 - x0, self.height)
     }
 }
 
+/// The module whose ground the island's trailing end lands on.
+///
+/// A module's ground starts where the one before it stops, not where its own box does: the
+/// gap between them is painted across its whole width in the colour arriving on the far
+/// side, and the shape drawn over that only covers part of it. Asking for the box instead
+/// hands the transition the colour of the module behind while the edge is still standing on
+/// the one in front, and the fold swaps the two the moment it crosses the box - which is a
+/// colour arriving and leaving in one step on a bar that is otherwise travelling.
 fn module_before(modules: &[PlacedModule], edge: Option<f32>) -> Option<&PlacedModule> {
-    modules
-        .iter()
+    let ground = |i: usize| match i {
+        0 => modules[0].x,
+        i => modules[i - 1].x + modules[i - 1].width,
+    };
+    (0..modules.len())
         .rev()
-        .find(|module| edge.is_none_or(|right| module.x < right))
+        .find(|&i| edge.is_none_or(|right| ground(i) < right))
+        .map(|i| &modules[i])
         .or_else(|| modules.first())
 }
 
@@ -653,6 +680,13 @@ struct SizedGroup {
     width: f32,
     /// Whether what is inside reaches past the island and has to be cut off at its edge.
     clipped: bool,
+    /// How far the fold has got, 0.0 to 1.0, and 0.0 for an island that is not folding.
+    ///
+    /// The cut needs it. Everything else a fold moves was worked out once, here, and the
+    /// island carries the answer; the shape its contents are cut with is the one thing that
+    /// has to know where in the travel it is, because it has to have stopped cutting by the
+    /// time the island lands.
+    travel: f32,
     /// How far short of that edge the wording stops, for a fold on its way. The empty room
     /// the collapsed island keeps around its icon, which no text ever reaches.
     text_inset: f32,
@@ -1410,6 +1444,7 @@ fn finish_group(
         width,
         reserve: width,
         clipped: false,
+        travel: 0.0,
         text_inset: 0.0,
         shift: 0.0,
         leading: None,
@@ -1495,6 +1530,7 @@ impl SizedGroup {
             hover.radius += (shut.style.radius - hover.radius) * at;
         }
         self.clipped = true;
+        self.travel = at;
         self
     }
 
@@ -1616,18 +1652,6 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             true,
         ));
     }
-    if draw_separators {
-        for pair in modules.windows(2) {
-            separators.push(separator_between(
-                separator,
-                &pair[0],
-                &pair[1],
-                sized.background,
-                None,
-            ));
-        }
-    }
-
     let trail = ends.right_width();
     // Where the island ends, which is where its content ends until a fold moves the edge
     // in over it. Everything drawn at a group's trailing end follows the island: a cap
@@ -1641,6 +1665,17 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     // off it, the colour it takes comes from whichever module is still visible beside it,
     // and the island carries it out for the renderer and for the join beyond.
     let content_right = sized.clipped.then_some(trail_x);
+    if draw_separators {
+        for pair in modules.windows(2) {
+            separators.push(separator_between(
+                separator,
+                &pair[0],
+                &pair[1],
+                sized.background,
+                None,
+            ));
+        }
+    }
     if trail > 0.0
         && let Some(last) = module_before(&modules, content_right)
     {
@@ -1657,6 +1692,15 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         ));
     }
 
+    // The island's own cap is the edge its contents are cut with, until a join replaces it,
+    // narrowing to a straight column as the fold lands: the frame it lands on is the shut
+    // island, which holds one module and cuts nothing, so a cut still leaning on that frame
+    // is a wedge of the readings behind it standing inside the cap.
+    let content_edge = content_right
+        .and_then(|_| separators.last())
+        .filter(|edge| edge.cap && !edge.shape.is_none())
+        .map(|edge| cut_edge(edge, sized.travel));
+
     PlacedGroup {
         collapse: sized.collapse,
         x: group_x,
@@ -1668,8 +1712,18 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         edges: sized.edges,
         content_right,
         text_right: content_right.map(|right| right - sized.text_inset),
+        content_edge,
         modules,
         separators,
+    }
+}
+
+/// The shape a folding island's contents are cut with: its trailing transition, closing on
+/// a straight column as the island arrives at the one it is folding down to.
+fn cut_edge(edge: &PlacedSeparator, travel: f32) -> PlacedSeparator {
+    PlacedSeparator {
+        width: edge.width * (1.0 - travel.clamp(0.0, 1.0)),
+        ..edge.clone()
     }
 }
 
@@ -1874,8 +1928,10 @@ pub fn compute(
         // where the two part company, and where a join left behind would be drawn over
         // whatever the fold made room for.
         let mut travelled: Option<f32> = None;
+        // How far that island's own fold has got, for the cut the join hands back to it.
+        let mut behind_travel = 0.0;
         for group in groups {
-            let w = group.width;
+            let (w, travel) = (group.width, group.travel);
             let placed = place(group, x, height, pointer);
             // Where this island's contents stop, which is where anything drawn at its
             // trailing end belongs - the join below included.
@@ -1885,15 +1941,21 @@ pub fn compute(
                 && let Some(previous) = frame.groups.last().and_then(PlacedGroup::trailing_module)
                 && let Some(next) = placed.modules.first()
             {
-                frame.group_separators.push(separator_between(
-                    separator,
-                    previous,
-                    next,
-                    frame.background,
-                    travelled,
-                ));
+                let join =
+                    separator_between(separator, previous, next, frame.background, travelled);
+                // A joined island has no cap of its own, so the join is what its contents
+                // are cut with. It is drawn from the frame, but the shape belongs to the
+                // island behind it as much as a cap would.
+                if let Some(behind) = frame.groups.last_mut()
+                    && behind.content_edge.is_none()
+                    && behind.content_right.is_some()
+                    && !join.shape.is_none()
+                {
+                    behind.content_edge = Some(cut_edge(&join, behind_travel));
+                }
+                frame.group_separators.push(join);
             }
-            travelled = edge;
+            (travelled, behind_travel) = (edge, travel);
             frame.groups.push(placed);
             x += w + position.separator.map_or(gap, |s| s.width);
         }
@@ -1923,6 +1985,7 @@ pub fn fault(
             collapse: None,
             content_right: None,
             text_right: None,
+            content_edge: None,
             x,
             y: 0.0,
             width: module_width,

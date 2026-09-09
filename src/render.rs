@@ -416,17 +416,22 @@ fn draw_icon_cached(
 
 /// Where a group's contents stop, for the two things tiny-skia's clip cannot catch.
 ///
-/// `mask` is the island's outline, which is what takes the corners, and `stop` is the
-/// device column past which nothing is written at all, which is what holds where the
-/// outline's coverage does not reach. `bounds` is the box of the mask that was cleared
-/// for this group: [`clip_mask`] leaves the rest of the buffer holding the last group's
-/// coverage, so anything reaching outside that box is treated as uncovered rather than
-/// read.
+/// `mask` is the island's outline, which is what takes the corners and, while a fold is
+/// travelling, the shape of the edge it is cutting with. `stop` is the device column past
+/// which nothing is written at all, which is what holds where the outline's coverage does
+/// not reach. `bounds` is the box of the mask that was cleared for this group:
+/// [`clip_mask`] leaves the rest of the buffer holding the last group's coverage, so
+/// anything reaching outside that box is treated as uncovered rather than read.
+///
+/// `shift` reads the mask that many device columns further along, which is how the wording
+/// stops short of the fills without a second mask: the edge it wants is the edge the fills
+/// have, moved in. A column would have done it before there was a shape to move.
 #[derive(Clone, Copy, Default)]
 struct Cut<'a> {
     mask: Option<&'a Mask>,
     bounds: (u32, u32, u32, u32),
     stop: Option<i32>,
+    shift: i32,
 }
 
 impl Cut<'_> {
@@ -444,7 +449,7 @@ impl Cut<'_> {
         (
             x0.max(bx as i32),
             y0.max(by as i32),
-            x1.min((bx + bw) as i32),
+            x1.min((bx + bw) as i32 - self.shift),
             y1.min((by + bh) as i32),
         )
     }
@@ -530,7 +535,8 @@ fn blend_rgba(pixmap: &mut PixmapMut<'_>, blit: Blit<'_>, cut: Cut<'_>) {
         let dst = py as usize * pw as usize + x0 as usize;
         // Read off the row rather than the whole buffer, so the per-pixel work below is
         // an index into a slice instead of a branch on whether there is a mask at all.
-        let row = mask.map(|mask| &mask[dst..dst + span]);
+        let read = dst + cut.shift as usize;
+        let row = mask.map(|mask| &mask[read..read + span]);
         for i in 0..span {
             let px = &blit.pixels[src + i * 4..src + i * 4 + 4];
             // Premultiplied, so the mask scales all four channels together or the colour
@@ -598,7 +604,8 @@ fn blend_coverage(
         // The island's outline, where one was asked for: a straight column can stop text
         // at an edge but not at a corner, and a folding island's content runs right into
         // its rounded ones. Taken a row at a time so the per-pixel work is an index.
-        let row = mask.map(|mask| &mask[dst..dst + span]);
+        let read = dst + cut.shift as usize;
+        let row = mask.map(|mask| &mask[read..read + span]);
         for i in 0..span {
             let cover = blit.pixels[src + i] as u32;
             if cover == 0 {
@@ -756,6 +763,40 @@ fn draw_icon(
     }
 }
 
+/// The island's own side of the transition drawn where its contents stop.
+///
+/// A fold cuts glyphs and icons rather than covering them, so the cut has to be the edge
+/// the island is actually drawn with. [`draw_separator`] builds one shape and one ground
+/// and lets the colours say which of them is the island; mirroring and inversion are the
+/// two turns it takes to get there, and this reads them back off the separator rather than
+/// working them out a second time. `None` for anything with no side to speak of - a
+/// hairline, or a shape too narrow to rasterise - which leaves the caller its column.
+fn edge_region(edge: &PlacedSeparator, right: f32, scale: f32) -> Option<(Path, FillRule)> {
+    if edge.shape == SeparatorShape::Line || edge.shape.is_none() {
+        return None;
+    }
+    // The contents stop on the same snapped column the fills do, and the edge is measured
+    // from there: its own overlap bleeds back over ground the island has already covered.
+    let x0 = snap(right, scale);
+    let x1 = snap(edge.x + edge.width, scale);
+    let (y0, y1) = (edge.y, edge.y + edge.height);
+    let shape = separator_path(edge.shape, x0, y0, x1, y1)?;
+    let mirrored = edge.direction == Direction::Left;
+    let shape = match mirrored {
+        true => shape.transform(Transform::from_row(-1.0, 0.0, 0.0, 1.0, x0 + x1, 0.0))?,
+        false => shape,
+    };
+    // The shape is drawn in the island's colour unless it was mirrored, and `inverted`
+    // swaps which side of it is drawn. Two swaps put the island back on the shape.
+    if mirrored == edge.inverted {
+        return Some((shape, FillRule::Winding));
+    }
+    let mut builder = PathBuilder::new();
+    builder.push_rect(Rect::from_xywh(x0, y0, x1 - x0, y1 - y0)?);
+    builder.push_path(&shape);
+    Some((builder.finish()?, FillRule::EvenOdd))
+}
+
 /// A coverage mask of `path`, used to clip a group's contents to its outline.
 ///
 /// `slot` carries the buffer between frames. tiny-skia requires a mask to be exactly the
@@ -769,12 +810,14 @@ fn draw_icon(
 /// outside the group it was built for.
 fn clip_mask<'a>(
     slot: &'a mut Option<Mask>,
-    width: u32,
-    height: u32,
+    size: (u32, u32),
     bounds: (u32, u32, u32, u32),
     path: &Path,
+    rule: FillRule,
+    inside: Option<&Path>,
     transform: Transform,
 ) -> Option<&'a Mask> {
+    let (width, height) = size;
     if !matches!(&slot, Some(m) if m.width() == width && m.height() == height) {
         *slot = Mask::new(width, height);
     }
@@ -788,7 +831,14 @@ fn clip_mask<'a>(
         data[start..start + bw as usize].fill(0);
     }
 
-    mask.fill_path(path, FillRule::Winding, true, transform);
+    mask.fill_path(path, rule, true, transform);
+    // A shape appended past where the contents stop is the island's own end, and a rounded
+    // corner is the one thing that cuts one. The outline is what says so, and holding the
+    // mask inside it costs a second rasterisation, so only a group with a corner to escape
+    // over asks for it.
+    if let Some(inside) = inside {
+        mask.intersect_path(inside, FillRule::Winding, true, transform);
+    }
     Some(mask)
 }
 
@@ -1215,8 +1265,17 @@ fn draw_group(
     };
     if group.separators.iter().any(trailing) {
         let clip = match rl > 0.0 || rr > 0.0 {
-            true => drawn_bounds(group, transform, pw, ph)
-                .and_then(|bounds| clip_mask(tools.mask, pw, ph, bounds, &outline, transform)),
+            true => drawn_bounds(group, transform, pw, ph).and_then(|bounds| {
+                clip_mask(
+                    tools.mask,
+                    (pw, ph),
+                    bounds,
+                    &outline,
+                    FillRule::Winding,
+                    None,
+                    transform,
+                )
+            }),
             // Nothing to cut it with: a square island has no corner for a cap to escape
             // over, which is why one that is not folding gets no mask either.
             false => None,
@@ -1237,21 +1296,40 @@ fn draw_group(
             // must use the same columns or its partially covered last pixel exposes
             // the bar background beside an otherwise solid ribbon.
             let left = snap(group.x, scale);
-            edged_rect(
+            let stopped = edged_rect(
                 left,
                 group.y,
                 snap(right, scale) - left,
                 group.height,
                 rl,
                 rr,
-            )
+            );
+            // Past that column the island carries on into its own end, and what is written
+            // there belongs inside the shape that end is drawn with. The two abut rather
+            // than overlap, so one fill rule serves both halves.
+            let region = (group.content_edge.as_ref())
+                .and_then(|edge| edge_region(edge, right, scale))
+                .zip(stopped.as_ref())
+                .and_then(|((shape, rule), rect)| {
+                    let mut builder = PathBuilder::new();
+                    builder.push_path(rect);
+                    builder.push_path(&shape);
+                    Some((builder.finish()?, rule))
+                });
+            let extended = region.is_some();
+            (region.or_else(|| stopped.map(|rect| (rect, FillRule::Winding))))
+                .map(|(path, rule)| (path, rule, extended))
         }
-        None => ((rl > 0.0 || rr > 0.0) && spills(group)).then(|| outline.clone()),
+        None => ((rl > 0.0 || rr > 0.0) && spills(group))
+            .then(|| (outline.clone(), FillRule::Winding, false)),
     };
-    let masked = mask_path.as_ref().and_then(|path| {
+    let masked = mask_path.as_ref().and_then(|(path, rule, extended)| {
         let bounds = drawn_bounds(group, transform, pw, ph)?;
+        // Only an extended mask can reach outside the island, and only a rounded corner
+        // can cut what does.
+        let inside = (*extended && (rl > 0.0 || rr > 0.0)).then_some(&outline);
         Some((
-            clip_mask(tools.mask, pw, ph, bounds, path, transform)?,
+            clip_mask(tools.mask, (pw, ph), bounds, path, *rule, inside, transform)?,
             bounds,
         ))
     });
@@ -1261,24 +1339,39 @@ fn draw_group(
     // mask exists to keep an end separator inside a rounded corner, and glyphs have never
     // been cut there.
     let column = |edge: f32| ((edge + offset.0) * scale).round() as i32;
-    let cut = |edge: Option<f32>| match edge {
+    // How far the island reaches past where its fills stop, which is the width of the end
+    // it is drawn with. Nothing is written past that whatever the mask says.
+    let reach = (group.content_edge.as_ref()).map_or(0.0, |edge| edge.width);
+    let cut = |edge: Option<f32>, shift: i32| match edge {
         Some(edge) => Cut {
             mask: clip,
             bounds: masked.map(|(_, bounds)| bounds).unwrap_or_default(),
-            stop: Some(column(edge)),
+            stop: Some(column(edge + reach)),
+            shift,
         },
         None => Cut::default(),
     };
     // Icons stop with the fills, at the island's edge. Text stops short of it, where the
     // shut island's wording would have stopped - which is at its icon, because a collapsed
-    // island is an icon and the padding around it.
-    let (marks, wording) = (cut(group.content_right), cut(group.text_right));
+    // island is an icon and the padding around it. Both stop on the same shape: the wording
+    // reads the mask that many columns along instead of being cut by a straight one.
+    let inset = match (group.content_right, group.text_right) {
+        (Some(right), Some(text)) => (column(right) - column(text)).max(0),
+        _ => 0,
+    };
+    let (marks, wording) = (cut(group.content_right, 0), cut(group.text_right, inset));
 
     // Separators go down before the modules, so any overlap is covered by them. A divider
     // out past where the contents stop is the opposite case to the cap above: it belongs
     // to content the fold has already covered, and letting it through would leave it
     // standing outside the island, or inside the one beside it.
-    for separator in group.separators.iter().filter(|s| !trailing(s)) {
+    // A divider the fold has gone past belongs to content it has covered, and the mask no
+    // longer stops it: what the island keeps beyond that column is its own end, and this
+    // would paint the colours of two hidden modules into it.
+    let covered = |separator: &PlacedSeparator| {
+        !separator.cap && (group.content_right).is_some_and(|right| separator.x >= right - 0.01)
+    };
+    for separator in (group.separators.iter()).filter(|s| !trailing(s) && !covered(s)) {
         draw_separator(pixmap, separator, scale, transform, clip);
     }
 
@@ -2091,6 +2184,7 @@ format = "$text"
             groups: vec![PlacedGroup {
                 collapse: None,
                 content_right: None,
+                content_edge: None,
                 text_right: None,
                 x,
                 y: 0.0,
@@ -2434,21 +2528,41 @@ format = "$text"
         assert!(open.data().iter().any(|&v| v != 0), "nothing was drawn");
 
         let all = PathBuilder::from_rect(Rect::from_xywh(0.0, 0.0, 64.0, 64.0).unwrap());
-        let mask = clip_mask(&mut slot, 64, 64, bounds, &all, Transform::identity()).unwrap();
+        let mask = clip_mask(
+            &mut slot,
+            (64, 64),
+            bounds,
+            &all,
+            FillRule::Winding,
+            None,
+            Transform::identity(),
+        )
+        .unwrap();
         let covered = draw(Cut {
             mask: Some(mask),
             bounds,
             stop: None,
+            shift: 0,
         });
         assert_eq!(open.data(), covered.data(), "a mask over everything cut it");
 
         let none = PathBuilder::from_rect(Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
         let mut slot = None;
-        let mask = clip_mask(&mut slot, 64, 64, bounds, &none, Transform::identity()).unwrap();
+        let mask = clip_mask(
+            &mut slot,
+            (64, 64),
+            bounds,
+            &none,
+            FillRule::Winding,
+            None,
+            Transform::identity(),
+        )
+        .unwrap();
         let cut = draw(Cut {
             mask: Some(mask),
             bounds,
             stop: None,
+            shift: 0,
         });
         assert!(
             cut.data().iter().all(|&v| v == 0),
@@ -2703,6 +2817,102 @@ background = '#458588'
                  reading {reading:?} at scale {scale}"
                 );
             }
+        }
+    }
+
+    /// The end a fold cuts with leans, and the frame it arrives on cuts nothing at all: the
+    /// island it lands on holds one module, and the wording and marks behind that one have
+    /// to be gone rather than standing in the lean of the cap.
+    ///
+    /// The fixture gives the cap more width than the collapsed style gives its icon room,
+    /// because the room is what the wording is already held back by. Where the two are
+    /// equal the lean is paid for by accident, and a cut that never straightened would pass.
+    #[test]
+    fn a_fold_arrives_with_nothing_standing_in_the_lean_of_its_cap() {
+        use crate::{
+            collect::Registry,
+            layout::Inputs,
+            status::{Fields, StatusItem, Value},
+        };
+        let cfg = Config::parse(
+            "[bar]\nheight = 24\nicon_size = 12\n[left]\ngroups = ['s']\n[group.s]\n\
+             modules = ['cpu', 'memory']\ncollapsible = true\ncollapse_button = 'right'\n\
+             radius = 0\npadding = 0\nspacing = 2\nbackground = '#00000000'\n\
+             ends = { left = 'none', right = 'slant', width = 12 }\n\
+             collapsed = { icon = 'cpu', padding = 0, background = '#83a598' }\n\
+             [module.cpu]\nformat = '$text'\npadding = 0\nicon = 'cpu'\n\
+             background = '#cc241d'\nforeground = '#ebdbb2'\n\
+             [module.memory]\nformat = '$text'\npadding = 0\nicon = 'memory'\n\
+             background = '#458588'\n",
+        )
+        .unwrap();
+        let items: Vec<_> = [("cpu", "88888888"), ("memory", "66%")]
+            .into_iter()
+            .map(|(name, text)| {
+                let mut fields = Fields::default();
+                fields.set("text", Value::Text(text.into()));
+                StatusItem {
+                    id: Some(name.into()),
+                    fields,
+                    state: Default::default(),
+                    urgent: false,
+                    foreground: None,
+                    background: None,
+                    action: None,
+                }
+            })
+            .collect();
+        let native = Registry::new(&Default::default());
+        let frame = |folding: &std::collections::HashMap<String, f32>,
+                     shut: &std::collections::HashSet<String>| {
+            let inputs = Inputs {
+                items: &items,
+                native: &native,
+                sway: &Default::default(),
+                alt: &Default::default(),
+                pages: &Default::default(),
+                collapsed_groups: shut,
+                collapsed: &Default::default(),
+                folding,
+                waiting: &Default::default(),
+                spin: 0,
+                tray: &Default::default(),
+                output: None,
+            };
+            crate::layout::compute(
+                &cfg,
+                &inputs,
+                200.0,
+                24.0,
+                &mut Blocks {
+                    scale: 1.0,
+                    run: None,
+                },
+                None,
+            )
+        };
+        let settled = frame(&Default::default(), &["s".to_string()].into());
+        let arriving = frame(&[("s".to_string(), 1.0)].into(), &Default::default());
+        let (a, b) = (&settled.groups[0], &arriving.groups[0]);
+        assert!((a.x - b.x).abs() < 0.001 && (a.width - b.width).abs() < 0.001);
+        assert!(
+            b.modules.len() > a.modules.len(),
+            "the fixture must arrive still holding what the shut island does not"
+        );
+        let cap = (b.separators.iter())
+            .find(|s| s.cap)
+            .expect("a trailing cap");
+        let room = (b.content_right.zip(b.text_right)).map_or(0.0, |(right, text)| right - text);
+        assert!(
+            cap.width > room,
+            "the cap must lean further than the room the wording is already held back by"
+        );
+        for scale in [1.0, 2.0] {
+            assert_eq!(
+                shot(&settled, scale).data(),
+                shot(&arriving, scale).data(),
+                "the last frame of a fold stood in the lean of its cap at scale {scale}"
+            );
         }
     }
 
@@ -3184,6 +3394,157 @@ background = "#83a598"
         }
     }
 
+    /// The transition at a folding island's end is one colour, and the fold sweeps it over
+    /// modules and over the gaps between them alike. Taking it from the module box rather
+    /// than from the ground actually under the edge swaps that colour a whole gap early,
+    /// which is a band arriving and leaving in one step on a bar that is otherwise
+    /// travelling - the edge looks swallowed rather than covered.
+    #[test]
+    fn a_folding_edge_is_the_colour_of_the_ground_it_stands_on() {
+        let scale = 2.0;
+        let mut gaps = 0;
+        for step in 1..=200 {
+            let frame = fold_ribbon(step as f32 / 200.0, true);
+            let group = &frame.groups[0];
+            let right = group.content_right.expect("the island is folding");
+            let join = &frame.group_separators[0];
+            gaps += usize::from(
+                (group.modules.windows(2))
+                    .any(|pair| right > pair[0].x + pair[0].width && right <= pair[1].x),
+            );
+            // Within a pixel of a boundary the last column rounds to either side of it,
+            // and which one it lands on says nothing about the rule under test.
+            let boundaries = (group.modules.iter()).flat_map(|m| [m.x, m.x + m.width]);
+            if boundaries
+                .map(|edge| (right - edge).abs())
+                .fold(f32::MAX, f32::min)
+                < 1.0
+            {
+                continue;
+            }
+            let (dw, dh) = ((480.0 * scale) as u32, (30.0 * scale) as u32);
+            let mut pixmap = Pixmap::new(dw, dh).unwrap();
+            let mut painter = Painter::new(Blocks { scale, run: None });
+            render(
+                &mut pixmap.as_mut(),
+                &frame,
+                scale,
+                &mut painter,
+                &mut Clip::default(),
+            );
+            // The bottom row is where the island reaches least far, so the last column
+            // before the edge there is island rather than transition however it leans.
+            let x = (right * scale).round() as usize - 1;
+            let pixel = pixmap.pixels()[(dh as usize - 1) * dw as usize + x];
+            assert_eq!(
+                (pixel.red(), pixel.green(), pixel.blue()),
+                (join.fill.r, join.fill.g, join.fill.b),
+                "the edge was coloured from ground it is not standing on at step {step}"
+            );
+        }
+        assert!(
+            gaps > 0,
+            "no frame put the edge inside a gap, so nothing was tested"
+        );
+    }
+
+    /// Fills stop where the fold's edge is and the transition drawn there covers them, but
+    /// glyphs and icons are cut instead, and a column cut inside a slanted end is the one
+    /// straight line left on an angled ribbon.
+    #[test]
+    fn a_fold_cuts_its_wording_with_the_shape_it_ends_with() {
+        let scale = 2.0;
+        let mut leaned = 0;
+        for step in 1..=99 {
+            let frame = fold_ribbon(step as f32 / 100.0, true);
+            let group = &frame.groups[0];
+            let (dw, dh) = ((480.0 * scale) as u32, (30.0 * scale) as u32);
+            let mut pixmap = Pixmap::new(dw, dh).unwrap();
+            let mut painter = Painter::new(Blocks { scale, run: None });
+            render(
+                &mut pixmap.as_mut(),
+                &frame,
+                scale,
+                &mut painter,
+                &mut Clip::default(),
+            );
+            let px = pixmap.pixels();
+            let w = dw as usize;
+            for module in &group.modules {
+                let ink = module.foreground;
+                let span = ((module.text_x * scale) as usize)..dw as usize;
+                // Icons are drawn in the same colour and are taller than the wording, so
+                // the rows are the ones the text backend writes and no others.
+                let top = ((module.y + (module.height - BLOCK) / 2.0) * scale).round() as usize;
+                let rows = top..(top + (BLOCK * scale) as usize).min(dh as usize);
+                // The rightmost written column of this module's wording, row by row. A
+                // straight cut leaves every row the same; the island's own end does not.
+                let edge = |y: usize| {
+                    span.clone().rev().find(|&x| {
+                        let p = px[y * w + x];
+                        (p.red(), p.green(), p.blue(), p.alpha()) == (ink.r, ink.g, ink.b, 255)
+                    })
+                };
+                let written: Vec<_> = rows.filter_map(edge).collect();
+                let (Some(top), Some(bottom)) = (written.first(), written.last()) else {
+                    continue;
+                };
+                assert!(
+                    top >= bottom,
+                    "the wording leaned against the island's end at step {step}"
+                );
+                leaned += usize::from(top - bottom >= 3);
+            }
+        }
+        assert!(
+            leaned > 0,
+            "no frame cut a reading on the slant, so nothing was tested"
+        );
+    }
+
+    /// What an island keeps past the column its fills stop at is its own end, and the mask
+    /// admits it so glyphs and marks can lean with it. A divider out there is furniture of
+    /// content the fold has already covered - the mask used to be what stopped it - so it
+    /// now paints a gap that is no longer on the bar into the island's own end. Taking one
+    /// out of the frame has to change nothing.
+    #[test]
+    fn a_fold_draws_no_divider_it_has_gone_past() {
+        let scale = 2.0;
+        let mut past = 0;
+        for step in 1..=400 {
+            let frame = fold_ribbon(step as f32 / 400.0, true);
+            let right = frame.groups[0]
+                .content_right
+                .expect("the island is folding");
+            let covered = |separator: &PlacedSeparator| !separator.cap && separator.x >= right;
+            if !frame.groups[0].separators.iter().any(covered) {
+                continue;
+            }
+            past += 1;
+            let mut without = frame.clone();
+            without.groups[0].separators.retain(|s| !covered(s));
+            let shot = |frame: &Frame| {
+                let (dw, dh) = ((480.0 * scale) as u32, (30.0 * scale) as u32);
+                let mut pixmap = Pixmap::new(dw, dh).unwrap();
+                let mut painter = Painter::new(Blocks { scale, run: None });
+                render(
+                    &mut pixmap.as_mut(),
+                    frame,
+                    scale,
+                    &mut painter,
+                    &mut Clip::default(),
+                );
+                pixmap
+            };
+            assert_eq!(
+                shot(&frame).data(),
+                shot(&without).data(),
+                "a divider the fold had gone past was drawn at step {step}"
+            );
+        }
+        assert!(past > 0, "no frame of the fold went past a divider");
+    }
+
     #[test]
     fn a_folding_ribbon_meets_its_join_without_a_pixel_seam() {
         for step in 85..=95 {
@@ -3537,21 +3898,22 @@ background = "#83a598"
             )
         };
         let open = frame(&Default::default());
-        for at in [0.25, 0.5, 0.75] {
+        // Swept rather than sampled: the corner is only reachable while the edge is in the
+        // few pixels of travel that put the island's end inside it, which three points of
+        // a fold walk straight past.
+        let mut clipped = 0;
+        for step in 1..80 {
+            let at = step as f32 / 100.0;
             let travelling = frame(&[("a".to_string(), at)].into());
             let island = &travelling.groups[0];
             assert!(island.width < open.groups[0].width);
             let last = island.modules.last().unwrap();
-            assert!(
-                last.x + last.width > island.x + island.width,
-                "nothing to clip at {at}"
-            );
-            assert!(
-                island
-                    .separators
-                    .iter()
-                    .any(|separator| { !separator.cap && separator.x > island.x + island.width }),
-                "the fixture must hide an internal divider at {at}"
+            if last.x + last.width <= island.x + island.width {
+                continue;
+            }
+            clipped += usize::from(
+                (island.separators.iter())
+                    .any(|separator| !separator.cap && separator.x > island.x + island.width),
             );
             // Inside the island's own rounded rectangle. A straight column can stop text
             // at an edge but not at a corner, and the content of a folding island runs
@@ -3598,6 +3960,7 @@ background = "#83a598"
                 assert!(drew, "nothing was drawn at all");
             }
         }
+        assert!(clipped > 0, "the fixture never hid an internal divider");
     }
 
     #[test]

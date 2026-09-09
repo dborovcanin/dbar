@@ -189,7 +189,7 @@ collapse_button = "right"
 # it moves in with the edge while the readings slide underneath and are cut off at
 # it. Leave the line out and the fold is one redraw, which is what it costs at rest
 # either way - the timer runs only while the island is moving.
-collapse_animation = "1400ms"
+collapse_animation = "8s"
 modules = ["cpu", "memory", "temperature"]
 background = "#00000000"
 radius = 0

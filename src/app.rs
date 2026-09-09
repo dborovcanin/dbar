@@ -2710,6 +2710,7 @@ mod tests {
                         collapse: Some(("system".into(), reserved)),
                         content_right: None,
                         text_right: None,
+                        content_edge: None,
                         x: 0.0,
                         y: 0.0,
                         width: 40.0,
