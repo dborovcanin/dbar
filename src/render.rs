@@ -1296,15 +1296,21 @@ fn draw_group(
             snap(module.x + module.width, scale).min(snap(edge, scale)),
         );
         let (ml, mr) = outer_radii(module, group, index, edge, rl, rr);
-        // Geometry can only carry a corner a fill has room for: `edged_rect` clamps a
-        // radius to half the box, so the sliver of a module the travelling edge is part
-        // way across rounds by a pixel where the island rounds by twelve, and paints over
-        // the arc it is meant to be inside. The mask still says it exactly, so the sliver
-        // goes back through the mask and gives up its own corners to it - one antialiased
-        // edge either way, and never the wrong shape.
-        let carries = ml.max(mr) * 2.0 <= (mx1 - mx0).min(module.height) + 0.01;
-        let shaped = group.content_right.is_some() && carries;
-        let (ml, mr) = match group.content_right.is_some() && !carries {
+        // A fill may be cut by geometry instead of by the mask only where its geometry says
+        // the same thing the island's arc does. Two ways it can fail to, and a travelling
+        // edge finds both: the module the edge is part way across is a sliver, and
+        // `edged_rect` clamps a radius to half the box, so two pixels at a twelve pixel
+        // corner round by one; and the module before that sliver ends inside the corner
+        // with a square side of its own, because it is no longer the one at the island's
+        // edge and takes no radius from it. Either way the fill reaches outside the arc it
+        // belongs inside, so it goes back through the mask and gives up its corners to it.
+        // Everything clear of both corners - which is most of an island, every frame -
+        // keeps the single rasterised edge and the faster blend.
+        let fits = |r: f32| r * 2.0 <= (mx1 - mx0).min(module.height) + 0.01;
+        let inside_left = mx0 >= group.x + rl - 0.01 || (ml >= rl - 0.01 && fits(ml));
+        let inside_right = mx1 <= edge - rr + 0.01 || (mr >= rr - 0.01 && fits(mr));
+        let shaped = group.content_right.is_some() && inside_left && inside_right;
+        let (ml, mr) = match group.content_right.is_some() && !shaped {
             true => (module.radius, module.radius),
             false => (ml, mr),
         };
@@ -3411,18 +3417,26 @@ background = "#83a598"
                 None,
             )
         };
-        // How far past the island's arc a solidly painted pixel lies. Every outline in the
-        // frame is antialiased, so a boundary pixel says nothing; a leak is measured in
-        // whole pixels and this one used to reach two and a half.
+        // How far past the island's arc anything visible lies. Not solid pixels only: a
+        // fill that escapes through a mask it should have been cut by arrives at part
+        // strength, and reading `alpha == 255` would call four columns of a module leaking
+        // at forty-five per cent a clean frame. Every outline here is antialiased, so a
+        // pixel on the boundary says nothing either way - a leak is measured in whole
+        // pixels, and the two this test was written for reached two and a half.
         let mut worst = (0.0f32, 0.0f32);
         for step in 1..100 {
             let at = step as f32 / 100.0;
             let frame = frame(&[("a".to_string(), at)].into());
             let group = &frame.groups[0];
+            // The island rounds by what it has room for, the same clamp `edged_rect`
+            // applies: near the end of its travel it is narrower than two radii and its
+            // ends are semicircles. Measuring against the configured radius there would
+            // report the island's own edge as a leak.
+            let radius = radius.min(group.width / 2.0).min(group.height / 2.0);
             let shot = shot(&frame, 1.0);
             let width = shot.width();
             for (n, pixel) in shot.pixels().iter().enumerate() {
-                if pixel.alpha() < 250 {
+                if pixel.alpha() < 8 {
                     continue;
                 }
                 let (px, py) = ((n as u32 % width) as f32, (n as u32 / width) as f32);
