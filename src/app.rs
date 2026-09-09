@@ -2549,7 +2549,7 @@ mod tests {
                     next.x = 20.0;
                     let group = PlacedGroup {
                         collapse: Some(("system".into(), reserved)),
-                        clipped: false,
+                        content_right: None,
                         x: 0.0,
                         y: 0.0,
                         width: 40.0,

@@ -309,6 +309,13 @@ pub struct PlacedSeparator {
     pub overlap: f32,
     /// Fill the complement of the shape, keeping an outer cap attached to its module.
     pub inverted: bool,
+    /// Whether this is an island's own end cap, drawn in room of its own beside the
+    /// modules, rather than a divider drawn in the gap between two of them.
+    ///
+    /// The two are clipped differently while a fold is travelling: a divider belongs to
+    /// the contents and is cut where they are, and a cap belongs to the island and is
+    /// placed at an edge the contents never reach.
+    pub cap: bool,
     /// Colour of the region on the leading side of the boundary.
     pub fill: Color,
     /// Colour behind it, on the trailing side.
@@ -327,16 +334,24 @@ pub struct PlacedGroup {
     /// How much of the finished island reaches the screen, 0.0 to 1.0.
     pub opacity: f32,
     pub edges: Edges,
-    /// Whether the island's contents are wider than the island and stop at its edge.
+    /// Where the island's contents stop, for one holding more than it shows.
     ///
-    /// Only a group part-way through a fold is: everything else is measured to fit, and
+    /// Not the island's own edge: a trailing cap is drawn in room of its own beyond this,
+    /// the way it is when nothing is folding, so the modules have to be cut before it or
+    /// they would fill the transparent side of it in. `None` on every group that was
+    /// measured to fit, which is all of them but the one a fold is travelling over -
     /// clipping costs a mask and a slower blend for every fill drawn through it.
-    pub clipped: bool,
+    pub content_right: Option<f32>,
     pub modules: Vec<PlacedModule>,
     pub separators: Vec<PlacedSeparator>,
 }
 
 impl PlacedGroup {
+    /// The module still visible immediately before the trailing cap or join.
+    fn trailing_module(&self) -> Option<&PlacedModule> {
+        module_before(&self.modules, self.content_right)
+    }
+
     /// Every logical pixel the island can reach, which is not its rectangle.
     ///
     /// A separator drawn at a group's end bleeds `overlap` past each side of itself to hide
@@ -358,13 +373,21 @@ impl PlacedGroup {
         // edge, but the mask that stops it has to be cleared over everything drawn through
         // it, and the layer a translucent one is composited from has to be big enough to
         // take it, so both are asked about the content rather than the island.
-        if self.clipped
+        if self.content_right.is_some()
             && let Some(last) = self.modules.last()
         {
             x1 = x1.max(last.x + last.width);
         }
         (x0, self.y, x1 - x0, self.height)
     }
+}
+
+fn module_before(modules: &[PlacedModule], edge: Option<f32>) -> Option<&PlacedModule> {
+    modules
+        .iter()
+        .rev()
+        .find(|module| edge.is_none_or(|right| module.x < right))
+        .or_else(|| modules.first())
 }
 
 #[derive(Clone, Debug)]
@@ -474,6 +497,7 @@ impl SamePaint for PlacedSeparator {
             && self.direction == other.direction
             && self.overlap == other.overlap
             && self.inverted == other.inverted
+            && self.cap == other.cap
             && self.fill == other.fill
             && self.under == other.under
     }
@@ -488,7 +512,7 @@ impl SamePaint for PlacedGroup {
             && self.background == other.background
             && self.opacity == other.opacity
             && self.edges == other.edges
-            && self.clipped == other.clipped
+            && self.content_right == other.content_right
             && self.modules.len() == other.modules.len()
             && self.separators.len() == other.separators.len()
             && (self.modules.iter())
@@ -1465,8 +1489,12 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         true => group_x + sized.width - trail - sized.padding,
         false => x,
     };
+    // Where the contents stop, for an island holding more than it shows. The cap hangs
+    // off it, the colour it takes comes from whichever module is still visible beside it,
+    // and the island carries it out for the renderer and for the join beyond.
+    let content_right = sized.clipped.then_some(trail_x);
     if trail > 0.0
-        && let Some(last) = modules.last()
+        && let Some(last) = module_before(&modules, content_right)
     {
         separators.push(end_separator(
             ends.right,
@@ -1490,7 +1518,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         background: sized.background,
         opacity: sized.opacity,
         edges: sized.edges,
-        clipped: sized.clipped,
+        content_right,
         modules,
         separators,
     }
@@ -1513,6 +1541,7 @@ fn separator_between(
         direction: separator.direction,
         overlap: separator.overlap,
         inverted: false,
+        cap: false,
         fill: match separator.color {
             SeparatorColor::Previous => previous.background,
             SeparatorColor::Next => next.background,
@@ -1599,6 +1628,7 @@ fn end_separator(
         // Only slants need a complementary triangle to change slope while staying
         // attached. Other cap shapes retain their established pointing behavior.
         inverted: shape == SeparatorShape::Slant && leading == (direction == Direction::Right),
+        cap: true,
         fill,
         under,
     }
@@ -1689,11 +1719,14 @@ pub fn compute(
         // whatever the fold made room for.
         let mut travelled: Option<f32> = None;
         for group in groups {
-            let (w, padding, clipped) = (group.width, group.padding, group.clipped);
+            let w = group.width;
             let placed = place(group, x, height, pointer);
+            // Where this island's contents stop, which is where anything drawn at its
+            // trailing end belongs - the join below included.
+            let edge = placed.content_right;
             if let Some(separator) = position.separator
                 && frame.groups.len() > first
-                && let Some(previous) = frame.groups.last().and_then(|g| g.modules.last())
+                && let Some(previous) = frame.groups.last().and_then(PlacedGroup::trailing_module)
                 && let Some(next) = placed.modules.first()
             {
                 frame.group_separators.push(separator_between(
@@ -1704,7 +1737,7 @@ pub fn compute(
                     travelled,
                 ));
             }
-            travelled = clipped.then_some(x + w - padding);
+            travelled = edge;
             frame.groups.push(placed);
             x += w + position.separator.map_or(gap, |s| s.width);
         }
@@ -1732,7 +1765,7 @@ pub fn fault(
     Frame {
         groups: vec![PlacedGroup {
             collapse: None,
-            clipped: false,
+            content_right: None,
             x,
             y: 0.0,
             width: module_width,
@@ -4035,7 +4068,7 @@ background = "#aa0000"
         // Between the two shapes and cut off at its own edge, holding the open group's
         // children rather than a re-measured version of them.
         assert!((travelling.width - (open_w + shut_w) / 2.0).abs() < 0.001);
-        assert!(travelling.clipped);
+        assert!(travelling.content_right.is_some());
         assert_eq!(travelling.modules.len(), open.groups[0].modules.len());
         assert_eq!(travelling.modules[0].text, open.groups[0].modules[0].text);
 
@@ -4088,7 +4121,7 @@ background = "#aa0000"
         let folding: std::collections::HashMap<String, f32> = [("a".to_string(), 0.5)].into();
         inputs.folding = &folding;
         let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
-        assert!(frame.groups[0].clipped);
+        assert!(frame.groups[0].content_right.is_some());
         assert!((inset(&frame) - inset(&open)).abs() < 0.001);
         let last = frame.groups[0].modules.last().unwrap();
         assert!(
@@ -4106,7 +4139,7 @@ background = "#aa0000"
         let folding: std::collections::HashMap<String, f32> = [("c".to_string(), 0.5)].into();
         inputs.folding = &folding;
         let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
-        assert!(frame.groups[2].clipped);
+        assert!(frame.groups[2].content_right.is_some());
         assert!((cap(&frame) - cap(&open)).abs() < 0.001);
         let last = frame.groups[2].modules.last().unwrap();
         assert!(

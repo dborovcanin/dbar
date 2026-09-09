@@ -1097,23 +1097,68 @@ fn draw_group(
     // that are worth avoiding: building the mask costs a path fill, and every fill drawn
     // through one takes a slower blend, which together are a third of a frame.
     let (pw, ph) = (pixmap.width(), pixmap.height());
-    // A folding island is the other case: what it holds was measured for the width it had
-    // when it was open, so the outline is what stops it as the edge travels over it.
-    let clip = match group.clipped || ((rl > 0.0 || rr > 0.0) && spills(group)) {
-        true => {
-            let bounds = drawn_bounds(group, transform, pw, ph);
-            bounds.and_then(|b| clip_mask(tools.mask, pw, ph, b, &outline, transform))
-        }
-        false => None,
-    };
-    // The mask catches every fill and every icon; text is placed by the backend and has
-    // to be told where the edge is.
-    let stop = group
-        .clipped
-        .then(|| (((group.x + group.width + offset.0) * scale).round()) as i32);
 
-    // Separators go down before the modules, so any overlap is covered by them.
-    for separator in &group.separators {
+    // A cap out past where the contents stop is the island's own trailing furniture: it
+    // is placed rather than overrun, so the clip that holds the contents in would take it
+    // off the bar. It still has to stay inside the island, and a rounded edge is the one
+    // thing that can cut it, so it goes down first and through the island's own outline.
+    // The slot holds one mask at a time, and everything below wants the other one.
+    let trailing = |separator: &PlacedSeparator| {
+        separator.cap
+            && group
+                .content_right
+                .is_some_and(|right| separator.x >= right - 0.01)
+    };
+    if group.separators.iter().any(trailing) {
+        let clip = match rl > 0.0 || rr > 0.0 {
+            true => drawn_bounds(group, transform, pw, ph)
+                .and_then(|bounds| clip_mask(tools.mask, pw, ph, bounds, &outline, transform)),
+            // Nothing to cut it with: a square island has no corner for a cap to escape
+            // over, which is why one that is not folding gets no mask either.
+            false => None,
+        };
+        for separator in group.separators.iter().filter(|s| trailing(s)) {
+            draw_separator(pixmap, separator, scale, transform, clip);
+        }
+    }
+
+    // A folding island is the other case: what it holds was measured for the width it had
+    // when it was open, so something has to stop it as the edge travels over it. Not the
+    // island's own outline, though - the trailing cap sits in room of its own inside that,
+    // the way it does when nothing is folding, and modules run through to the island's
+    // edge would fill the open side of the cap in. Contents stop where contents stop.
+    let mask_path = match group.content_right {
+        Some(right) => {
+            // Module fills and joins share snapped device columns. The moving clip
+            // must use the same columns or its partially covered last pixel exposes
+            // the bar background beside an otherwise solid ribbon.
+            let left = snap(group.x, scale);
+            edged_rect(
+                left,
+                group.y,
+                snap(right, scale) - left,
+                group.height,
+                rl,
+                rr,
+            )
+        }
+        None => ((rl > 0.0 || rr > 0.0) && spills(group)).then(|| outline.clone()),
+    };
+    let clip = mask_path.as_ref().and_then(|path| {
+        let bounds = drawn_bounds(group, transform, pw, ph)?;
+        clip_mask(tools.mask, pw, ph, bounds, path, transform)
+    });
+    // The mask catches every fill and every icon; text is placed by the backend and has
+    // to be told where the contents stop.
+    let stop = group
+        .content_right
+        .map(|right| (((right + offset.0) * scale).round()) as i32);
+
+    // Separators go down before the modules, so any overlap is covered by them. A divider
+    // out past where the contents stop is the opposite case to the cap above: it belongs
+    // to content the fold has already covered, and letting it through would leave it
+    // standing outside the island, or inside the one beside it.
+    for separator in group.separators.iter().filter(|s| !trailing(s)) {
         draw_separator(pixmap, separator, scale, transform, clip);
     }
 
@@ -1700,6 +1745,7 @@ format = "$text"
             direction: Direction::Right,
             overlap: 0.0,
             inverted: false,
+            cap: false,
             fill: A,
             under: B,
         };
@@ -1789,6 +1835,7 @@ format = "$text"
             direction,
             overlap: 0.0,
             inverted: false,
+            cap: false,
             fill,
             under,
         };
@@ -1832,6 +1879,7 @@ format = "$text"
                 direction,
                 overlap: 0.0,
                 inverted: false,
+                cap: false,
                 fill: TILE,
                 under: TILE_ALT,
             };
@@ -1890,7 +1938,7 @@ format = "$text"
         Frame {
             groups: vec![PlacedGroup {
                 collapse: None,
-                clipped: false,
+                content_right: None,
                 x,
                 y: 0.0,
                 width: first + gap + second,
@@ -1915,6 +1963,7 @@ format = "$text"
                     direction: Direction::Right,
                     overlap: 0.0,
                     inverted: false,
+                    cap: false,
                     fill: TILE,
                     under: TILE_ALT,
                 }],
@@ -2522,6 +2571,284 @@ background = "#83a598"
             }
         }
     }
+    fn gruvbox_fold(at: f32, joined: bool) -> Frame {
+        use crate::{
+            collect::Registry,
+            config::Source,
+            layout::Inputs,
+            status::{Fields, State, StatusItem, Value},
+        };
+        let mut cfg = Config::parse(include_str!("../examples/gruvbox-ribbon.toml")).unwrap();
+        cfg.positions[0].groups.clear();
+        cfg.positions[1].groups.clear();
+        cfg.positions[2]
+            .groups
+            .retain(|group| group.name == "system" || (joined && group.name == "connections"));
+        if !joined {
+            cfg.positions[2].separator = None;
+        }
+        // This fixture folds the real example, so it is worth saying what it expected of
+        // it: an edit that renames one of these would otherwise show up as an index out
+        // of range somewhere further down, with nothing to say which file moved.
+        assert_eq!(
+            cfg.positions[2].groups.len(),
+            1 + usize::from(joined),
+            "examples/gruvbox-ribbon.toml no longer has the groups this folds"
+        );
+        let system: Vec<_> = (cfg.positions[2].groups[0].modules.iter())
+            .map(|module| module.name.as_str())
+            .collect();
+        assert_eq!(
+            system,
+            ["cpu", "memory", "temperature"],
+            "examples/gruvbox-ribbon.toml's system group is not the one this folds"
+        );
+        for group in &mut cfg.positions[2].groups {
+            if group.name == "connections" {
+                group.modules.retain(|module| module.name == "language");
+            }
+            for module in &mut group.modules {
+                module.source = Source::Provider;
+                module.format = crate::format::Format::parse("$text").unwrap();
+            }
+        }
+        let items: Vec<_> = [
+            ("cpu", "13%"),
+            ("memory", "66%"),
+            ("temperature", "76°C"),
+            ("language", "EN"),
+        ]
+        .into_iter()
+        .map(|(name, text)| {
+            let mut fields = Fields::default();
+            fields.set("text", Value::Text(text.into()));
+            StatusItem {
+                id: Some(name.into()),
+                fields,
+                state: if name == "temperature" {
+                    State::Warning
+                } else {
+                    State::Idle
+                },
+                urgent: false,
+                foreground: None,
+                background: None,
+                action: None,
+            }
+        })
+        .collect();
+        let native = Registry::new(&Default::default());
+        let folding = [("system".to_string(), at)].into();
+        let inputs = Inputs {
+            items: &items,
+            native: &native,
+            sway: &Default::default(),
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed_groups: &Default::default(),
+            collapsed: &Default::default(),
+            folding: &folding,
+            waiting: &Default::default(),
+            spin: 0,
+            tray: &Default::default(),
+            output: None,
+        };
+        crate::layout::compute(
+            &cfg,
+            &inputs,
+            480.0,
+            30.0,
+            &mut Blocks {
+                scale: 1.0,
+                run: None,
+            },
+            None,
+        )
+    }
+
+    #[test]
+    fn a_fold_colors_its_trailing_transition_from_visible_content() {
+        for joined in [false, true] {
+            let frame = gruvbox_fold(0.85, joined);
+            let group = &frame.groups[0];
+            let cpu = &group.modules[0];
+            let temperature = group.modules.last().unwrap();
+            let right = group.content_right.unwrap();
+            assert!(right > cpu.x && right < cpu.x + cpu.width);
+            assert_ne!(cpu.background, temperature.background);
+            let transition = if joined {
+                &frame.group_separators[0]
+            } else {
+                group.separators.last().unwrap()
+            };
+            assert_eq!(
+                transition.fill, cpu.background,
+                "hidden temperature colored the edge; joined={joined}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_folding_ribbon_meets_its_join_without_a_pixel_seam() {
+        for step in 85..=95 {
+            let frame = gruvbox_fold(step as f32 / 100.0, true);
+            let cpu = &frame.groups[0].modules[0];
+            let join = &frame.group_separators[0];
+            assert!(join.x > cpu.x && join.x < cpu.x + cpu.width);
+            for scale in [1.0, 1.5, 2.0] {
+                let mut pixmap =
+                    Pixmap::new((480.0 * scale) as u32, (30.0 * scale) as u32).unwrap();
+                let mut painter = Painter::new(Blocks { scale, run: None });
+                render(
+                    &mut pixmap.as_mut(),
+                    &frame,
+                    scale,
+                    &mut painter,
+                    &mut Clip::default(),
+                );
+                // The last module column before the join is solid at the top of the
+                // ribbon, away from its text and icon. Fractional clipping must not
+                // expose a column of bar background here.
+                let column = (join.x * scale).round() as usize;
+                let x = column
+                    .checked_sub(1)
+                    .expect("the join has a ribbon to its left");
+                let pixel = pixmap.pixels()[pixmap.width() as usize + x];
+                assert_eq!(
+                    (pixel.red(), pixel.green(), pixel.blue()),
+                    (cpu.background.r, cpu.background.g, cpu.background.b),
+                    "seam before join at step {step} scale {scale}"
+                );
+            }
+        }
+    }
+
+    /// A trailing cap is drawn in room of its own at the island's end, and half of a slant
+    /// is the bar showing through. A fold moves that room in over the content, so the
+    /// modules have to stop before it: they are drawn after the separators and would
+    /// otherwise fill the open side of the cap in, turning a slant into a wall.
+    #[test]
+    fn a_folding_island_leaves_the_open_side_of_its_cap_alone() {
+        use crate::{
+            collect::Registry,
+            layout::Inputs,
+            status::{Fields, StatusItem, Value},
+        };
+        let cfg = Config::parse(
+            "[left]\ngroups = ['a']\n[group.a]\nmodules = ['a', 'a', 'a']\ncollapsible = true\n\
+             collapse_button = 'right'\ncollapse_animation = '150ms'\nbackground = '#00000000'\n\
+             radius = 0\npadding = 0\nseparator = { shape = 'slant', width = 5, overlap = 1 }\n\
+             ends = { left = 'slant', right = 'slant', width = 8, \
+             direction = 'right' }\ncollapsed = { icon = 'cpu', icon_size = 8, padding = 2, \
+             background = '#83a598' }\n[module.a]\nbackground = '#cc241d'\npadding = 2\n\
+             format = '$text'\n",
+        )
+        .unwrap();
+        let mut fields = Fields::default();
+        fields.set("text", Value::Text("reading".into()));
+        let items = [StatusItem {
+            id: Some("a".into()),
+            fields,
+            state: Default::default(),
+            urgent: false,
+            foreground: None,
+            background: None,
+            action: None,
+        }];
+        let native = Registry::new(&Default::default());
+        let frame = |folding: &std::collections::HashMap<String, f32>| {
+            let inputs = Inputs {
+                items: &items,
+                native: &native,
+                sway: &Default::default(),
+                alt: &Default::default(),
+                pages: &Default::default(),
+                collapsed: &Default::default(),
+                collapsed_groups: &Default::default(),
+                folding,
+                waiting: &Default::default(),
+                spin: 0,
+                tray: &Default::default(),
+                output: None,
+            };
+            crate::layout::compute(
+                &cfg,
+                &inputs,
+                480.0,
+                12.0,
+                &mut Blocks {
+                    scale: 1.0,
+                    run: None,
+                },
+                None,
+            )
+        };
+        // What the cap's own strip is made of: how much of it the bar is still showing
+        // through, and how much of it the cap actually painted. A slant needs both - one
+        // says it did not fill in, the other says it is still there at all.
+        let strip = |frame: &Frame| {
+            let group = &frame.groups[0];
+            let cap = group.separators.last().unwrap();
+            let shot = shot(frame, 1.0);
+            let width = shot.width() as usize;
+            let (x0, x1) = (cap.x.ceil() as usize, (cap.x + cap.width).floor() as usize);
+            let rows = group.y as usize..(group.y + group.height) as usize;
+            let mut clear = 0;
+            let mut painted = 0;
+            for y in rows {
+                for x in x0..x1 {
+                    match shot.pixels()[y * width + x].alpha() {
+                        0 => clear += 1,
+                        250.. => painted += 1,
+                        _ => {}
+                    }
+                }
+            }
+            (clear, painted)
+        };
+
+        // Open, the slant leaves half its strip to the bar behind it.
+        let open = frame(&Default::default());
+        assert!(open.groups[0].separators.last().unwrap().width > 0.0);
+        let (was_clear, was_painted) = strip(&open);
+        assert!(was_clear > 0, "the cap was solid before anything folded");
+        assert!(
+            was_painted > 0,
+            "the cap drew nothing before anything folded"
+        );
+
+        // Folding, the cap moves in over the content and has to stay just as open.
+        for at in [0.25, 0.5, 0.75] {
+            let travelling = frame(&[("a".to_string(), at)].into());
+            let group = &travelling.groups[0];
+            let cap = group.separators.last().unwrap();
+            let last = group.modules.last().unwrap();
+            assert!(cap.cap, "the last separator must be the trailing cap");
+            if at >= 0.5 {
+                assert!(
+                    group
+                        .separators
+                        .iter()
+                        .any(|separator| { !separator.cap && separator.x > cap.x + cap.width }),
+                    "the fixture must also hide an internal divider at {at}"
+                );
+            }
+            assert!(
+                cap.x < last.x + last.width,
+                "the cap is not over the content at {at}"
+            );
+            let (clear, painted) = strip(&travelling);
+            assert!(
+                clear * 4 >= was_clear * 3,
+                "the cap filled in at {at}: {clear} clear against {was_clear} open"
+            );
+            assert!(
+                painted * 4 >= was_painted * 3,
+                "the cap went missing at {at}: {painted} painted against {was_painted} open"
+            );
+        }
+    }
+
     /// A folding island holds content measured for the width it had when it was open, and
     /// the edge travels over it. Everything that reaches the screen has to stop at that
     /// edge, corners included - the fills through the mask, and the glyphs through it too,
@@ -2535,20 +2862,40 @@ background = "#83a598"
             status::{Fields, StatusItem, Value},
         };
         let cfg = Config::parse(
-            "[left]\ngroups = ['a']\n[group.a]\nmodules = ['a']\ncollapsible = true\n             collapse_button = 'right'\ncollapse_animation = '150ms'\nbackground = '#3c3836'\n             radius = 8\npadding = 2\ncollapsed = { icon = 'cpu', icon_size = 10, padding = 3,              background = '#83a598' }\n[module.a]\nbackground = '#cc241d'\npadding = 12\n             format = '$text'\n",
+            "[left]\ngroups = ['a']\n[group.a]\nmodules = ['a', 'b', 'c']\n\
+             collapsible = true\ncollapse_button = 'right'\ncollapse_animation = '150ms'\n\
+             background = '#3c3836'\nradius = 6\npadding = 0\n\
+             separator = { shape = 'slant', width = 5, overlap = 1 }\n\
+             ends = { left = 'slant', right = 'slant', width = 6, direction = 'right' }\n\
+             collapsed = { icon = 'cpu', icon_size = 6, padding = 3, \
+             background = '#83a598' }\n[module.a]\nbackground = '#cc241d'\npadding = 2\n\
+             format = '$text'\n[module.b]\nbackground = '#98971a'\npadding = 2\n\
+             format = '$text'\n[module.c]\nbackground = '#458588'\npadding = 2\n\
+             format = '$text'\n",
         )
         .unwrap();
-        let mut fields = Fields::default();
-        fields.set("text", Value::Text("a very long wording indeed".into()));
-        let items = [StatusItem {
-            id: Some("a".into()),
-            fields,
-            state: Default::default(),
-            urgent: false,
-            foreground: None,
-            background: None,
-            action: None,
-        }];
+        // Three of them, so the island holds dividers as well as content. A divider the
+        // fold has already covered belongs to the contents and is cut where they are;
+        // only the island's own cap is placed out beyond them.
+        let items: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|id| {
+                let mut fields = Fields::default();
+                fields.set(
+                    "text",
+                    Value::Text(format!("{id} very long wording indeed")),
+                );
+                StatusItem {
+                    id: Some(id.into()),
+                    fields,
+                    state: Default::default(),
+                    urgent: false,
+                    foreground: None,
+                    background: None,
+                    action: None,
+                }
+            })
+            .collect();
         let native = Registry::new(&Default::default());
         let frame = |folding: &std::collections::HashMap<String, f32>| {
             let inputs = Inputs {
@@ -2587,6 +2934,13 @@ background = "#83a598"
                 last.x + last.width > island.x + island.width,
                 "nothing to clip at {at}"
             );
+            assert!(
+                island
+                    .separators
+                    .iter()
+                    .any(|separator| { !separator.cap && separator.x > island.x + island.width }),
+                "the fixture must hide an internal divider at {at}"
+            );
             // Inside the island's own rounded rectangle. A straight column can stop text
             // at an edge but not at a corner, and the content of a folding island runs
             // right into its rounded ones.
@@ -2602,11 +2956,19 @@ background = "#83a598"
                 let (dx, dy) = (px - cx, py - cy);
                 (dx * dx + dy * dy).sqrt() > radius + 0.5
             };
-            for scale in [1.0, 2.0] {
+            for scale in [1.0, 1.5, 2.0] {
                 let shot = shot(&travelling, scale);
                 let width = shot.width();
+                let edge = ((island.x + island.width) * scale).ceil() as u32;
                 let mut drew = false;
                 for (n, pixel) in shot.pixels().iter().enumerate() {
+                    if n as u32 % width >= edge {
+                        assert_eq!(
+                            pixel.alpha(),
+                            0,
+                            "paint past the island at {at} scale {scale}"
+                        );
+                    }
                     // Only what is solidly painted: every outline in the frame is
                     // antialiased, so a partly covered pixel on a boundary says nothing
                     // about whether the island kept its contents in.
