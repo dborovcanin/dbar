@@ -169,7 +169,7 @@ collapse_button = "middle"
 # radius, so its ends are very nearly semicircles and the readings travelling under
 # the closing edge run straight into them. Text is clipped to the outline, corners
 # included, rather than to a straight column at the edge.
-collapse_animation = "2000ms"
+collapse_animation = "200ms"
 modules = ["cpu", "memory", "temperature"]
 background = "$surface"
 radius = 16

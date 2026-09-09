@@ -647,6 +647,10 @@ struct SizedGroup {
     /// How far the contents are moved inside the island, for a fold on its way. Zero for
     /// either settled shape: only a fold has two layouts to reconcile.
     shift: f32,
+    /// What this island charges the run it is in, which is `width` for everything but a
+    /// fold on its way. A travelling island is charged the widest it will ever be, so the
+    /// groups after it are measured against one budget from end to end of the travel.
+    reserve: f32,
     background: Color,
     opacity: f32,
     edges: Edges,
@@ -1080,8 +1084,12 @@ fn size_group(
     let mut left = budget - group.padding * 2.0 - ends.left_width() - ends.right_width();
     let mut modules = Vec::new();
     // How far the fold has got, for a group that is still moving. A group that is not is
-    // one of the two settled shapes below, and pays nothing for this.
-    let folding = inputs.folding.get(&group.name).copied();
+    // one of the two settled shapes below, and pays nothing for this - not even the hash
+    // of its own name, which is the same reason `waiting` is asked the same way.
+    let folding = match inputs.folding.is_empty() {
+        true => None,
+        false => inputs.folding.get(&group.name).copied(),
+    };
     if let Some(collapse) = &group.collapse
         && inputs.collapsed_groups.contains(&group.name)
         && folding.is_none()
@@ -1322,17 +1330,32 @@ fn size_group(
     // `finish_group` between them would have worked it out: the icon, and everything drawn
     // beside it that belongs to the group rather than to a module. Landing anywhere else
     // would show as a jump on the last frame.
-    let shut_module = shut_width(&style, style.icon_size * icon.width());
-    let shut = shut_module + group.padding * 2.0 + ends.left_width() + ends.right_width();
-    let folded = sized.folded(at, shut, shut_module);
+    let module = shut_width(&style, style.icon_size * icon.width());
+    let shut = Shut {
+        width: module + group.padding * 2.0 + ends.left_width() + ends.right_width(),
+        module,
+        style,
+    };
+    let folded = sized.folded(at, shut);
     // A fold does not only ever shrink: a group holding one narrow module can be closing
     // over an icon wider than all of it. The open width was checked against the budget on
     // the way in and the shut one is checked by the branch above, but the widths in
     // between are neither, and a group that grows out of its run would be drawn over its
     // neighbour or off the end of the bar. Left out instead, which is what the shut branch
     // does with an island that cannot fit - and a fold heading for one that cannot fit was
-    // going to end up left out anyway.
+    // going to end up left out anyway. `max_width` is not checked here for the same
+    // reason: a collapsed icon that could not fit inside it is refused when the config is
+    // read, so no fold can be travelling towards one.
     (folded.width <= budget).then_some(folded)
+}
+
+/// The island a fold is travelling to: how wide it is, how wide the one module in it is,
+/// and what that module is drawn in.
+#[derive(Clone, Copy)]
+struct Shut {
+    width: f32,
+    module: f32,
+    style: Style,
 }
 
 /// The width the collapsed icon needs, which is what a fold travels to and from.
@@ -1360,6 +1383,7 @@ fn finish_group(
             .as_ref()
             .map(|c| (group.name.clone(), c.button)),
         width,
+        reserve: width,
         clipped: false,
         shift: 0.0,
         background: group.background,
@@ -1382,10 +1406,37 @@ impl SizedGroup {
     /// icon, and the icon the first module already draws is the one it lands on. Both ends
     /// have to agree on where that is, so the contents slide by the distance between the
     /// two - together, which leaves the spacing inside them rigid.
-    fn folded(mut self, at: f32, shut: f32, shut_module: f32) -> SizedGroup {
+    fn folded(mut self, at: f32, shut: Shut) -> SizedGroup {
         let at = at.clamp(0.0, 1.0);
-        self.width += (shut - self.width) * at;
-        self.shift = self.travel(shut_module) * at;
+        if at == 0.0 {
+            // A fold about to leave is an island that has not moved, and an island that
+            // has not moved is the open one: cutting it here would put its contents behind
+            // the outline mask for a frame, and a square module corner inset into a round
+            // island is outside that outline. The frame the click lands on would flash.
+            return self;
+        }
+        // What the run charges this island stays where it was for the whole travel, at the
+        // widest the island is ever going to be. Charging what it is showing would hand
+        // every group after it a different budget on every frame, and a window title
+        // downstream would shed and regain a character at a time all the way through -
+        // which is the artefact the fold holds its own contents still to avoid.
+        self.reserve = self.width.max(shut.width);
+        self.width += (shut.width - self.width) * at;
+        self.shift = self.travel(shut.module) * at;
+        // The island is left holding the collapsed style's icon on the collapsed style's
+        // ground, so the module that stays behind arrives wearing them. Both ends of the
+        // hand-off are then the same picture and the swap on the last frame is a swap of
+        // nothing - as far as colour goes, which is as far as this can carry it: the two
+        // icons are whatever the config named, and a glyph does not blend into a glyph.
+        let first = &mut self.modules[0];
+        first.foreground = first.foreground.mix(shut.style.foreground, at);
+        first.background = first.background.mix(shut.style.background, at);
+        // A pointer resting on the island it just folded would otherwise hold the module
+        // at its hover colours for the whole travel and land on the collapsed ones.
+        if let Some(hover) = first.hover_style.as_mut() {
+            hover.foreground = hover.foreground.mix(shut.style.foreground, at);
+            hover.background = hover.background.mix(shut.style.background, at);
+        }
         self.clipped = true;
         self
     }
@@ -1614,11 +1665,12 @@ fn size_joined_run(
         };
         if let Some(previous) = out.last_mut() {
             previous.width -= reclaimed;
+            previous.reserve -= reclaimed;
             previous.ends.right = SeparatorShape::None;
             previous.edges.right = EdgeShape::None;
             sized.edges.left = EdgeShape::None;
         }
-        left = room - sized.width;
+        left = room - sized.reserve;
         out.push(sized);
     }
     out
@@ -1680,12 +1732,20 @@ pub fn compute(
         ..Frame::default()
     };
 
-    let run_width = |groups: &Vec<SizedGroup>, separator: Option<Separator>| -> f32 {
+    // A run measures twice: what it is showing, which is what it is placed by, and what it
+    // has reserved, which is what the runs after it are given to fit in. The two differ
+    // only while an island is folding, and holding them apart is what keeps a fold from
+    // re-truncating its neighbours on every frame of the travel.
+    let run_span = |groups: &Vec<SizedGroup>, separator: Option<Separator>, shown: bool| -> f32 {
         if groups.is_empty() {
             return 0.0;
         }
-        groups.iter().map(|g| g.width).sum::<f32>()
+        let width = |g: &SizedGroup| if shown { g.width } else { g.reserve };
+        groups.iter().map(width).sum::<f32>()
             + separator.map_or(gap, |s| s.width) * (groups.len() - 1) as f32
+    };
+    let run_width = |groups: &Vec<SizedGroup>, separator: Option<Separator>| -> f32 {
+        run_span(groups, separator, true)
     };
 
     // Sized in the order they get to keep their width: the right run says what it needs,
@@ -1705,7 +1765,7 @@ pub fn compute(
             let Some(sized) = size_group(group, inputs, height, text, left, None) else {
                 continue;
             };
-            left -= sized.width + gap;
+            left -= sized.reserve + gap;
             out.push(sized);
         }
         out
@@ -1713,13 +1773,11 @@ pub fn compute(
 
     let right = size_run(&cfg.positions[2], width, text);
     let right_width = run_width(&right, cfg.positions[2].separator);
-    let left = size_run(
-        &cfg.positions[0],
-        (width - right_width - gap).max(0.0),
-        text,
-    );
+    let right_held = run_span(&right, cfg.positions[2].separator, false);
+    let left = size_run(&cfg.positions[0], (width - right_held - gap).max(0.0), text);
     let left_width = run_width(&left, cfg.positions[0].separator);
-    let between = (width - right_width - left_width - gap * 2.0).max(0.0);
+    let left_held = run_span(&left, cfg.positions[0].separator, false);
+    let between = (width - right_held - left_held - gap * 2.0).max(0.0);
     let centre = size_run(&cfg.positions[1], between, text);
     let centre_width = run_width(&centre, cfg.positions[1].separator);
     let sized = [left, centre, right];
@@ -4073,6 +4131,159 @@ background = "#aa0000"
             tray: &TRAY,
             output: None,
         }
+    }
+
+    /// A fold hands over to the collapsed style at the end of its travel: the island is
+    /// left holding that style's icon on its ground, so the module that stays behind has
+    /// to arrive wearing them or the last frame is a colour change nobody asked for.
+    #[test]
+    fn a_fold_carries_its_first_module_over_to_the_collapsed_colours() {
+        let config = r##"
+[bar]
+height = 34
+icon_size = 17
+[right]
+groups = ["s"]
+[group.s]
+modules = ["cpu", "mem"]
+collapsible = true
+collapse_button = "right"
+padding = 2
+collapsed = { icon = "cpu", padding = 6, background = "#83a598", foreground = "#282828" }
+[module.cpu]
+format = "$text"
+padding = 6
+icon = "cpu"
+background = "#cc241d"
+foreground = "#ebdbb2"
+[module.cpu.states.hover]
+hover = true
+background = "#fb4934"
+[module.mem]
+format = "$text"
+padding = 6
+icon = "memory"
+background = "#458588"
+"##;
+        let cfg = Config::parse(config).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("cpu", "42"), item("mem", "70")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let all = ["s".to_string()].into_iter().collect();
+        inputs.collapsed_groups = &all;
+        let shut = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+        inputs.collapsed_groups = &none;
+        let shut = &shut.groups[0].modules[0];
+
+        let ends: [std::collections::HashMap<String, f32>; 3] = [
+            [("s".to_string(), 0.0)].into(),
+            [("s".to_string(), 0.5)].into(),
+            [("s".to_string(), 1.0)].into(),
+        ];
+        let mut colours = Vec::new();
+        for at in &ends {
+            inputs.folding = at;
+            let frame = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+            let first = &frame.groups[0].modules[0];
+            colours.push((first.foreground, first.background));
+        }
+
+        // Leaves as itself, arrives as the shut island, and is neither in between.
+        assert_eq!(
+            colours[0],
+            (
+                Color::parse("#ebdbb2").unwrap(),
+                Color::parse("#cc241d").unwrap()
+            )
+        );
+        assert_eq!(colours[2], (shut.foreground, shut.background));
+        assert!(colours[1] != colours[0] && colours[1] != colours[2]);
+
+        // A pointer resting on the island it just folded would otherwise hold the module
+        // at its hover colours all the way and land on the collapsed ones in one step.
+        let at: std::collections::HashMap<String, f32> = [("s".to_string(), 1.0)].into();
+        inputs.folding = &at;
+        let over = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, Some((398.0, 17.0)));
+        let hovered = &over.groups[0].modules[0];
+        assert_eq!(
+            (hovered.foreground, hovered.background),
+            (shut.foreground, shut.background)
+        );
+    }
+
+    /// A fold gives its released width back to the bar as it travels, so its neighbours
+    /// move. What they are measured against must not move with them: a group charged what
+    /// it is showing hands everything after it a larger budget on every frame, and a title
+    /// downstream sheds and regains a character at a time all the way through the fold.
+    #[test]
+    fn a_fold_does_not_re_truncate_the_groups_it_makes_room_for() {
+        let config = r##"
+[bar]
+height = 20
+gap = 0
+[right]
+groups = ["s"]
+[left]
+groups = ["t"]
+[group.s]
+modules = ["cpu"]
+collapsible = true
+collapse_button = "right"
+padding = 0
+collapsed = { icon = "cpu", icon_size = 8, padding = 0 }
+[group.t]
+modules = ["title"]
+padding = 0
+[module.cpu]
+format = "$text"
+padding = 0
+[module.title]
+format = "$text"
+padding = 0
+"##;
+        let cfg = Config::parse(config).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("cpu", &"c".repeat(40)), item("title", &"t".repeat(80))];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let title = |frame: &Frame| {
+            let group = frame
+                .groups
+                .iter()
+                .find(|g| g.x < 10.0)
+                .expect("the left run");
+            group.modules[0].text.clone()
+        };
+
+        let open = compute(&cfg, &inputs, 60.0, 20.0, &mut Fixed, None);
+        assert!(
+            title(&open).contains(ELLIPSIS),
+            "the fixture has to be tight enough to cut"
+        );
+
+        // Every step of the travel says the same thing, and what it says is what the frame
+        // the fold left from said.
+        let steps: Vec<std::collections::HashMap<String, f32>> = (0..=10)
+            .map(|step| [("s".to_string(), step as f32 / 10.0)].into())
+            .collect();
+        let mut widths = Vec::new();
+        for (step, at) in steps.iter().enumerate() {
+            inputs.folding = at;
+            let frame = compute(&cfg, &inputs, 60.0, 20.0, &mut Fixed, None);
+            assert_eq!(title(&frame), title(&open), "the title moved at {step}/10");
+            widths.push(frame.groups.iter().find(|g| g.x >= 10.0).unwrap().width);
+        }
+        // And the island really did travel, so this is not a test of a fold that stood still.
+        assert!(widths[0] > *widths.last().unwrap());
+
+        // Settled shut, the room is genuinely handed over and the title takes it.
+        let all = ["s".to_string()].into_iter().collect();
+        let settled: std::collections::HashMap<String, f32> = Default::default();
+        inputs.folding = &settled;
+        inputs.collapsed_groups = &all;
+        let shut = compute(&cfg, &inputs, 60.0, 20.0, &mut Fixed, None);
+        assert!(title(&shut).len() > title(&open).len());
     }
 
     /// The island a fold arrives at is one icon, and the icon the first module already

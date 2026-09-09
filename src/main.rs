@@ -551,6 +551,7 @@ fn main() -> Result<()> {
             && let Err(e) = schedule_fold(&handle_for_fold)
         {
             log::error!("{e}");
+            app.release_fold_timer();
         }
         // Anything the handlers marked dirty but could not draw yet gets drawn here.
         app.draw_if_needed();

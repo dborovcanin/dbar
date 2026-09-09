@@ -300,7 +300,7 @@ fn draw_icon_cached(
     placed: &PlacedIcon,
     color: Color,
     transform: Transform,
-    clip: Option<&Mask>,
+    cut: Cut<'_>,
     cache: &mut IconCache,
 ) {
     if color.is_transparent() || placed.size <= 0.0 {
@@ -309,11 +309,8 @@ fn draw_icon_cached(
     // A picture is already rasterised, and the cache is keyed by which built-in icon it is
     // - which every one of these shares. Caching them would draw one tray item's artwork
     // for all of them.
-    // A clipped icon is rare - only a group with a separator at its end still has a mask -
-    // and blending coverage through one would mean applying the mask by hand, so those go
-    // the direct way.
-    if clip.is_some() || placed.art.is_some() {
-        draw_icon(pixmap, placed, color, transform, clip);
+    if placed.art.is_some() {
+        draw_icon(pixmap, placed, color, transform, cut.mask);
         return;
     }
 
@@ -350,16 +347,63 @@ fn draw_icon_cached(
     };
     blend_coverage(
         pixmap,
-        &run.coverage,
-        run.width,
-        run.height,
-        ox as i32,
-        oy as i32,
+        Blit {
+            pixels: &run.coverage,
+            width: run.width,
+            height: run.height,
+            x: ox as i32,
+            y: oy as i32,
+        },
         color,
         true,
-        None,
-        None,
+        cut,
     );
+}
+
+/// Where a group's contents stop, for the two things tiny-skia's clip cannot catch.
+///
+/// `mask` is the island's outline, which is what takes the corners, and `stop` is the
+/// device column past which nothing is written at all, which is what holds where the
+/// outline's coverage does not reach. `bounds` is the box of the mask that was cleared
+/// for this group: [`clip_mask`] leaves the rest of the buffer holding the last group's
+/// coverage, so anything reaching outside that box is treated as uncovered rather than
+/// read.
+#[derive(Clone, Copy, Default)]
+struct Cut<'a> {
+    mask: Option<&'a Mask>,
+    bounds: (u32, u32, u32, u32),
+    stop: Option<i32>,
+}
+
+impl Cut<'_> {
+    /// `[x0, x1) x [y0, y1)` narrowed to what this cut can answer for.
+    ///
+    /// Everything the mask was built for is inside its cleared box, so a run reaching past
+    /// it is a glyph's overhang outside the island - which the outline would have taken
+    /// anyway, had the mask been rasterised that far.
+    fn within(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> (i32, i32, i32, i32) {
+        let x1 = x1.min(self.stop.unwrap_or(i32::MAX));
+        if self.mask.is_none() {
+            return (x0, y0, x1, y1);
+        }
+        let (bx, by, bw, bh) = self.bounds;
+        (
+            x0.max(bx as i32),
+            y0.max(by as i32),
+            x1.min((bx + bw) as i32),
+            y1.min((by + bh) as i32),
+        )
+    }
+}
+
+/// A rasterised run of pixels and the device position its top left corner goes at.
+#[derive(Clone, Copy)]
+struct Blit<'a> {
+    pixels: &'a [u8],
+    width: usize,
+    height: usize,
+    x: i32,
+    y: i32,
 }
 
 /// Put a string on the pixmap with its left edge at `x` and its top at `y`.
@@ -369,43 +413,42 @@ fn draw_icon_cached(
 ///
 /// Glyphs are the one thing tiny-skia's clip cannot catch, because the backend rasterises
 /// and places them itself rather than filling a path. An island that cuts its contents off
-/// at its own edge therefore has to catch them here: `clip` is the island's outline, which
-/// is what takes the corners, and `stop` is the device column past which nothing is
-/// written at all, which is what holds where the outline's coverage does not reach.
-#[allow(clippy::too_many_arguments)]
+/// at its own edge therefore has to catch them here, which is what `cut` carries.
 fn draw_text(
     pixmap: &mut PixmapMut<'_>,
     text: &mut dyn DrawText,
     what: &str,
-    x: f32,
-    y: f32,
+    at: (f32, f32),
     scale: f32,
     color: Color,
-    clip: Option<&Mask>,
-    stop: Option<i32>,
+    cut: Cut<'_>,
 ) {
     if color.is_transparent() {
         return;
     }
-    let (ox, oy) = ((x * scale).round() as i32, (y * scale).round() as i32);
+    let (ox, oy) = ((at.0 * scale).round() as i32, (at.1 * scale).round() as i32);
     let Some(run) = text.run(what) else {
         return;
     };
     let (rx, ry) = (ox + run.left, oy + run.top);
+    let (rw, rh) = (run.width, run.height);
+    let blit = |pixels| Blit {
+        pixels,
+        width: rw,
+        height: rh,
+        x: rx,
+        y: ry,
+    };
     match &run.pixels {
         // cosmic-text builds a mask glyph's colour as the coverage over the base's rgb and
         // drops the base's alpha, so an alpha on a text colour has never reached the screen
         // and is not honoured here either.
-        RunPixels::Coverage(coverage) => blend_coverage(
-            pixmap, coverage, run.width, run.height, rx, ry, color, false, clip, stop,
-        ),
+        RunPixels::Coverage(coverage) => blend_coverage(pixmap, blit(coverage), color, false, cut),
         // The text tinted first and what carries its own colour laid over it, which is
         // how `☀ Clear` keeps the sun's colours and the module's own wording.
         RunPixels::Mixed { coverage, rgba } => {
-            blend_coverage(
-                pixmap, coverage, run.width, run.height, rx, ry, color, false, clip, stop,
-            );
-            blend_rgba(pixmap, rgba, run.width, run.height, rx, ry, clip, stop);
+            blend_coverage(pixmap, blit(coverage), color, false, cut);
+            blend_rgba(pixmap, blit(rgba), cut);
         }
     }
 }
@@ -413,37 +456,40 @@ fn draw_text(
 /// Blend premultiplied RGBA into the pixmap, clipped to the surface.
 ///
 /// Only emoji arrive this way: they carry their own colour, so there is nothing to tint.
-#[allow(clippy::too_many_arguments)]
-fn blend_rgba(
-    pixmap: &mut PixmapMut<'_>,
-    rgba: &[u8],
-    width: usize,
-    height: usize,
-    ox: i32,
-    oy: i32,
-    clip: Option<&Mask>,
-    stop: Option<i32>,
-) {
+fn blend_rgba(pixmap: &mut PixmapMut<'_>, blit: Blit<'_>, cut: Cut<'_>) {
     let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
-    let x0 = ox.max(0);
-    let y0 = oy.max(0);
-    let x1 = (ox + width as i32).min(pw).min(stop.unwrap_or(i32::MAX));
-    let y1 = (oy + height as i32).min(ph);
+    let (ox, oy) = (blit.x, blit.y);
+    let (x0, y0, x1, y1) = cut.within(
+        ox.max(0),
+        oy.max(0),
+        (ox + blit.width as i32).min(pw),
+        (oy + blit.height as i32).min(ph),
+    );
     if x0 >= x1 || y0 >= y1 {
         return;
     }
-    let mask = clip.map(|m| m.data());
+    let mask = cut.mask.map(|m| m.data());
     let pixels = pixmap.pixels_mut();
+    let span = (x1 - x0) as usize;
     for py in y0..y1 {
-        let src = ((py - oy) as usize * width + (x0 - ox) as usize) * 4;
+        let src = ((py - oy) as usize * blit.width + (x0 - ox) as usize) * 4;
         let dst = py as usize * pw as usize + x0 as usize;
-        for i in 0..(x1 - x0) as usize {
-            let px = &rgba[src + i * 4..src + i * 4 + 4];
+        // Read off the row rather than the whole buffer, so the per-pixel work below is
+        // an index into a slice instead of a branch on whether there is a mask at all.
+        let row = mask.map(|mask| &mask[dst..dst + span]);
+        for i in 0..span {
+            let px = &blit.pixels[src + i * 4..src + i * 4 + 4];
             // Premultiplied, so the mask scales all four channels together or the colour
             // comes out brighter than its own alpha allows.
-            let cover = mask.map_or(255, |mask| u32::from(mask[dst + i]));
-            let faded = |v: u8| ((u32::from(v) * cover + 127) / 255) as u8;
-            let (r, g, b, a) = (faded(px[0]), faded(px[1]), faded(px[2]), faded(px[3]));
+            let cover = row.map_or(255, |row| u32::from(row[i]));
+            let (r, g, b, a) = match cover {
+                255 => (px[0], px[1], px[2], px[3]),
+                0 => continue,
+                _ => {
+                    let faded = |v: u8| ((u32::from(v) * cover + 127) / 255) as u8;
+                    (faded(px[0]), faded(px[1]), faded(px[2]), faded(px[3]))
+                }
+            };
             if a == 0 {
                 continue;
             }
@@ -466,24 +512,21 @@ fn blend_rgba(
 /// `honour_alpha` scales the coverage by the colour's own alpha. Icons want that - the
 /// colour they are given is the colour they are drawn in - which is the one way they differ
 /// from text, where the mask path drops it.
-#[allow(clippy::too_many_arguments)]
 fn blend_coverage(
     pixmap: &mut PixmapMut<'_>,
-    coverage: &[u8],
-    width: usize,
-    height: usize,
-    ox: i32,
-    oy: i32,
+    blit: Blit<'_>,
     color: Color,
     honour_alpha: bool,
-    clip: Option<&Mask>,
-    stop: Option<i32>,
+    cut: Cut<'_>,
 ) {
     let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
-    let x0 = ox.max(0);
-    let y0 = oy.max(0);
-    let x1 = (ox + width as i32).min(pw).min(stop.unwrap_or(i32::MAX));
-    let y1 = (oy + height as i32).min(ph);
+    let (ox, oy) = (blit.x, blit.y);
+    let (x0, y0, x1, y1) = cut.within(
+        ox.max(0),
+        oy.max(0),
+        (ox + blit.width as i32).min(pw),
+        (oy + blit.height as i32).min(ph),
+    );
     if x0 >= x1 || y0 >= y1 {
         return;
     }
@@ -492,21 +535,23 @@ fn blend_coverage(
         true => color.a as u32,
         false => 255,
     };
-    let mask = clip.map(|m| m.data());
+    let mask = cut.mask.map(|m| m.data());
     let pixels = pixmap.pixels_mut();
+    let span = (x1 - x0) as usize;
     for py in y0..y1 {
-        let src = (py - oy) as usize * width + (x0 - ox) as usize;
+        let src = (py - oy) as usize * blit.width + (x0 - ox) as usize;
         let dst = py as usize * pw as usize + x0 as usize;
-        for i in 0..(x1 - x0) as usize {
-            let cover = coverage[src + i] as u32;
+        // The island's outline, where one was asked for: a straight column can stop text
+        // at an edge but not at a corner, and a folding island's content runs right into
+        // its rounded ones. Taken a row at a time so the per-pixel work is an index.
+        let row = mask.map(|mask| &mask[dst..dst + span]);
+        for i in 0..span {
+            let cover = blit.pixels[src + i] as u32;
             if cover == 0 {
                 continue;
             }
-            // The island's outline, where one was asked for: a straight column can stop
-            // text at an edge but not at a corner, and a folding island's content runs
-            // right into its rounded ones.
-            let cover = match mask {
-                Some(mask) => (cover * u32::from(mask[dst + i]) + 127) / 255,
+            let cover = match row {
+                Some(row) => (cover * u32::from(row[i]) + 127) / 255,
                 None => cover,
             };
             if cover == 0 {
@@ -846,7 +891,14 @@ fn render_menu(
             );
         }
         if let Some(icon) = &row.icon {
-            draw_icon_cached(pixmap, icon, row.foreground, transform, None, icons);
+            draw_icon_cached(
+                pixmap,
+                icon,
+                row.foreground,
+                transform,
+                Cut::default(),
+                icons,
+            );
         }
         if let Some((x, y)) = row.mark {
             draw_tick(pixmap, x, y, line * 0.5, row.foreground, transform);
@@ -858,12 +910,10 @@ fn render_menu(
             pixmap,
             text,
             &row.text,
-            row.text_x,
-            row.text_y,
+            (row.text_x, row.text_y),
             scale,
             row.foreground,
-            None,
-            None,
+            Cut::default(),
         );
     }
 }
@@ -1144,15 +1194,26 @@ fn draw_group(
         }
         None => ((rl > 0.0 || rr > 0.0) && spills(group)).then(|| outline.clone()),
     };
-    let clip = mask_path.as_ref().and_then(|path| {
+    let masked = mask_path.as_ref().and_then(|path| {
         let bounds = drawn_bounds(group, transform, pw, ph)?;
-        clip_mask(tools.mask, pw, ph, bounds, path, transform)
+        Some((
+            clip_mask(tools.mask, pw, ph, bounds, path, transform)?,
+            bounds,
+        ))
     });
-    // The mask catches every fill and every icon; text is placed by the backend and has
-    // to be told where the contents stop.
-    let stop = group
-        .content_right
-        .map(|right| (((right + offset.0) * scale).round()) as i32);
+    let clip = masked.map(|(mask, _)| mask);
+    // The mask catches every fill and every icon; text is placed by the backend and has to
+    // be told where the contents stop. Only a folding island tells it: everywhere else the
+    // mask exists to keep an end separator inside a rounded corner, and glyphs have never
+    // been cut there.
+    let cut = match group.content_right {
+        Some(right) => Cut {
+            mask: clip,
+            bounds: masked.map(|(_, bounds)| bounds).unwrap_or_default(),
+            stop: Some(((right + offset.0) * scale).round() as i32),
+        },
+        None => Cut::default(),
+    };
 
     // Separators go down before the modules, so any overlap is covered by them. A divider
     // out past where the contents stop is the opposite case to the cap above: it belongs
@@ -1178,12 +1239,17 @@ fn draw_group(
             clip,
         );
         if let Some(icon) = &module.icon {
+            let icons = Cut {
+                mask: clip,
+                bounds: masked.map(|(_, bounds)| bounds).unwrap_or_default(),
+                stop: cut.stop,
+            };
             draw_icon_cached(
                 pixmap,
                 icon,
                 module.foreground,
                 transform,
-                clip,
+                icons,
                 tools.icons,
             );
         }
@@ -1194,12 +1260,10 @@ fn draw_group(
             pixmap,
             tools.text,
             &module.text,
-            tx,
-            ty,
+            (tx, ty),
             scale,
             module.foreground,
-            clip,
-            stop,
+            cut,
         );
     }
 }
@@ -2157,7 +2221,7 @@ format = "$text"
                         &placed,
                         colour,
                         Transform::identity(),
-                        None,
+                        Cut::default(),
                         &mut cache,
                     );
                     // Again, onto its own ground, so a hit is checked as well as a miss.
@@ -2167,7 +2231,7 @@ format = "$text"
                         &placed,
                         colour,
                         Transform::identity(),
-                        None,
+                        Cut::default(),
                         &mut cache,
                     );
                     assert_eq!(cached.data(), again.data(), "a cache hit drew differently");
@@ -2189,6 +2253,63 @@ format = "$text"
         }
     }
 
+    /// The icon cache used to be skipped whenever a mask was present, which meant a
+    /// folding island - the only thing on the bar that animates - re-rasterised every icon
+    /// on every frame. It goes through the cache now, so the cache has to honour the mask
+    /// itself rather than leaning on tiny-skia's clip.
+    #[test]
+    fn a_cached_icon_is_cut_by_the_mask_it_is_given() {
+        use crate::icon::Icon;
+        let placed = PlacedIcon {
+            icon: Icon::Cpu,
+            level: 0,
+            x: 8.0,
+            y: 8.0,
+            size: 24.0,
+            art: None,
+        };
+        let colour = Color::parse("#ebdbb2").unwrap();
+        let draw = |cut: Cut<'_>| {
+            let mut pixmap = Pixmap::new(64, 64).unwrap();
+            let mut cache = IconCache::new();
+            draw_icon_cached(
+                &mut pixmap.as_mut(),
+                &placed,
+                colour,
+                Transform::identity(),
+                cut,
+                &mut cache,
+            );
+            pixmap
+        };
+        let bounds = (0, 0, 64, 64);
+        let mut slot = None;
+        let open = draw(Cut::default());
+        assert!(open.data().iter().any(|&v| v != 0), "nothing was drawn");
+
+        let all = PathBuilder::from_rect(Rect::from_xywh(0.0, 0.0, 64.0, 64.0).unwrap());
+        let mask = clip_mask(&mut slot, 64, 64, bounds, &all, Transform::identity()).unwrap();
+        let covered = draw(Cut {
+            mask: Some(mask),
+            bounds,
+            stop: None,
+        });
+        assert_eq!(open.data(), covered.data(), "a mask over everything cut it");
+
+        let none = PathBuilder::from_rect(Rect::from_xywh(0.0, 0.0, 1.0, 1.0).unwrap());
+        let mut slot = None;
+        let mask = clip_mask(&mut slot, 64, 64, bounds, &none, Transform::identity()).unwrap();
+        let cut = draw(Cut {
+            mask: Some(mask),
+            bounds,
+            stop: None,
+        });
+        assert!(
+            cut.data().iter().all(|&v| v == 0),
+            "a mask covering nothing let the icon through"
+        );
+    }
+
     /// An island that runs off the end of the bar keeps the part that fits. The layer is
     /// clamped to the surface, so this is where an off-by-one turns into a panic.
     #[test]
@@ -2208,6 +2329,109 @@ format = "$text"
             group.separators[0].x += shift;
             shot(&frame, 1.0);
         }
+    }
+
+    /// A fold is a travel between two settled frames, so the frame it leaves from has to
+    /// be one of them. It is not enough for the width to match: the island's contents are
+    /// cut to its outline while a fold is on, and a square module corner inset into a
+    /// round island sits outside that outline. Cutting on the frame the click lands on
+    /// takes those corners off for one frame and puts them back on the next.
+    #[test]
+    fn the_frame_a_fold_leaves_from_is_the_open_one_pixel_for_pixel() {
+        use crate::{
+            collect::Registry,
+            layout::Inputs,
+            status::{Fields, StatusItem, Value},
+        };
+        let config = "\
+[bar]
+height = 34
+icon_size = 17
+[right]
+groups = ['s']
+[group.s]
+modules = ['cpu', 'memory']
+collapsible = true
+collapse_button = 'right'
+radius = 16
+padding = 2
+spacing = 2
+background = '#313244'
+collapsed = { icon = 'cpu', padding = 6 }
+edges = { left = 'round', right = 'round' }
+[module.cpu]
+format = '$text'
+padding = 6
+icon = 'cpu'
+background = '#cc241d'
+[module.memory]
+format = '$text'
+padding = 6
+icon = 'memory'
+background = '#458588'
+";
+        let cfg = Config::parse(config).unwrap();
+        let items: Vec<_> = [("cpu", "13%"), ("memory", "66%")]
+            .into_iter()
+            .map(|(name, text)| {
+                let mut fields = Fields::default();
+                fields.set("text", Value::Text(text.into()));
+                StatusItem {
+                    id: Some(name.into()),
+                    fields,
+                    state: Default::default(),
+                    urgent: false,
+                    foreground: None,
+                    background: None,
+                    action: None,
+                }
+            })
+            .collect();
+        let native = Registry::new(&Default::default());
+        let frame = |folding: &std::collections::HashMap<String, f32>| {
+            let inputs = Inputs {
+                items: &items,
+                native: &native,
+                sway: &Default::default(),
+                alt: &Default::default(),
+                pages: &Default::default(),
+                collapsed_groups: &Default::default(),
+                collapsed: &Default::default(),
+                folding,
+                waiting: &Default::default(),
+                spin: 0,
+                tray: &Default::default(),
+                output: None,
+            };
+            crate::layout::compute(
+                &cfg,
+                &inputs,
+                480.0,
+                34.0,
+                &mut Blocks {
+                    scale: 1.0,
+                    run: None,
+                },
+                None,
+            )
+        };
+        let open = frame(&Default::default());
+        let leaving = frame(&[("s".to_string(), 0.0)].into());
+        for scale in [1.0, 2.0] {
+            assert_eq!(
+                shot(&open, scale).data(),
+                shot(&leaving, scale).data(),
+                "the first frame of a fold is not the open one at scale {scale}"
+            );
+        }
+        assert!(leaving.groups[0].content_right.is_none());
+
+        // And once it is moving the contents really are cut, which is the other half of
+        // the same rule: a test that only ever saw them uncut would pass on a fold that
+        // had stopped folding.
+        let moving = frame(&[("s".to_string(), 0.4)].into());
+        assert!(moving.groups[0].content_right.is_some());
+        assert_ne!(shot(&open, 1.0).data(), shot(&moving, 1.0).data());
     }
 
     /// An end cap bleeds past itself to hide the seam between two antialiased edges, and
@@ -2268,7 +2492,7 @@ format = '$text'
                 &cfg,
                 &inputs,
                 480.0,
-                12.0,
+                20.0,
                 &mut Blocks {
                     scale: 1.0,
                     run: None,
@@ -2571,7 +2795,7 @@ background = "#83a598"
             }
         }
     }
-    fn gruvbox_fold(at: f32, joined: bool) -> Frame {
+    fn fold(at: f32, joined: bool) -> Frame {
         use crate::{
             collect::Registry,
             config::Source,
@@ -2669,7 +2893,7 @@ background = "#83a598"
     #[test]
     fn a_fold_colors_its_trailing_transition_from_visible_content() {
         for joined in [false, true] {
-            let frame = gruvbox_fold(0.85, joined);
+            let frame = fold(0.85, joined);
             let group = &frame.groups[0];
             let cpu = &group.modules[0];
             let temperature = group.modules.last().unwrap();
@@ -2691,7 +2915,7 @@ background = "#83a598"
     #[test]
     fn a_folding_ribbon_meets_its_join_without_a_pixel_seam() {
         for step in 85..=95 {
-            let frame = gruvbox_fold(step as f32 / 100.0, true);
+            let frame = fold(step as f32 / 100.0, true);
             let cpu = &frame.groups[0].modules[0];
             let join = &frame.group_separators[0];
             assert!(join.x > cpu.x && join.x < cpu.x + cpu.width);

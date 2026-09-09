@@ -1779,6 +1779,12 @@ fn parse_duration(written: &str) -> Result<Duration> {
         .map_err(|_| anyhow!("{text:?} is longer than a length of time dbar can schedule"))
 }
 
+/// The longest a fold may be given to travel.
+///
+/// Long enough for the slowest easing anybody would want to watch, and short enough that
+/// the redraws it costs are still a gesture rather than a background load.
+const LONGEST_ANIMATION: Duration = Duration::from_millis(2000);
+
 /// The shortest interval a source may be given.
 ///
 /// A millisecond is already far more often than anything a bar shows can change, and it
@@ -2061,6 +2067,17 @@ fn resolve_group(
             .map(parse_duration)
             .transpose()
             .with_context(|| format!("in [group.{name}]: collapse_animation"))?;
+        // A fold is the one thing on the bar that redraws at screen rate, and it is
+        // affordable because it is over in a fraction of a second. A long one is not a
+        // slower animation, it is the permanent tick the bar exists without.
+        if let Some(animation) = animation
+            && animation > LONGEST_ANIMATION
+        {
+            bail!(
+                "[group.{name}]: collapse_animation is {animation:?}, longer than \
+                 {LONGEST_ANIMATION:?} - a fold redraws at screen rate for the whole of it"
+            );
+        }
         Some(GroupCollapse {
             button,
             style,
@@ -4060,6 +4077,10 @@ icon = 'cpu'",
                 "collapse_animation = '150ms'".to_string(),
                 "without collapsible",
             ),
+            // A fold redraws at screen rate for the whole of its span, so a long one is
+            // not a slower animation - it is the permanent tick the bar exists without.
+            (format!("{shut}\ncollapse_animation = '5s'"), "longer than"),
+            (format!("{shut}\ncollapse_animation = '1h'"), "longer than"),
         ] {
             let error = format!("{:#}", parse(&extra).unwrap_err());
             assert!(
