@@ -1381,6 +1381,11 @@ fn draw_group(
     // it through the mask leaves the corner a shade off the settled frame's, so the island
     // changes colour on the frame it arrives, and it charges every fill the slower blend.
     let edge = group.content_right.unwrap_or(group.x + group.width);
+    // Where the island's own ground ends, which is not where its contents do. Snapped,
+    // because what it is compared against is: a fill's own edge is put on a whole device
+    // pixel, and an island ending a fraction of one further along would otherwise never
+    // look like the edge its last module reaches.
+    let side = snap(group.x + group.width, scale);
     for (index, module) in group.modules.iter().enumerate() {
         // Snapped against the same grid as the separators, so the edge a module shares
         // with the gap beside it is one edge rather than two.
@@ -1388,7 +1393,7 @@ fn draw_group(
             snap(module.x, scale),
             snap(module.x + module.width, scale).min(snap(edge, scale)),
         );
-        let (ml, mr) = outer_radii(module, group, index, edge, rl, rr);
+        let (ml, mr) = outer_radii(module, group, index, mx1, side, rl, rr);
         // A fill may be cut by geometry instead of by the mask only where its geometry says
         // the same thing the island's arc does. Two ways it can fail to, and a travelling
         // edge finds both: the module the edge is part way across is a sliver, and
@@ -1401,8 +1406,14 @@ fn draw_group(
         // keeps the single rasterised edge and the faster blend.
         let fits = |r: f32| r * 2.0 <= (mx1 - mx0).min(module.height) + 0.01;
         let inside_left = mx0 >= group.x + rl - 0.01 || (ml >= rl - 0.01 && fits(ml));
-        let inside_right = mx1 <= edge - rr + 0.01 || (mr >= rr - 0.01 && fits(mr));
-        let shaped = group.content_right.is_some() && inside_left && inside_right;
+        let inside_right = mx1 <= side - rr + 0.01 || (mr >= rr - 0.01 && fits(mr));
+        // Whether geometry can stand in for the mask, which is a question about this fill
+        // and the island's arc and nothing else. Asking it only of a folding island left
+        // the two frames of a hand-over rasterising the same rectangle two different ways:
+        // the settled one carries a mask whenever its caps spill, and a fill drawn through
+        // one takes the arc twice - the mask's coverage times its own - which is a shade
+        // short of the fold's last frame, drawn once.
+        let shaped = inside_left && inside_right;
         let (ml, mr) = match group.content_right.is_some() && !shaped {
             true => (module.radius, module.radius),
             false => (ml, mr),
@@ -1478,7 +1489,8 @@ fn outer_radii(
     module: &PlacedModule,
     group: &PlacedGroup,
     index: usize,
-    edge: f32,
+    reach: f32,
+    side: f32,
     left: f32,
     right: f32,
 ) -> (f32, f32) {
@@ -1487,7 +1499,11 @@ fn outer_radii(
         return (module.radius, module.radius);
     }
     let at_left = index == 0 && module.x <= group.x + 0.01;
-    let at_right = module.x + module.width >= edge - 0.01;
+    // Where the fill stops against where the island does, rather than against where its
+    // contents do. A trailing cap sits in room of its own beyond the contents, so a fold
+    // that has moved the contents in leaves no module at the corner at all - and the shut
+    // island it is heading for has none there either, which is the frame it has to match.
+    let at_right = reach >= side - 0.01;
     (
         if at_left {
             left.max(module.radius)
@@ -2731,6 +2747,7 @@ spacing = 2
 background = '#00000000'
 collapsed = { icon = 'cpu', padding = 12, background = '#83a598', foreground = '#282828' }
 edges = { left = 'round', right = 'round' }
+ends = { left = 'none', right = 'slant', width = 12 }
 [module.cpu]
 format = '$text'
 padding = 0
@@ -2817,6 +2834,80 @@ background = '#458588'
                  reading {reading:?} at scale {scale}"
                 );
             }
+        }
+    }
+
+    /// A module at the island's edge wears the island's corner. Which module that is comes
+    /// of comparing where the fill stops against where the island does, and a fill's own
+    /// edge is put on a whole device pixel: an island ending a fraction of one further
+    /// along has no module reaching it at all, and every rounded right corner comes out
+    /// square.
+    #[test]
+    fn a_rounded_corner_survives_an_island_that_ends_between_pixels() {
+        use crate::{
+            collect::Registry,
+            layout::Inputs,
+            status::{Fields, StatusItem, Value},
+        };
+        let cfg = Config::parse(
+            "[bar]\nheight = 20\n[left]\ngroups = ['g']\n[group.g]\nmodules = ['a']\n\
+             radius = 6\npadding = 0\nbackground = '#00000000'\n\
+             [module.a]\nbackground = '#cc241d'\npadding = 2.1\nformat = '$text'\n",
+        )
+        .unwrap();
+        let mut fields = Fields::default();
+        fields.set("text", Value::Text("reading".into()));
+        let items = [StatusItem {
+            id: Some("a".into()),
+            fields,
+            state: Default::default(),
+            urgent: false,
+            foreground: None,
+            background: None,
+            action: None,
+        }];
+        let native = Registry::new(&Default::default());
+        let inputs = Inputs {
+            items: &items,
+            native: &native,
+            sway: &Default::default(),
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed_groups: &Default::default(),
+            collapsed: &Default::default(),
+            folding: &Default::default(),
+            waiting: &Default::default(),
+            spin: 0,
+            tray: &Default::default(),
+            output: None,
+        };
+        let frame = crate::layout::compute(
+            &cfg,
+            &inputs,
+            480.0,
+            20.0,
+            &mut Blocks {
+                scale: 1.0,
+                run: None,
+            },
+            None,
+        );
+        let island = &frame.groups[0];
+        let right = island.x + island.width;
+        assert!(
+            (right - right.round()).abs() > 0.1,
+            "the fixture must end between pixels, not at {right}"
+        );
+        for scale in [1.0, 1.5, 2.0] {
+            let shot = shot(&frame, scale);
+            // The corner's own pixel: solid means the arc was never cut.
+            let x = (right * scale).floor() as u32 - 1;
+            let pixel = shot.pixels()[x as usize];
+            assert!(
+                pixel.alpha() < 200,
+                "a square corner at scale {scale}: alpha {}",
+                pixel.alpha()
+            );
         }
     }
 
