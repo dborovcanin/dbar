@@ -374,8 +374,9 @@ impl PlacedGroup {
         // it, and the layer a translucent one is composited from has to be big enough to
         // take it, so both are asked about the content rather than the island.
         if self.content_right.is_some()
-            && let Some(last) = self.modules.last()
+            && let (Some(first), Some(last)) = (self.modules.first(), self.modules.last())
         {
+            x0 = x0.min(first.x);
             x1 = x1.max(last.x + last.width);
         }
         (x0, self.y, x1 - x0, self.height)
@@ -643,6 +644,9 @@ struct SizedGroup {
     width: f32,
     /// Whether what is inside reaches past the island and has to be cut off at its edge.
     clipped: bool,
+    /// How far the contents are moved inside the island, for a fold on its way. Zero for
+    /// either settled shape: only a fold has two layouts to reconcile.
+    shift: f32,
     background: Color,
     opacity: f32,
     edges: Edges,
@@ -1318,11 +1322,9 @@ fn size_group(
     // `finish_group` between them would have worked it out: the icon, and everything drawn
     // beside it that belongs to the group rather than to a module. Landing anywhere else
     // would show as a jump on the last frame.
-    let shut = shut_width(&style, style.icon_size * icon.width())
-        + group.padding * 2.0
-        + ends.left_width()
-        + ends.right_width();
-    let folded = sized.folded(at, shut);
+    let shut_module = shut_width(&style, style.icon_size * icon.width());
+    let shut = shut_module + group.padding * 2.0 + ends.left_width() + ends.right_width();
+    let folded = sized.folded(at, shut, shut_module);
     // A fold does not only ever shrink: a group holding one narrow module can be closing
     // over an icon wider than all of it. The open width was checked against the budget on
     // the way in and the shut one is checked by the branch above, but the widths in
@@ -1359,6 +1361,7 @@ fn finish_group(
             .map(|c| (group.name.clone(), c.button)),
         width,
         clipped: false,
+        shift: 0.0,
         background: group.background,
         opacity: group.opacity,
         edges: group.edges,
@@ -1373,13 +1376,37 @@ fn finish_group(
 impl SizedGroup {
     /// The island part-way shut: as wide as the fold has got, holding what it held.
     ///
-    /// Everything inside keeps the position it was measured at, so the content sits still
-    /// and the edge travels over it. That is what makes the two ends of a fold line up
-    /// with the frames either side of it, which are the ordinary open and shut shapes.
-    fn folded(mut self, at: f32, shut: f32) -> SizedGroup {
-        self.width += (shut - self.width) * at.clamp(0.0, 1.0);
+    /// The contents keep the width they were measured at and the edge travels over them,
+    /// which is what makes the two ends of a fold line up with the frames either side of
+    /// it. They do not keep their position, though: what the island is left holding is an
+    /// icon, and the icon the first module already draws is the one it lands on. Both ends
+    /// have to agree on where that is, so the contents slide by the distance between the
+    /// two - together, which leaves the spacing inside them rigid.
+    fn folded(mut self, at: f32, shut: f32, shut_module: f32) -> SizedGroup {
+        let at = at.clamp(0.0, 1.0);
+        self.width += (shut - self.width) * at;
+        self.shift = self.travel(shut_module) * at;
         self.clipped = true;
         self
+    }
+
+    /// How far the contents move for the first module's icon to arrive under the one the
+    /// shut island draws.
+    ///
+    /// Both icons are centred in their own module box and both boxes start at the same
+    /// place, so the distance is between the two centres. A first module with no icon has
+    /// nothing to line up and stays where it was measured.
+    fn travel(&self, shut_module: f32) -> f32 {
+        let first = &self.modules[0];
+        if first.icon_advance <= 0.0 {
+            return 0.0;
+        }
+        // The advance carries the gap before the text, which is not part of the glyph.
+        let gap = match first.text.is_empty() {
+            true => 0.0,
+            false => first.style.gap(),
+        };
+        (shut_module - first.width + first.text_width + gap) / 2.0
     }
 }
 
@@ -1398,6 +1425,9 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     let ends = sized.ends;
     let lead = ends.left_width();
     x += lead;
+    // A fold moves what it holds; everything the island draws for itself - its ends, its
+    // trailing cap - is placed against the island and left out of this.
+    x += sized.shift;
 
     for (i, m) in sized.modules.into_iter().enumerate() {
         if i > 0 {
@@ -4043,6 +4073,89 @@ background = "#aa0000"
             tray: &TRAY,
             output: None,
         }
+    }
+
+    /// The island a fold arrives at is one icon, and the icon the first module already
+    /// draws is the one it lands on: a config names the same picture for both so the fold
+    /// reads as everything else sliding away from it. That only works if the two agree on
+    /// where the icon is, so the contents travel with the fold rather than sitting still.
+    #[test]
+    fn a_fold_lands_its_icon_where_the_shut_island_draws_one() {
+        let config = r##"
+[bar]
+height = 34
+icon_size = 17
+[right]
+groups = ["s"]
+[group.s]
+modules = ["cpu", "mem"]
+collapsible = true
+collapse_button = "right"
+padding = 2
+spacing = 2
+collapsed = { icon = "cpu", padding = 6 }
+[group.s.edges]
+left = "round"
+right = "round"
+[module.cpu]
+format = "$text"
+min_width = 66
+padding = 6
+icon_gap = 3
+icon = "cpu"
+[module.mem]
+format = "$text"
+padding = 6
+icon = "memory"
+"##;
+        let cfg = Config::parse(config).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("cpu", "42"), item("mem", "70")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let icon_of = |frame: &Frame| {
+            let group = &frame.groups[0];
+            let icon = group.modules[0].icon.as_ref().expect("an icon to follow");
+            (group.x, group.width, icon.x)
+        };
+
+        let open = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+        let all = ["s".to_string()].into_iter().collect();
+        inputs.collapsed_groups = &all;
+        let shut = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+        inputs.collapsed_groups = &none;
+
+        // Nothing has moved on the frame a fold starts from, and the frame it ends on is
+        // the shut island itself - icon included, which is the whole point of the travel.
+        let ends: [std::collections::HashMap<String, f32>; 2] = [
+            [("s".to_string(), 0.0)].into(),
+            [("s".to_string(), 1.0)].into(),
+        ];
+        for (at, want) in ends.iter().zip([icon_of(&open), icon_of(&shut)]) {
+            inputs.folding = at;
+            let frame = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+            let got = icon_of(&frame);
+            assert!(
+                (got.0 - want.0).abs() < 0.001
+                    && (got.1 - want.1).abs() < 0.001
+                    && (got.2 - want.2).abs() < 0.001,
+                "at {at:?}: {got:?} against {want:?}"
+            );
+        }
+
+        // Halfway is halfway, and the content that ran past the island still has to be in
+        // the bounds the mask is built from even though it has moved back over the edge.
+        let halfway: std::collections::HashMap<String, f32> = [("s".to_string(), 0.5)].into();
+        inputs.folding = &halfway;
+        let frame = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+        let (x, _, icon) = icon_of(&frame);
+        let travel = icon_of(&shut).2 - icon_of(&open).2 - (icon_of(&shut).0 - icon_of(&open).0);
+        assert!((icon - (x + icon_of(&open).2 - icon_of(&open).0 + travel / 2.0)).abs() < 0.001);
+        let group = &frame.groups[0];
+        let (bx, _, bw, _) = group.paint_bounds();
+        let first = &group.modules[0];
+        let last = group.modules.last().unwrap();
+        assert!(bx <= first.x && bx + bw >= last.x + last.width);
     }
 
     #[test]
