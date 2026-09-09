@@ -37,6 +37,12 @@ pub struct Inputs<'a> {
     pub collapsed_groups: &'a std::collections::HashSet<String>,
     /// Modules folded down to their icon, preserved while their group is hidden.
     pub collapsed: &'a std::collections::HashSet<String>,
+    /// Groups on their way between open and shut, by name: 0.0 open, 1.0 shut.
+    ///
+    /// A group travelling is laid out open and cut off at its own edge, which is the part
+    /// that moves. One that has arrived is not in here at all, and `collapsed_groups` says
+    /// which end it arrived at.
+    pub folding: &'a std::collections::HashMap<String, f32>,
     /// Command sources with a run on its way that has been out long enough to say so.
     ///
     /// Which run it is does not matter here, only that one is happening: a module waiting
@@ -303,6 +309,13 @@ pub struct PlacedSeparator {
     pub overlap: f32,
     /// Fill the complement of the shape, keeping an outer cap attached to its module.
     pub inverted: bool,
+    /// Whether this is an island's own end cap, drawn in room of its own beside the
+    /// modules, rather than a divider drawn in the gap between two of them.
+    ///
+    /// The two are clipped differently while a fold is travelling: a divider belongs to
+    /// the contents and is cut where they are, and a cap belongs to the island and is
+    /// placed at an edge the contents never reach.
+    pub cap: bool,
     /// Colour of the region on the leading side of the boundary.
     pub fill: Color,
     /// Colour behind it, on the trailing side.
@@ -321,11 +334,32 @@ pub struct PlacedGroup {
     /// How much of the finished island reaches the screen, 0.0 to 1.0.
     pub opacity: f32,
     pub edges: Edges,
+    /// Where the island's contents stop, for one holding more than it shows.
+    ///
+    /// Not the island's own edge: a trailing cap is drawn in room of its own beyond this,
+    /// the way it is when nothing is folding, so the modules have to be cut before it or
+    /// they would fill the transparent side of it in. `None` on every group that was
+    /// measured to fit, which is all of them but the one a fold is travelling over -
+    /// clipping costs a mask and a slower blend for every fill drawn through it.
+    pub content_right: Option<f32>,
+    /// Where the island's wording stops, which is not where its fills stop.
+    ///
+    /// A collapsed island is an icon with the collapsed style's padding around it, and
+    /// nothing is written in padding. Cutting text at `content_right` would leave the
+    /// first characters standing in that padding right up to the last frame of a fold and
+    /// take them away in one step, so text is cut short of the fills by however much empty
+    /// room the island is closing on. `None` wherever `content_right` is.
+    pub text_right: Option<f32>,
     pub modules: Vec<PlacedModule>,
     pub separators: Vec<PlacedSeparator>,
 }
 
 impl PlacedGroup {
+    /// The module still visible immediately before the trailing cap or join.
+    fn trailing_module(&self) -> Option<&PlacedModule> {
+        module_before(&self.modules, self.content_right)
+    }
+
     /// Every logical pixel the island can reach, which is not its rectangle.
     ///
     /// A separator drawn at a group's end bleeds `overlap` past each side of itself to hide
@@ -343,8 +377,26 @@ impl PlacedGroup {
             x0 = x0.min(separator.x - separator.overlap);
             x1 = x1.max(separator.x + separator.width + separator.overlap);
         }
+        // A folding island holds more than it shows. What reaches the screen stops at its
+        // edge, but the mask that stops it has to be cleared over everything drawn through
+        // it, and the layer a translucent one is composited from has to be big enough to
+        // take it, so both are asked about the content rather than the island.
+        if self.content_right.is_some()
+            && let (Some(first), Some(last)) = (self.modules.first(), self.modules.last())
+        {
+            x0 = x0.min(first.x);
+            x1 = x1.max(last.x + last.width);
+        }
         (x0, self.y, x1 - x0, self.height)
     }
+}
+
+fn module_before(modules: &[PlacedModule], edge: Option<f32>) -> Option<&PlacedModule> {
+    modules
+        .iter()
+        .rev()
+        .find(|module| edge.is_none_or(|right| module.x < right))
+        .or_else(|| modules.first())
 }
 
 #[derive(Clone, Debug)]
@@ -454,6 +506,7 @@ impl SamePaint for PlacedSeparator {
             && self.direction == other.direction
             && self.overlap == other.overlap
             && self.inverted == other.inverted
+            && self.cap == other.cap
             && self.fill == other.fill
             && self.under == other.under
     }
@@ -468,6 +521,8 @@ impl SamePaint for PlacedGroup {
             && self.background == other.background
             && self.opacity == other.opacity
             && self.edges == other.edges
+            && self.content_right == other.content_right
+            && self.text_right == other.text_right
             && self.modules.len() == other.modules.len()
             && self.separators.len() == other.separators.len()
             && (self.modules.iter())
@@ -596,6 +651,26 @@ impl Frame {
 struct SizedGroup {
     collapse: Option<(String, Button)>,
     width: f32,
+    /// Whether what is inside reaches past the island and has to be cut off at its edge.
+    clipped: bool,
+    /// How far short of that edge the wording stops, for a fold on its way. The empty room
+    /// the collapsed island keeps around its icon, which no text ever reaches.
+    text_inset: f32,
+    /// How far the leading module's icon and wording are moved inside their own box, for a
+    /// fold on its way. Zero for either settled shape: only a fold has two layouts to
+    /// reconcile, and what it reconciles is where the icon sits.
+    shift: f32,
+    /// What the leading module's box travels to, for a fold on its way.
+    ///
+    /// It is the one the island is left holding, so it takes the shut island's width and
+    /// the rest of the contents pack along behind it. That is what carries them off the
+    /// end: an island closing on a wide collapsed padding would otherwise still be showing
+    /// its second module on the frame it arrives.
+    leading: Option<f32>,
+    /// What this island charges the run it is in, which is `width` for everything but a
+    /// fold on its way. A travelling island is charged the widest it will ever be, so the
+    /// groups after it are measured against one budget from end to end of the travel.
+    reserve: f32,
     background: Color,
     opacity: f32,
     edges: Edges,
@@ -1028,15 +1103,23 @@ fn size_group(
     // and nothing below has to think about it.
     let mut left = budget - group.padding * 2.0 - ends.left_width() - ends.right_width();
     let mut modules = Vec::new();
+    // How far the fold has got, for a group that is still moving. A group that is not is
+    // one of the two settled shapes below, and pays nothing for this - not even the hash
+    // of its own name, which is the same reason `waiting` is asked the same way.
+    let folding = match inputs.folding.is_empty() {
+        true => None,
+        false => inputs.folding.get(&group.name).copied(),
+    };
     if let Some(collapse) = &group.collapse
         && inputs.collapsed_groups.contains(&group.name)
+        && folding.is_none()
     {
         // Do not even collect candidates: that would format hidden children and copy
         // provider/tray data. The source registry continues updating independently.
         let style = collapse.style;
         let icon = style.icon.expect("validated collapsed icon");
         let icon_advance = style.icon_size * icon.width();
-        let width = (icon_advance + style.padding * 2.0).max(style.min_width);
+        let width = shut_width(&style, icon_advance);
         if width > left || (style.max_width > 0.0 && width > style.max_width) {
             return None;
         }
@@ -1253,7 +1336,56 @@ fn size_group(
         });
     }
     let _ = height;
-    finish_group(group, ends, between, modules)
+    let sized = finish_group(group, ends, between, modules)?;
+    // Laid out open, whichever way it is going: what a fold moves is the island's edge,
+    // not what is written inside it. Measuring the content against the width it has got
+    // to would re-truncate every module on every frame of the fold, and a title would
+    // shed a character at a time instead of sliding out of view.
+    let (Some(at), Some(collapse)) = (folding, &group.collapse) else {
+        return Some(sized);
+    };
+    let style = collapse.style;
+    let icon = style.icon.expect("validated collapsed icon");
+    // The island the fold is travelling to, worked out the way the shut branch above and
+    // `finish_group` between them would have worked it out: the icon, and everything drawn
+    // beside it that belongs to the group rather than to a module. Landing anywhere else
+    // would show as a jump on the last frame.
+    let advance = style.icon_size * icon.width();
+    let module = shut_width(&style, advance);
+    let shut = Shut {
+        width: module + group.padding * 2.0 + ends.left_width() + ends.right_width(),
+        module,
+        icon: advance,
+        style,
+    };
+    let folded = sized.folded(at, shut);
+    // A fold does not only ever shrink: a group holding one narrow module can be closing
+    // over an icon wider than all of it. The open width was checked against the budget on
+    // the way in and the shut one is checked by the branch above, but the widths in
+    // between are neither, and a group that grows out of its run would be drawn over its
+    // neighbour or off the end of the bar. Left out instead, which is what the shut branch
+    // does with an island that cannot fit - and a fold heading for one that cannot fit was
+    // going to end up left out anyway. `max_width` is not checked here for the same
+    // reason: a collapsed icon that could not fit inside it is refused when the config is
+    // read, so no fold can be travelling towards one.
+    (folded.width <= budget).then_some(folded)
+}
+
+/// The island a fold is travelling to: how wide it is, how wide the one module in it is,
+/// and what that module is drawn in.
+#[derive(Clone, Copy)]
+struct Shut {
+    width: f32,
+    module: f32,
+    /// The icon's own advance, which is all the shut island actually draws. The rest of
+    /// `module` is the collapsed style's padding, and nothing is written in padding.
+    icon: f32,
+    style: Style,
+}
+
+/// The width the collapsed icon needs, which is what a fold travels to and from.
+fn shut_width(style: &Style, icon_advance: f32) -> f32 {
+    (icon_advance + style.padding * 2.0).max(style.min_width)
 }
 
 fn finish_group(
@@ -1276,6 +1408,11 @@ fn finish_group(
             .as_ref()
             .map(|c| (group.name.clone(), c.button)),
         width,
+        reserve: width,
+        clipped: false,
+        text_inset: 0.0,
+        shift: 0.0,
+        leading: None,
         background: group.background,
         opacity: group.opacity,
         edges: group.edges,
@@ -1285,6 +1422,100 @@ fn finish_group(
         ends,
         modules,
     })
+}
+
+impl SizedGroup {
+    /// The island part-way shut: as wide as the fold has got, holding what it held.
+    ///
+    /// The readings keep the width they were measured at and the edge travels over them,
+    /// which is what makes the two ends of a fold line up with the frames either side of
+    /// it. The leading module is the exception, because it is the one the island is left
+    /// holding: its box travels to the shut island's, its icon travels to where the shut
+    /// island draws one, and everything behind it packs along after its box the way it
+    /// always does. That last part is what carries the rest off the end - a reading is
+    /// pushed past the edge by the box in front of it, not by a shove of its own, so the
+    /// spacing between them never opens up and nothing is left standing inside the island
+    /// on the frame the fold arrives.
+    ///
+    /// The frame this arrives on is the shut island pixel for pixel, with one licensed
+    /// exception: the collapsed style names its own icon, and where that is not the icon
+    /// the first module already draws, the last frame swaps one picture for another. A
+    /// glyph does not blend into a glyph, and folding a whole island down to a mark of its
+    /// own - `gruvbox-islands` folds its readings down to Tux - is the point rather than an
+    /// oversight. Everything else about the two frames has to agree.
+    fn folded(mut self, at: f32, shut: Shut) -> SizedGroup {
+        let at = at.clamp(0.0, 1.0);
+        if at == 0.0 {
+            // A fold about to leave is an island that has not moved, and an island that
+            // has not moved is the open one: cutting it here would put its contents behind
+            // the outline mask for a frame, and a square module corner inset into a round
+            // island is outside that outline. The frame the click lands on would flash.
+            return self;
+        }
+        // What the run charges this island stays where it was for the whole travel, at the
+        // widest the island is ever going to be. Charging what it is showing would hand
+        // every group after it a different budget on every frame, and a window title
+        // downstream would shed and regain a character at a time all the way through -
+        // which is the artefact the fold holds its own contents still to avoid.
+        self.reserve = self.width.max(shut.width);
+        self.width += (shut.width - self.width) * at;
+        self.shift = self.travel(shut.module) * at;
+        // The leading module's box: as far as its own edge has been carried, or as far as
+        // the shut island reaches, whichever is further. The first is what a fold has
+        // always done, and it leaves the readings behind it exactly where they were while
+        // the edge sweeps over them. The second is for when that is not enough to carry
+        // them off the end - an island closing on a collapsed padding wider than the
+        // reading it is closing over arrives with its second module still inside the edge,
+        // where the settled frame has only the one. Stretching the module the island is
+        // left holding pushes the rest out, and never opens a gap for them to show in.
+        let first = self.modules[0].width;
+        self.leading = Some((first + self.shift).max(first + (shut.module - first) * at));
+        // The room the shut island keeps around its icon, which the wording has to be out
+        // of before the fold arrives. Cutting text where the fills are cut would leave it
+        // standing in that padding to the last frame: an island closing on a generous
+        // collapsed padding shows the first characters of its reading until the settled
+        // frame takes them away in one step.
+        self.text_inset = ((shut.module - shut.icon) / 2.0).max(0.0) * at;
+        // The island is left holding the collapsed style's icon on the collapsed style's
+        // ground, so the module that stays behind arrives wearing them. Both ends of the
+        // hand-off are then the same picture and the swap on the last frame is a swap of
+        // nothing but the icon itself.
+        let first = &mut self.modules[0];
+        first.foreground = first.foreground.mix(shut.style.foreground, at);
+        first.background = first.background.mix(shut.style.background, at);
+        // Its corners too, for the same reason: the shut island rounds its one module by
+        // the collapsed style, and a module arriving with its own radius would change shape
+        // on the frame after the last one.
+        first.style.radius += (shut.style.radius - first.style.radius) * at;
+        // A pointer resting on the island it just folded would otherwise hold the module
+        // at its hover colours for the whole travel and land on the collapsed ones.
+        if let Some(hover) = first.hover_style.as_mut() {
+            hover.foreground = hover.foreground.mix(shut.style.foreground, at);
+            hover.background = hover.background.mix(shut.style.background, at);
+            hover.radius += (shut.style.radius - hover.radius) * at;
+        }
+        self.clipped = true;
+        self
+    }
+
+    /// How far the contents move for the first module's icon to arrive under the one the
+    /// shut island draws.
+    ///
+    /// Both icons are centred in their own module box and both boxes start at the same
+    /// place, so the distance is between the two centres. A first module with no icon has
+    /// nothing to line up and stays where it was measured.
+    fn travel(&self, shut_module: f32) -> f32 {
+        let first = &self.modules[0];
+        if first.icon_advance <= 0.0 {
+            return 0.0;
+        }
+        // The advance carries the gap before the text, which is not part of the glyph.
+        let gap = match first.text.is_empty() {
+            true => 0.0,
+            false => first.style.gap(),
+        };
+        (shut_module - first.width + first.text_width + gap) / 2.0
+    }
 }
 
 fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>) -> PlacedGroup {
@@ -1302,14 +1533,27 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     let ends = sized.ends;
     let lead = ends.left_width();
     x += lead;
-
     for (i, m) in sized.modules.into_iter().enumerate() {
         if i > 0 {
             x += sized.advance;
         }
-        // Icon and text are centred together inside the module box.
+        // The box a fold is taking to the shut island's width, for the leading module; the
+        // measured one for everything behind it, which packs along after that box and is
+        // pushed off the end by it.
+        let width = match i {
+            0 => sized.leading.unwrap_or(m.width),
+            _ => m.width,
+        };
+        // Icon and text are centred together inside the module box - the one it was
+        // measured at, plus wherever a fold is carrying it. Centring them in a travelling
+        // box instead would land them by the width the island happens to have rather than
+        // on the icon the shut island draws.
         let content_width = m.icon_advance + m.text_width;
-        let content_x = x + (m.width - content_width) / 2.0;
+        let carried = match i {
+            0 => sized.shift,
+            _ => 0.0,
+        };
+        let content_x = x + (m.width - content_width) / 2.0 + carried;
         let placed_icon = m.icon.map(|(icon, level)| PlacedIcon {
             icon,
             level,
@@ -1321,7 +1565,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
 
         // Hover is resolved here, against the final rectangle, so it is always the module
         // actually under the pointer rather than one from a previous frame.
-        let over = pointer.is_some_and(|(px, py)| contains(px, py, x, inner_y, m.width, inner_h));
+        let over = pointer.is_some_and(|(px, py)| contains(px, py, x, inner_y, width, inner_h));
         let paint = match (over, m.hover_style) {
             (true, Some(hover)) => hover,
             _ => m.style,
@@ -1335,7 +1579,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         modules.push(PlacedModule {
             x,
             y: inner_y,
-            width: m.width,
+            width,
             height: inner_h,
             icon: placed_icon,
             text: m.text,
@@ -1354,7 +1598,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             paged: m.paged,
             on_click: m.on_click,
         });
-        x += m.width;
+        x += width;
     }
 
     if lead > 0.0
@@ -1379,17 +1623,30 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
                 &pair[0],
                 &pair[1],
                 sized.background,
+                None,
             ));
         }
     }
 
     let trail = ends.right_width();
+    // Where the island ends, which is where its content ends until a fold moves the edge
+    // in over it. Everything drawn at a group's trailing end follows the island: a cap
+    // left behind at the content's edge is a cap outside the island, and the clip that
+    // keeps the content in would take it off the screen altogether.
+    let trail_x = match sized.clipped {
+        true => group_x + sized.width - trail - sized.padding,
+        false => x,
+    };
+    // Where the contents stop, for an island holding more than it shows. The cap hangs
+    // off it, the colour it takes comes from whichever module is still visible beside it,
+    // and the island carries it out for the renderer and for the join beyond.
+    let content_right = sized.clipped.then_some(trail_x);
     if trail > 0.0
-        && let Some(last) = modules.last()
+        && let Some(last) = module_before(&modules, content_right)
     {
         separators.push(end_separator(
             ends.right,
-            x,
+            trail_x,
             inner_y,
             trail,
             inner_h,
@@ -1409,6 +1666,8 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         background: sized.background,
         opacity: sized.opacity,
         edges: sized.edges,
+        content_right,
+        text_right: content_right.map(|right| right - sized.text_inset),
         modules,
         separators,
     }
@@ -1420,9 +1679,10 @@ fn separator_between(
     previous: &PlacedModule,
     next: &PlacedModule,
     ground: Color,
+    at: Option<f32>,
 ) -> PlacedSeparator {
     PlacedSeparator {
-        x: previous.x + previous.width,
+        x: at.unwrap_or(previous.x + previous.width),
         y: previous.y,
         width: separator.width,
         height: previous.height,
@@ -1430,6 +1690,7 @@ fn separator_between(
         direction: separator.direction,
         overlap: separator.overlap,
         inverted: false,
+        cap: false,
         fill: match separator.color {
             SeparatorColor::Previous => previous.background,
             SeparatorColor::Next => next.background,
@@ -1472,11 +1733,12 @@ fn size_joined_run(
         };
         if let Some(previous) = out.last_mut() {
             previous.width -= reclaimed;
+            previous.reserve -= reclaimed;
             previous.ends.right = SeparatorShape::None;
             previous.edges.right = EdgeShape::None;
             sized.edges.left = EdgeShape::None;
         }
-        left = room - sized.width;
+        left = room - sized.reserve;
         out.push(sized);
     }
     out
@@ -1516,6 +1778,7 @@ fn end_separator(
         // Only slants need a complementary triangle to change slope while staying
         // attached. Other cap shapes retain their established pointing behavior.
         inverted: shape == SeparatorShape::Slant && leading == (direction == Direction::Right),
+        cap: true,
         fill,
         under,
     }
@@ -1537,12 +1800,20 @@ pub fn compute(
         ..Frame::default()
     };
 
-    let run_width = |groups: &Vec<SizedGroup>, separator: Option<Separator>| -> f32 {
+    // A run measures twice: what it is showing, which is what it is placed by, and what it
+    // has reserved, which is what the runs after it are given to fit in. The two differ
+    // only while an island is folding, and holding them apart is what keeps a fold from
+    // re-truncating its neighbours on every frame of the travel.
+    let run_span = |groups: &Vec<SizedGroup>, separator: Option<Separator>, shown: bool| -> f32 {
         if groups.is_empty() {
             return 0.0;
         }
-        groups.iter().map(|g| g.width).sum::<f32>()
+        let width = |g: &SizedGroup| if shown { g.width } else { g.reserve };
+        groups.iter().map(width).sum::<f32>()
             + separator.map_or(gap, |s| s.width) * (groups.len() - 1) as f32
+    };
+    let run_width = |groups: &Vec<SizedGroup>, separator: Option<Separator>| -> f32 {
+        run_span(groups, separator, true)
     };
 
     // Sized in the order they get to keep their width: the right run says what it needs,
@@ -1562,7 +1833,7 @@ pub fn compute(
             let Some(sized) = size_group(group, inputs, height, text, left, None) else {
                 continue;
             };
-            left -= sized.width + gap;
+            left -= sized.reserve + gap;
             out.push(sized);
         }
         out
@@ -1570,13 +1841,11 @@ pub fn compute(
 
     let right = size_run(&cfg.positions[2], width, text);
     let right_width = run_width(&right, cfg.positions[2].separator);
-    let left = size_run(
-        &cfg.positions[0],
-        (width - right_width - gap).max(0.0),
-        text,
-    );
+    let right_held = run_span(&right, cfg.positions[2].separator, false);
+    let left = size_run(&cfg.positions[0], (width - right_held - gap).max(0.0), text);
     let left_width = run_width(&left, cfg.positions[0].separator);
-    let between = (width - right_width - left_width - gap * 2.0).max(0.0);
+    let left_held = run_span(&left, cfg.positions[0].separator, false);
+    let between = (width - right_held - left_held - gap * 2.0).max(0.0);
     let centre = size_run(&cfg.positions[1], between, text);
     let centre_width = run_width(&centre, cfg.positions[1].separator);
     let sized = [left, centre, right];
@@ -1599,12 +1868,21 @@ pub fn compute(
 
     for ((groups, mut x), position) in sized.into_iter().zip(starts).zip(&cfg.positions) {
         let first = frame.groups.len();
+        // Where the island before this one ends, for a fold that has moved its edge in
+        // over its content. The join between two of them belongs to the islands, so it
+        // travels with the edge rather than staying behind on the last module - which is
+        // where the two part company, and where a join left behind would be drawn over
+        // whatever the fold made room for.
+        let mut travelled: Option<f32> = None;
         for group in groups {
             let w = group.width;
             let placed = place(group, x, height, pointer);
+            // Where this island's contents stop, which is where anything drawn at its
+            // trailing end belongs - the join below included.
+            let edge = placed.content_right;
             if let Some(separator) = position.separator
                 && frame.groups.len() > first
-                && let Some(previous) = frame.groups.last().and_then(|g| g.modules.last())
+                && let Some(previous) = frame.groups.last().and_then(PlacedGroup::trailing_module)
                 && let Some(next) = placed.modules.first()
             {
                 frame.group_separators.push(separator_between(
@@ -1612,8 +1890,10 @@ pub fn compute(
                     previous,
                     next,
                     frame.background,
+                    travelled,
                 ));
             }
+            travelled = edge;
             frame.groups.push(placed);
             x += w + position.separator.map_or(gap, |s| s.width);
         }
@@ -1641,6 +1921,8 @@ pub fn fault(
     Frame {
         groups: vec![PlacedGroup {
             collapse: None,
+            content_right: None,
+            text_right: None,
             x,
             y: 0.0,
             width: module_width,
@@ -1793,6 +2075,7 @@ mod tests {
             pages,
             collapsed,
             collapsed_groups: &Default::default(),
+            folding: &Default::default(),
             waiting,
             spin: 3,
             tray: &Default::default(),
@@ -1841,6 +2124,7 @@ padding = 0
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed_groups: &Default::default(),
+                folding: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
@@ -1895,6 +2179,7 @@ padding = 0
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed_groups: &Default::default(),
+                folding: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
@@ -1942,6 +2227,7 @@ padding = 0
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
+            folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -1982,6 +2268,7 @@ padding = 0
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed_groups: &Default::default(),
+                folding: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
@@ -2058,6 +2345,7 @@ format = "$app_id|$class|'?': $title"
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
+            folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -2220,6 +2508,7 @@ padding = 0
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
+            folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -2598,6 +2887,7 @@ padding = 0
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed_groups: &Default::default(),
+                folding: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
@@ -3626,6 +3916,7 @@ background = "#0000aa"
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
+            folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -3893,6 +4184,8 @@ background = "#aa0000"
             std::sync::LazyLock::new(Default::default);
         static WAITING: std::sync::LazyLock<std::collections::HashSet<Which>> =
             std::sync::LazyLock::new(Default::default);
+        static SETTLED: std::sync::LazyLock<std::collections::HashMap<String, f32>> =
+            std::sync::LazyLock::new(Default::default);
         Inputs {
             items,
             native,
@@ -3901,10 +4194,397 @@ background = "#aa0000"
             pages: &EMPTY_MAP,
             collapsed: &EMPTY_SET,
             collapsed_groups: groups,
+            folding: &SETTLED,
             waiting: &WAITING,
             spin: 0,
             tray: &TRAY,
             output: None,
+        }
+    }
+
+    /// A fold hands over to the collapsed style at the end of its travel: the island is
+    /// left holding that style's icon on its ground, so the module that stays behind has
+    /// to arrive wearing them or the last frame is a colour change nobody asked for.
+    #[test]
+    fn a_fold_carries_its_first_module_over_to_the_collapsed_colours() {
+        let config = r##"
+[bar]
+height = 34
+icon_size = 17
+[right]
+groups = ["s"]
+[group.s]
+modules = ["cpu", "mem"]
+collapsible = true
+collapse_button = "right"
+padding = 2
+collapsed = { icon = "cpu", padding = 6, background = "#83a598", foreground = "#282828" }
+[module.cpu]
+format = "$text"
+padding = 6
+icon = "cpu"
+background = "#cc241d"
+foreground = "#ebdbb2"
+[module.cpu.states.hover]
+hover = true
+background = "#fb4934"
+[module.mem]
+format = "$text"
+padding = 6
+icon = "memory"
+background = "#458588"
+"##;
+        let cfg = Config::parse(config).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("cpu", "42"), item("mem", "70")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let all = ["s".to_string()].into_iter().collect();
+        inputs.collapsed_groups = &all;
+        let shut = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+        inputs.collapsed_groups = &none;
+        let shut = &shut.groups[0].modules[0];
+
+        let ends: [std::collections::HashMap<String, f32>; 3] = [
+            [("s".to_string(), 0.0)].into(),
+            [("s".to_string(), 0.5)].into(),
+            [("s".to_string(), 1.0)].into(),
+        ];
+        let mut colours = Vec::new();
+        for at in &ends {
+            inputs.folding = at;
+            let frame = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+            let first = &frame.groups[0].modules[0];
+            colours.push((first.foreground, first.background));
+        }
+
+        // Leaves as itself, arrives as the shut island, and is neither in between.
+        assert_eq!(
+            colours[0],
+            (
+                Color::parse("#ebdbb2").unwrap(),
+                Color::parse("#cc241d").unwrap()
+            )
+        );
+        assert_eq!(colours[2], (shut.foreground, shut.background));
+        assert!(colours[1] != colours[0] && colours[1] != colours[2]);
+
+        // A pointer resting on the island it just folded would otherwise hold the module
+        // at its hover colours all the way and land on the collapsed ones in one step.
+        let at: std::collections::HashMap<String, f32> = [("s".to_string(), 1.0)].into();
+        inputs.folding = &at;
+        let over = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, Some((398.0, 17.0)));
+        let hovered = &over.groups[0].modules[0];
+        assert_eq!(
+            (hovered.foreground, hovered.background),
+            (shut.foreground, shut.background)
+        );
+    }
+
+    /// A fold gives its released width back to the bar as it travels, so its neighbours
+    /// move. What they are measured against must not move with them: a group charged what
+    /// it is showing hands everything after it a larger budget on every frame, and a title
+    /// downstream sheds and regains a character at a time all the way through the fold.
+    #[test]
+    fn a_fold_does_not_re_truncate_the_groups_it_makes_room_for() {
+        let config = r##"
+[bar]
+height = 20
+gap = 0
+[right]
+groups = ["s"]
+[left]
+groups = ["t"]
+[group.s]
+modules = ["cpu"]
+collapsible = true
+collapse_button = "right"
+padding = 0
+collapsed = { icon = "cpu", icon_size = 8, padding = 0 }
+[group.t]
+modules = ["title"]
+padding = 0
+[module.cpu]
+format = "$text"
+padding = 0
+[module.title]
+format = "$text"
+padding = 0
+"##;
+        let cfg = Config::parse(config).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("cpu", &"c".repeat(40)), item("title", &"t".repeat(80))];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let title = |frame: &Frame| {
+            let group = frame
+                .groups
+                .iter()
+                .find(|g| g.x < 10.0)
+                .expect("the left run");
+            group.modules[0].text.clone()
+        };
+
+        let open = compute(&cfg, &inputs, 60.0, 20.0, &mut Fixed, None);
+        assert!(
+            title(&open).contains(ELLIPSIS),
+            "the fixture has to be tight enough to cut"
+        );
+
+        // Every step of the travel says the same thing, and what it says is what the frame
+        // the fold left from said.
+        let steps: Vec<std::collections::HashMap<String, f32>> = (0..=10)
+            .map(|step| [("s".to_string(), step as f32 / 10.0)].into())
+            .collect();
+        let mut widths = Vec::new();
+        for (step, at) in steps.iter().enumerate() {
+            inputs.folding = at;
+            let frame = compute(&cfg, &inputs, 60.0, 20.0, &mut Fixed, None);
+            assert_eq!(title(&frame), title(&open), "the title moved at {step}/10");
+            widths.push(frame.groups.iter().find(|g| g.x >= 10.0).unwrap().width);
+        }
+        // And the island really did travel, so this is not a test of a fold that stood still.
+        assert!(widths[0] > *widths.last().unwrap());
+
+        // Settled shut, the room is genuinely handed over and the title takes it.
+        let all = ["s".to_string()].into_iter().collect();
+        let settled: std::collections::HashMap<String, f32> = Default::default();
+        inputs.folding = &settled;
+        inputs.collapsed_groups = &all;
+        let shut = compute(&cfg, &inputs, 60.0, 20.0, &mut Fixed, None);
+        assert!(title(&shut).len() > title(&open).len());
+    }
+
+    /// The island a fold arrives at is one icon, and the icon the first module already
+    /// draws is the one it lands on: a config names the same picture for both so the fold
+    /// reads as everything else sliding away from it. That only works if the two agree on
+    /// where the icon is, so the contents travel with the fold rather than sitting still.
+    #[test]
+    fn a_fold_lands_its_icon_where_the_shut_island_draws_one() {
+        let config = r##"
+[bar]
+height = 34
+icon_size = 17
+[right]
+groups = ["s"]
+[group.s]
+modules = ["cpu", "mem"]
+collapsible = true
+collapse_button = "right"
+padding = 2
+spacing = 2
+collapsed = { icon = "cpu", padding = 6 }
+[group.s.edges]
+left = "round"
+right = "round"
+[module.cpu]
+format = "$text"
+min_width = 66
+padding = 6
+icon_gap = 3
+icon = "cpu"
+[module.mem]
+format = "$text"
+padding = 6
+icon = "memory"
+"##;
+        let cfg = Config::parse(config).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("cpu", "42"), item("mem", "70")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let icon_of = |frame: &Frame| {
+            let group = &frame.groups[0];
+            let icon = group.modules[0].icon.as_ref().expect("an icon to follow");
+            (group.x, group.width, icon.x)
+        };
+
+        let open = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+        let all = ["s".to_string()].into_iter().collect();
+        inputs.collapsed_groups = &all;
+        let shut = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+        inputs.collapsed_groups = &none;
+
+        // Nothing has moved on the frame a fold starts from, and the frame it ends on is
+        // the shut island itself - icon included, which is the whole point of the travel.
+        let ends: [std::collections::HashMap<String, f32>; 2] = [
+            [("s".to_string(), 0.0)].into(),
+            [("s".to_string(), 1.0)].into(),
+        ];
+        for (at, want) in ends.iter().zip([icon_of(&open), icon_of(&shut)]) {
+            inputs.folding = at;
+            let frame = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+            let got = icon_of(&frame);
+            assert!(
+                (got.0 - want.0).abs() < 0.001
+                    && (got.1 - want.1).abs() < 0.001
+                    && (got.2 - want.2).abs() < 0.001,
+                "at {at:?}: {got:?} against {want:?}"
+            );
+        }
+
+        // Halfway is halfway, and the content that ran past the island still has to be in
+        // the bounds the mask is built from even though it has moved back over the edge.
+        let halfway: std::collections::HashMap<String, f32> = [("s".to_string(), 0.5)].into();
+        inputs.folding = &halfway;
+        let frame = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+        let (x, _, icon) = icon_of(&frame);
+        let travel = icon_of(&shut).2 - icon_of(&open).2 - (icon_of(&shut).0 - icon_of(&open).0);
+        assert!((icon - (x + icon_of(&open).2 - icon_of(&open).0 + travel / 2.0)).abs() < 0.001);
+        let group = &frame.groups[0];
+        let (bx, _, bw, _) = group.paint_bounds();
+        let first = &group.modules[0];
+        let last = group.modules.last().unwrap();
+        assert!(bx <= first.x && bx + bw >= last.x + last.width);
+    }
+
+    #[test]
+    fn a_folding_group_holds_its_open_content_at_a_travelling_width() {
+        let cfg = Config::parse(&collapse_config()).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("a", &"a".repeat(40)), item("b", "bb"), item("c", "cc")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let open = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        let all = ["a", "b", "c"].map(str::to_string).into();
+        inputs.collapsed_groups = &all;
+        let shut = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        inputs.collapsed_groups = &none;
+
+        let (open_w, shut_w) = (open.groups[0].width, shut.groups[0].width);
+        assert!(shut_w < open_w, "a shut group is the narrower of the two");
+        let halfway: std::collections::HashMap<String, f32> = [("a".to_string(), 0.5)].into();
+        inputs.folding = &halfway;
+        let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        let travelling = &frame.groups[0];
+
+        // Between the two shapes and cut off at its own edge, holding the open group's
+        // children rather than a re-measured version of them.
+        assert!((travelling.width - (open_w + shut_w) / 2.0).abs() < 0.001);
+        assert!(travelling.content_right.is_some());
+        assert_eq!(travelling.modules.len(), open.groups[0].modules.len());
+        assert_eq!(travelling.modules[0].text, open.groups[0].modules[0].text);
+
+        // The content reaches past the island, and the bounds the mask and the layer are
+        // built from have to cover it or a fold would draw through a stale mask.
+        let last = travelling.modules.last().unwrap();
+        assert!(last.x + last.width > travelling.x + travelling.width);
+        let (bx, _, bw, _) = travelling.paint_bounds();
+        assert!(bx + bw >= last.x + last.width);
+
+        // Both ends of the travel are the frames either side of it, so nothing jumps as
+        // the fold starts or arrives.
+        let start: std::collections::HashMap<String, f32> = [("a".to_string(), 0.0)].into();
+        let end: std::collections::HashMap<String, f32> = [("a".to_string(), 1.0)].into();
+        for (at, want) in [(&start, open_w), (&end, shut_w)] {
+            inputs.folding = at;
+            let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+            assert!((frame.groups[0].width - want).abs() < 0.001);
+        }
+
+        // Its neighbours pack against the width it is showing, not the one it is holding:
+        // in a right-hand run that is the fold giving its released width back to the bar.
+        inputs.folding = &halfway;
+        let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        let a = &frame.groups[0];
+        assert!(a.x > open.groups[0].x);
+        let gap = |f: &Frame| f.groups[1].x - (f.groups[0].x + f.groups[0].width);
+        assert!((gap(&frame) - gap(&open)).abs() < 0.001);
+    }
+
+    /// A join and a trailing cap belong to the island, not to the last module inside it.
+    /// A fold moves the island's edge in over its content, and anything left behind at the
+    /// content's edge is drawn outside the island - over whatever the fold made room for,
+    /// or clipped off the screen entirely.
+    #[test]
+    fn a_fold_carries_the_islands_join_and_cap_with_its_edge() {
+        let cfg = Config::parse(&collapse_config()).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [
+            item("a", &"a".repeat(40)),
+            item("b", &"b".repeat(40)),
+            item("c", &"c".repeat(40)),
+        ];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let open = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+
+        // The join between two islands keeps its place inside the edge it hangs from.
+        let inset = |f: &Frame| (f.groups[0].x + f.groups[0].width) - f.group_separators[0].x;
+        let folding: std::collections::HashMap<String, f32> = [("a".to_string(), 0.5)].into();
+        inputs.folding = &folding;
+        let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        assert!(frame.groups[0].content_right.is_some());
+        assert!((inset(&frame) - inset(&open)).abs() < 0.001);
+        let last = frame.groups[0].modules.last().unwrap();
+        assert!(
+            frame.group_separators[0].x < last.x + last.width,
+            "the join stayed behind on the content"
+        );
+        // And the island beside it starts clear of that join rather than under it.
+        assert!(frame.groups[1].x >= frame.group_separators[0].x + frame.group_separators[0].width);
+
+        // The last island in a run keeps a trailing cap of its own, which travels too.
+        let cap = |f: &Frame| {
+            let group = f.groups.last().unwrap();
+            (group.x + group.width) - group.separators.last().unwrap().x
+        };
+        let folding: std::collections::HashMap<String, f32> = [("c".to_string(), 0.5)].into();
+        inputs.folding = &folding;
+        let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        assert!(frame.groups[2].content_right.is_some());
+        assert!((cap(&frame) - cap(&open)).abs() < 0.001);
+        let last = frame.groups[2].modules.last().unwrap();
+        assert!(
+            frame.groups[2].separators.last().unwrap().x < last.x + last.width,
+            "the cap stayed behind on the content"
+        );
+    }
+
+    /// A fold does not only shrink. A group holding one narrow module can be closing over
+    /// an icon wider than all of it, and the widths it travels through are checked by
+    /// neither the open branch nor the shut one.
+    #[test]
+    fn a_fold_that_would_grow_out_of_its_run_is_left_out_of_it() {
+        let cfg = Config::parse(
+            "[bar]\ngap = 0\n[left]\ngroups = ['a']\n[group.a]\nmodules = ['a']\n\
+             collapsible = true\ncollapse_button = 'right'\n\
+             collapsed = { icon = 'cpu', icon_size = 40, padding = 6 }\n",
+        )
+        .unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("a", "x")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+
+        // Wide enough for the one character it is showing, nowhere near the icon it is
+        // folding down to.
+        let open = compute(&cfg, &inputs, 20.0, 20.0, &mut Fixed, None);
+        assert_eq!(open.groups.len(), 1);
+        let shut = ["a".to_string()].into();
+        inputs.collapsed_groups = &shut;
+        assert!(
+            compute(&cfg, &inputs, 20.0, 20.0, &mut Fixed, None)
+                .groups
+                .is_empty()
+        );
+        inputs.collapsed_groups = &none;
+
+        let travel: Vec<std::collections::HashMap<String, f32>> = [0.0, 0.5, 0.9, 1.0]
+            .into_iter()
+            .map(|at| [("a".to_string(), at)].into())
+            .collect();
+        for folding in &travel[1..] {
+            inputs.folding = folding;
+            let frame = compute(&cfg, &inputs, 20.0, 20.0, &mut Fixed, None);
+            assert!(frame.groups.is_empty());
+        }
+        // With room for both ends of it, the same fold is drawn all the way through.
+        for folding in &travel {
+            inputs.folding = folding;
+            let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+            assert_eq!(frame.groups.len(), 1);
+            assert!(frame.groups[0].x + frame.groups[0].width <= 400.0);
         }
     }
 

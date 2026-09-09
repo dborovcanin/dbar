@@ -462,6 +462,8 @@ struct RawGroup {
     #[serde(default)]
     collapsible: bool,
     collapse_button: Option<Button>,
+    /// How long the fold takes. Absent means it happens between one frame and the next.
+    collapse_animation: Option<String>,
     collapsed: Option<RawCollapsedGroup>,
     #[serde(default)]
     modules: Vec<String>,
@@ -809,6 +811,11 @@ pub struct I3Bar {
 pub struct GroupCollapse {
     pub button: Button,
     pub style: Style,
+    /// How long the island takes to reach its other width, if it travels at all.
+    ///
+    /// Absent is the old behaviour and stays the default: a fold is one redraw, and a bar
+    /// nobody is clicking on still wakes for nothing at all.
+    pub animation: Option<Duration>,
 }
 
 #[derive(Debug, Clone)]
@@ -1772,6 +1779,12 @@ fn parse_duration(written: &str) -> Result<Duration> {
         .map_err(|_| anyhow!("{text:?} is longer than a length of time dbar can schedule"))
 }
 
+/// The longest a fold may be given to travel.
+///
+/// Long enough for the slowest easing anybody would want to watch, and short enough that
+/// the redraws it costs are still a gesture rather than a background load.
+const LONGEST_ANIMATION: Duration = Duration::from_millis(2000);
+
 /// The shortest interval a source may be given.
 ///
 /// A millisecond is already far more often than anything a bar shows can change, and it
@@ -2048,8 +2061,32 @@ fn resolve_group(
                 max = style.max_width
             );
         }
-        Some(GroupCollapse { button, style })
+        let animation = raw_group
+            .collapse_animation
+            .as_deref()
+            .map(parse_duration)
+            .transpose()
+            .with_context(|| format!("in [group.{name}]: collapse_animation"))?;
+        // A fold is the one thing on the bar that redraws at screen rate, and it is
+        // affordable because it is over in a fraction of a second. A long one is not a
+        // slower animation, it is the permanent tick the bar exists without.
+        if let Some(animation) = animation
+            && animation > LONGEST_ANIMATION
+        {
+            bail!(
+                "[group.{name}]: collapse_animation is {animation:?}, longer than \
+                 {LONGEST_ANIMATION:?} - a fold redraws at screen rate for the whole of it"
+            );
+        }
+        Some(GroupCollapse {
+            button,
+            style,
+            animation,
+        })
     } else {
+        if raw_group.collapse_animation.is_some() {
+            bail!("[group.{name}]: collapse_animation without collapsible");
+        }
         None
     };
     let wildcard = raw_group.modules.iter().any(|m| m == "*");
@@ -4019,6 +4056,38 @@ icon = 'cpu'",
             "format_alt = '$utilization'\nrefresh_button = 'middle'",
         ))
         .expect("nothing here wants the right button");
+    }
+
+    #[test]
+    fn a_fold_is_instant_unless_the_config_gives_it_a_time() {
+        let prefix = "[left]\ngroups = ['system']\n[group.system]\nmodules = []\n";
+        let parse = |extra: &str| Config::parse(&format!("{prefix}{extra}"));
+        let shut = "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'cpu' }";
+        let collapse = |cfg: &Config| cfg.positions[0].groups[0].collapse.clone().unwrap();
+
+        // The default is the behaviour that costs nothing: a fold is one redraw.
+        assert!(collapse(&parse(shut).unwrap()).animation.is_none());
+        assert_eq!(
+            collapse(&parse(&format!("{shut}\ncollapse_animation = '150ms'")).unwrap()).animation,
+            Some(Duration::from_millis(150))
+        );
+        for (extra, message) in [
+            (format!("{shut}\ncollapse_animation = '150'"), "unit"),
+            (
+                "collapse_animation = '150ms'".to_string(),
+                "without collapsible",
+            ),
+            // A fold redraws at screen rate for the whole of its span, so a long one is
+            // not a slower animation - it is the permanent tick the bar exists without.
+            (format!("{shut}\ncollapse_animation = '5s'"), "longer than"),
+            (format!("{shut}\ncollapse_animation = '1h'"), "longer than"),
+        ] {
+            let error = format!("{:#}", parse(&extra).unwrap_err());
+            assert!(
+                error.contains(message),
+                "{error:?} should mention {message}"
+            );
+        }
     }
 
     #[test]

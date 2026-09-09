@@ -183,6 +183,13 @@ direction = "right"
 # Reserve right click throughout this group; click the CPU icon with right to expand.
 collapsible = true
 collapse_button = "right"
+# The fold travels instead of jumping. This group sits in the middle of a joined
+# run, which is where a fold has the most to get right: the slant it shares with
+# `connections` belongs to the island rather than to the last module inside it, so
+# it moves in with the edge while the readings slide underneath and are cut off at
+# it. Leave the line out and the fold is one redraw, which is what it costs at rest
+# either way - the timer runs only while the island is moving.
+collapse_animation = "1400ms"
 modules = ["cpu", "memory", "temperature"]
 background = "#00000000"
 radius = 0
@@ -417,7 +424,10 @@ icon = "brightness"
 source = "battery"
 interval = "30s"
 format = "$percent.n(d:0)"
-format_alt = ["$percent.n(d:0)  $status{  $power.n(d:1)}  health $health.n(d:0)", "$percent.n(d:0){  $time.dur(style:short) left}"]
+format_alt = [
+  "$percent.n(d:0)  $status{  $power.n(d:1)}  health $health.n(d:0)",
+  "$percent.n(d:0){  $time.dur(style:short) left}",
+]
 min_width = 56
 style = "tile"
 icon = "battery"
@@ -439,14 +449,23 @@ style = "critical"
 [module.weather]
 source = "command"
 command = ["examples/weather.sh"]
-params = ["metric", "~/.config/dbar/owm.key", "45.2517,19.8369", "44.8147,20.4143", "43.9365,18.7986"]
+params = [
+  "metric",
+  "~/.config/dbar/owm.key",
+  "45.2517,19.8369",
+  "44.8147,20.4143",
+  "43.9365,18.7986",
+]
 interval = "once"
 pages = true
 refresh_button = "middle"
 alt_button = "right"
 fields = { "icon" = "text", "weather" = "text", "location" = "text", "temp" = "number", "wind" = "number", "direction" = "text", "forecast_icon" = "text", "forecast_avg" = "number", "forecast_min" = "number", "forecast_max" = "number" }
 format = "{$icon }$weather|'unavailable'{ ($location)}{ $temp.n(d:0) °C}{, $wind.n(d:1) m/s $direction}"
-format_alt = ["{$forecast_icon }{$location, }next 9 h: $forecast_avg.n(d:0)|'unavailable'{ °C ($forecast_min.n(d:0) to $forecast_max.n(d:0))}", "{$icon }$temp.n(d:0)|'unavailable'"]
+format_alt = [
+  "{$forecast_icon }{$location, }next 9 h: $forecast_avg.n(d:0)|'unavailable'{ °C ($forecast_min.n(d:0) to $forecast_max.n(d:0))}",
+  "{$icon }$temp.n(d:0)|'unavailable'",
+]
 style = "tile"
 max_width = 120
 
@@ -463,4 +482,3 @@ on_click = { "left" = ["examples/sway_calendar.sh"] }
 style = "accent"
 foreground = "$ink"
 icon = "clock"
-
