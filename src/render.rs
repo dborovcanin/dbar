@@ -280,7 +280,57 @@ struct IconKey {
 /// the positions that shift as neighbouring text changes width.
 const ICONS_KEPT: usize = 96;
 
-type IconCache = HashMap<IconKey, IconRun>;
+/// Rasterised icons, kept between frames and bounded by dropping the one least recently
+/// drawn.
+///
+/// Emptying it instead would be cheaper to write and wrong in the one case that matters:
+/// a folding island lands its icons on a different fraction of a pixel every frame, so a
+/// long fold is a few hundred keys nothing will ask for again, and a bar that cleared on
+/// each of them would pay to rasterise every settled icon it has two or three times per
+/// fold. Least-recently-used drops the frames that have gone by and keeps the bar.
+struct IconCache {
+    /// Each run beside the stamp it was last drawn at.
+    runs: HashMap<IconKey, (IconRun, u64)>,
+    /// Ticks once per lookup, which is what "least recently" is measured in. A bar drawing
+    /// a hundred icons a frame at sixty frames a second takes about a hundred million
+    /// years to run out of these.
+    used: u64,
+}
+
+impl IconCache {
+    fn new() -> IconCache {
+        IconCache {
+            runs: HashMap::new(),
+            used: 0,
+        }
+    }
+
+    /// The run for `key`, if it is here, counted as used.
+    fn get(&mut self, key: &IconKey) -> Option<&IconRun> {
+        self.used += 1;
+        let used = self.used;
+        let (run, stamp) = self.runs.get_mut(key)?;
+        *stamp = used;
+        Some(run)
+    }
+
+    /// Keep a freshly rasterised run, making room by dropping the oldest if there is none.
+    ///
+    /// The search for the oldest is over the whole map, which is a hundred keys and only
+    /// happens on a miss with the cache already full - never on the hit that the cache
+    /// exists for.
+    fn insert(&mut self, key: IconKey, run: IconRun) {
+        if self.runs.len() >= ICONS_KEPT
+            && let Some(oldest) = (self.runs.iter())
+                .min_by_key(|(_, (_, stamp))| *stamp)
+                .map(|(key, _)| *key)
+        {
+            self.runs.remove(&oldest);
+        }
+        self.used += 1;
+        self.runs.insert(key, (run, self.used));
+    }
+}
 
 /// What drawing an island needs besides the frame: the text backend and the two caches.
 ///
@@ -331,12 +381,7 @@ fn draw_icon_cached(
         size: size.to_bits(),
         offset: (fx.to_bits(), fy.to_bits()),
     };
-    if !cache.contains_key(&key) {
-        // Bounded the blunt way: icons are few and the set is stable, so the only growth is
-        // positions that have stopped being used.
-        if cache.len() >= ICONS_KEPT {
-            cache.clear();
-        }
+    if cache.get(&key).is_none() {
         let Some(run) = rasterise_icon(placed.icon, placed.level, size, fx, fy) else {
             return;
         };
@@ -2253,6 +2298,52 @@ format = "$text"
         }
     }
 
+    /// A fold lands its icons on a different fraction of a pixel every frame, so the keys
+    /// it makes are used once and never asked for again. The bar's own icons are asked for
+    /// on every redraw, and emptying the cache to make room took them out with the rest.
+    #[test]
+    fn a_folds_worth_of_throwaway_icons_does_not_cost_the_bar_its_own() {
+        use crate::icon::Icon;
+        let run = || rasterise_icon(Icon::Cpu, 0, 16.0, 0.0, 0.0).expect("an icon to cache");
+        let settled = IconKey {
+            icon: Icon::Cpu,
+            level: 0,
+            size: 16f32.to_bits(),
+            offset: (0, 0),
+        };
+        let mut cache = IconCache::new();
+        cache.insert(settled, run());
+
+        // Three folds' worth of positions nothing will ask for twice, with the bar drawing
+        // its own icon on every frame in between.
+        for frame in 0..(ICONS_KEPT * 3) {
+            assert!(
+                cache.get(&settled).is_some(),
+                "the bar's icon went at frame {frame}"
+            );
+            cache.insert(
+                IconKey {
+                    offset: (frame as u32 + 1, 0),
+                    ..settled
+                },
+                run(),
+            );
+        }
+        assert!(
+            cache.get(&settled).is_some(),
+            "the bar's icon went at the end"
+        );
+        assert!(cache.runs.len() <= ICONS_KEPT, "the bound stopped holding");
+
+        // And what nobody has drawn for a while really is the thing that goes: the very
+        // first throwaway key cannot have survived three times its own capacity.
+        let first = IconKey {
+            offset: (1, 0),
+            ..settled
+        };
+        assert!(cache.get(&first).is_none());
+    }
+
     /// The icon cache used to be skipped whenever a mask was present, which meant a
     /// folding island - the only thing on the bar that animates - re-rasterised every icon
     /// on every frame. It goes through the cache now, so the cache has to honour the mask
@@ -2795,7 +2886,7 @@ background = "#83a598"
             }
         }
     }
-    fn fold(at: f32, joined: bool) -> Frame {
+    fn fold_ribbon(at: f32, joined: bool) -> Frame {
         use crate::{
             collect::Registry,
             config::Source,
@@ -2893,7 +2984,7 @@ background = "#83a598"
     #[test]
     fn a_fold_colors_its_trailing_transition_from_visible_content() {
         for joined in [false, true] {
-            let frame = fold(0.85, joined);
+            let frame = fold_ribbon(0.85, joined);
             let group = &frame.groups[0];
             let cpu = &group.modules[0];
             let temperature = group.modules.last().unwrap();
@@ -2915,7 +3006,7 @@ background = "#83a598"
     #[test]
     fn a_folding_ribbon_meets_its_join_without_a_pixel_seam() {
         for step in 85..=95 {
-            let frame = fold(step as f32 / 100.0, true);
+            let frame = fold_ribbon(step as f32 / 100.0, true);
             let cpu = &frame.groups[0].modules[0];
             let join = &frame.group_separators[0];
             assert!(join.x > cpu.x && join.x < cpu.x + cpu.width);
