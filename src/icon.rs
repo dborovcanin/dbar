@@ -593,11 +593,11 @@ fn headphones(out: &mut Vec<IconPath>) {
         std::f32::consts::PI,
         2.0 * std::f32::consts::PI,
     );
-    finish(band, Ink::Stroke(0.08), out);
+    finish(band, Ink::Stroke(0.10), out);
 
     let mut cups = Outline::new();
-    rounded(&mut cups, 0.12, 0.54, 0.28, 0.82, 0.07);
-    rounded(&mut cups, 0.72, 0.54, 0.88, 0.82, 0.07);
+    rounded(&mut cups, 0.10, 0.53, 0.29, 0.84, 0.075);
+    rounded(&mut cups, 0.71, 0.53, 0.90, 0.84, 0.075);
     finish(cups, Ink::Fill, out);
 }
 
