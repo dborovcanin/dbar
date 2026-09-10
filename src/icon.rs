@@ -608,10 +608,14 @@ fn wifi(out: &mut Vec<IconPath>, level: usize) {
     finish(dot, Ink::Fill, out);
 
     // Level 0 is the dot alone; each further level adds an arc.
+    //
+    // The fan is a quarter turn either side of straight up, and the outermost arc stops
+    // just inside the box: a wider sweep at this radius would put the ends of the top arc
+    // past the edges, where the rasteriser cuts them off flat.
     let mut arcs = Outline::new();
-    let (from, to) = (-std::f32::consts::PI * 0.80, -std::f32::consts::PI * 0.20);
+    let (from, to) = (-std::f32::consts::PI * 0.75, -std::f32::consts::PI * 0.25);
     for i in 0..level {
-        arc(&mut arcs, cx, cy, 0.20 + i as f32 * 0.16, from, to);
+        arc(&mut arcs, cx, cy, 0.20 + i as f32 * 0.15, from, to);
     }
     finish(arcs, Ink::Stroke(0.08), out);
 }
@@ -769,5 +773,106 @@ fn spinner(out: &mut Vec<IconPath>, frame: usize) {
             Ink::Stroke(SPINNER_HEAD + (SPINNER_TAIL - SPINNER_HEAD) * along),
             out,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ALL: [Icon; 21] = [
+        Icon::Cpu,
+        Icon::Tux,
+        Icon::Memory,
+        Icon::Disk,
+        Icon::Clock,
+        Icon::Ethernet,
+        Icon::Battery,
+        Icon::BatteryCharging,
+        Icon::Wifi,
+        Icon::Volume,
+        Icon::Brightness,
+        Icon::Temperature,
+        Icon::VolumeMuted,
+        Icon::WifiOff,
+        Icon::Headphones,
+        Icon::HeadphonesMuted,
+        Icon::Play,
+        Icon::Pause,
+        Icon::Keyboard,
+        Icon::Spinner,
+        Icon::Raster,
+    ];
+
+    /// Extent of one icon's ink, stroke width included.
+    fn ink_bounds(icon: Icon, level: usize) -> Option<(f32, f32, f32, f32)> {
+        let IconArt::Paths(paths) = art(icon, level) else {
+            return None;
+        };
+        let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
+        for item in &paths {
+            // A stroke is centred on the path, and a round cap or join reaches half its
+            // width past the geometry in every direction.
+            let pad = match item.ink {
+                Ink::Stroke(w) => w / 2.0,
+                _ => 0.0,
+            };
+            let mut at = |p: &Point| {
+                x0 = x0.min(p.x - pad);
+                y0 = y0.min(p.y - pad);
+                x1 = x1.max(p.x + pad);
+                y1 = y1.max(p.y + pad);
+            };
+            let mut cur = Point { x: 0.0, y: 0.0 };
+            for cmd in &item.cmds {
+                match *cmd {
+                    PathCmd::MoveTo(p) | PathCmd::LineTo(p) => {
+                        at(&p);
+                        cur = p;
+                    }
+                    PathCmd::CubicTo(c1, c2, p) => {
+                        // Sample the curve rather than taking its hull: the control points
+                        // of a circular arc sit outside the circle, and a bound taken from
+                        // them would fail an icon that is really inside the square.
+                        for i in 0..=32 {
+                            let t = i as f32 / 32.0;
+                            let u = 1.0 - t;
+                            at(&Point {
+                                x: u * u * u * cur.x
+                                    + 3.0 * u * u * t * c1.x
+                                    + 3.0 * u * t * t * c2.x
+                                    + t * t * t * p.x,
+                                y: u * u * u * cur.y
+                                    + 3.0 * u * u * t * c1.y
+                                    + 3.0 * u * t * t * c2.y
+                                    + t * t * t * p.y,
+                            });
+                        }
+                        cur = p;
+                    }
+                    PathCmd::Close => {}
+                }
+            }
+        }
+        (x0 <= x1).then_some((x0, y0, x1, y1))
+    }
+
+    /// Every icon has to be drawn inside the box layout reserves for it, or the rasteriser
+    /// cuts whatever hangs over the edge.
+    #[test]
+    fn icons_stay_inside_their_box() {
+        for icon in ALL {
+            for level in 0..icon.frames() {
+                let Some((x0, y0, x1, y1)) = ink_bounds(icon, level) else {
+                    continue;
+                };
+                let w = icon.width();
+                assert!(
+                    x0 >= -0.001 && y0 >= -0.001 && x1 <= w + 0.001 && y1 <= 1.001,
+                    "{icon:?} level {level} draws outside 0..{w} x 0..1: \
+                     ({x0:.3}, {y0:.3})..({x1:.3}, {y1:.3})"
+                );
+            }
+        }
     }
 }
