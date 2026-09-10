@@ -132,6 +132,7 @@ pub enum Icon {
     Raster,
     Cpu,
     Tux,
+    Arch,
     Memory,
     Disk,
     Clock,
@@ -161,6 +162,7 @@ impl Icon {
         Some(match name {
             "cpu" => Icon::Cpu,
             "tux" => Icon::Tux,
+            "arch" | "arch-linux" => Icon::Arch,
             "memory" | "ram" => Icon::Memory,
             "disk" => Icon::Disk,
             "clock" | "time" => Icon::Clock,
@@ -296,6 +298,7 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
         Icon::Raster => {}
         Icon::Cpu => cpu(&mut out),
         Icon::Tux => tux(&mut out),
+        Icon::Arch => arch(&mut out),
         Icon::Memory => memory(&mut out),
         Icon::Disk => disk(&mut out),
         Icon::Clock => clock(&mut out),
@@ -336,6 +339,30 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
         Icon::Keyboard => keyboard(&mut out),
     }
     IconArt::Paths(out)
+}
+
+/// The Arch Linux mark: a peak with its underside cut away, standing on two feet.
+///
+/// Drawn as one filled outline rather than a stroked chevron, because the legs are wider
+/// at the foot than at the apex and the flare at the bottom is a turn in the edge itself.
+/// A stroke of one width could say neither.
+fn arch(out: &mut Vec<IconPath>) {
+    let mut mark = Outline::new();
+    mark.move_to(0.50, 0.07);
+    for (x, y) in [
+        // Down the right side, out at the flare, then back up the inside of the notch.
+        (0.745, 0.68),
+        (0.950, 0.94),
+        (0.675, 0.94),
+        (0.500, 0.42),
+        (0.325, 0.94),
+        (0.050, 0.94),
+        (0.255, 0.68),
+    ] {
+        mark.line_to(x, y);
+    }
+    mark.close();
+    finish(mark, Ink::Fill, out);
 }
 
 /// A seated penguin in the same single foreground colour as the other icons.
@@ -780,9 +807,10 @@ fn spinner(out: &mut Vec<IconPath>, frame: usize) {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 21] = [
+    const ALL: [Icon; 22] = [
         Icon::Cpu,
         Icon::Tux,
+        Icon::Arch,
         Icon::Memory,
         Icon::Disk,
         Icon::Clock,

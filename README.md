@@ -447,8 +447,8 @@ bar.
 out, it is a quarter of the icon size, so a bigger icon keeps its breathing room
 without being told; set it to tighten a busy bar.
 
-Fixed: `tux` (penguin), `cpu`, `memory`, `disk`, `clock`, `ethernet`, `headphones`, `wifi-off`,
-`volume-muted`, `play`, `pause`.
+Fixed: `tux` (penguin), `arch` (the Arch Linux mark), `cpu`, `memory`, `disk`, `clock`,
+`ethernet`, `headphones`, `wifi-off`, `volume-muted`, `play`, `pause`.
 
 Graded: `battery`, `battery-charging`, `wifi`, `volume`, `brightness`,
 `temperature`. These have five steps and pick one from the value the source
