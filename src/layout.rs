@@ -37,6 +37,12 @@ pub struct Inputs<'a> {
     pub collapsed_groups: &'a std::collections::HashSet<String>,
     /// Modules folded down to their icon, preserved while their group is hidden.
     pub collapsed: &'a std::collections::HashSet<String>,
+    /// Modules on their way from one wording to the next, by name.
+    ///
+    /// A module travelling is laid out in the wording it is going to and cut off at its
+    /// own edge, which is the part that moves. One that has arrived is not in here at all,
+    /// and `alt` says which wording it arrived at.
+    pub switching: &'a std::collections::HashMap<String, Leaving>,
     /// Groups on their way between open and shut, by name: 0.0 open, 1.0 shut.
     ///
     /// A group travelling is laid out open and cut off at its own edge, which is the part
@@ -58,6 +64,15 @@ pub struct Inputs<'a> {
     /// Everything drawn from the compositor is about a screen: the workspaces on it and
     /// the window it is showing. Nothing else in layout has any use for it.
     pub output: Option<&'a str>,
+}
+
+/// A module part way between two of its wordings.
+#[derive(Clone, Copy, Debug)]
+pub struct Leaving {
+    /// The wording it is coming from, numbered the way `alt` numbers them.
+    pub from: usize,
+    /// How far it has got, 0.0 on the frame the click landed and 1.0 as it arrives.
+    pub at: f32,
 }
 
 impl<'a> Inputs<'a> {
@@ -266,6 +281,15 @@ pub struct PlacedModule {
     pub text: String,
     /// Left edge of the text, already offset past any icon.
     pub text_x: f32,
+    /// Where the module's wording stops, for one holding more than it shows.
+    ///
+    /// A module travelling between two wordings is drawn at a width neither of them was
+    /// fitted to, so what is written on it has to be cut at the box it is in rather than
+    /// at the box it was measured for. Short of the fills by the module's own padding,
+    /// because nothing is written in padding: cutting at the fills would leave glyphs
+    /// standing in it to the last frame and take them away in one step. `None` on every
+    /// module that has arrived, which is all of them but the one under a click.
+    pub text_right: Option<f32>,
     pub foreground: Color,
     pub background: Color,
     pub radius: f32,
@@ -512,6 +536,7 @@ impl SamePaint for PlacedModule {
             && self.height == other.height
             && self.text == other.text
             && self.text_x == other.text_x
+            && self.text_right == other.text_right
             && self.foreground == other.foreground
             && self.background == other.background
             && self.radius == other.radius
@@ -810,16 +835,28 @@ fn wording<'g>(
     module: &'g ModuleCfg,
     alt: &std::collections::HashMap<String, usize>,
 ) -> &'g Format {
-    match alt.get(&module.name) {
-        Some(&showing) if showing > 0 => {
-            module.format_alt.get(showing - 1).unwrap_or(&module.format)
-        }
-        _ => &module.format,
+    wording_at(module, alt.get(&module.name).copied().unwrap_or(0))
+}
+
+/// One numbered wording, which is what a module travelling has two of.
+fn wording_at(module: &ModuleCfg, showing: usize) -> &Format {
+    match showing {
+        0 => &module.format,
+        showing => module.format_alt.get(showing - 1).unwrap_or(&module.format),
     }
 }
 
 struct SizedModule {
+    /// What the module is drawn at, which is between the two wordings' widths while a
+    /// click is carrying it from one to the other.
     width: f32,
+    /// What it charges the group, which is `width` for everything but a module travelling
+    /// between two wordings: that one is charged the wider of the two from end to end of
+    /// the travel, so nothing behind it is re-measured on the way.
+    reserve: f32,
+    /// Whether what is written on it reaches past the box it is being drawn in and has to
+    /// be cut off at its own edge.
+    clipped: bool,
     text_width: f32,
     /// The module's name, when a gesture on it has to name it.
     name: Option<String>,
@@ -1159,6 +1196,8 @@ fn size_group(
         }
         modules.push(SizedModule {
             width,
+            reserve: width,
+            clipped: false,
             text_width: 0.0,
             name: None,
             collapsible: false,
@@ -1201,6 +1240,14 @@ fn size_group(
         // folded down is empty on purpose and stays, because its icon is still there, and
         // so does one whose spinner is the only thing it has to show.
         let folded = module.collapsible && inputs.collapsed.contains(&module.name);
+        // Whether a click has this module between two wordings. Asked the way `folding`
+        // is: a bar with nothing travelling pays nothing for the question, not even the
+        // hash of a module's own name. A module folded down to its icon says the same
+        // thing in both wordings, so there is nothing for it to travel between.
+        let travelling = match inputs.switching.is_empty() || folded {
+            true => None,
+            false => inputs.switching.get(&module.name).copied(),
+        };
         // A module with a picture to show is not empty, whatever its wording says: a tray
         // item is its icon, and most of them have nothing written on them at all.
         if content.is_empty() && !folded && !waiting && art.is_none() {
@@ -1222,7 +1269,9 @@ fn size_group(
 
         // A provider often has to spell a state into the text for a rule to match on. Once
         // it has been matched the wording has done its job, and the icon says it better.
-        let mut content = match module
+        // A closure because the wording a click is leaving behind goes through it too: a
+        // travel that started at a width the settled module never had is a jump.
+        let strip = |content: String| match module
             .states
             .iter()
             .find(|rule| rule.strip && rule.matches(flags, false, &values, &content))
@@ -1237,6 +1286,7 @@ fn size_group(
             }
             None => content,
         };
+        let mut content = strip(content);
         // Stripping can empty the text entirely, which is fine when an icon is left to
         // carry the module: a muted volume is the icon and nothing else, and so is a
         // command that has not answered yet.
@@ -1308,37 +1358,63 @@ fn size_group(
             true => left,
             false => left - between,
         };
-        let fixed = advance(&content) + style.padding * 2.0;
-        let cap = match style.max_width > 0.0 {
-            true => style.max_width.min(available),
-            false => available,
+        // What a wording costs once it has been fitted to the room the run has left: the
+        // text that survived, how wide that is, what the icon takes, and how wide the
+        // module drawn around them is. A closure because the wording a click is leaving
+        // behind is fitted the same way, so a travel leaves exactly where the settled
+        // module was and arrives exactly where the new one is.
+        let fit = |content: String, text: &mut dyn Measure| {
+            let fixed = advance(&content) + style.padding * 2.0;
+            let cap = match style.max_width > 0.0 {
+                true => style.max_width.min(available),
+                false => available,
+            };
+            let content = if cap.is_finite() {
+                truncate(&content, cap - fixed, text)
+            } else {
+                content
+            };
+            // Truncating to nothing takes the gap with it, the same as folding does.
+            // Measured again rather than kept, because only the text that survived says
+            // whether there is anything for a gap to separate.
+            let icon_advance = advance(&content);
+            let text_width = text.measure(&content);
+            let width = (text_width + icon_advance + style.padding * 2.0).max(style.min_width);
+            (content, text_width, icon_advance, width)
         };
-        let content = if cap.is_finite() {
-            truncate(&content, cap - fixed, text)
-        } else {
-            content
-        };
-        // Truncating to nothing takes the gap with it, the same as folding does. Measured
-        // again rather than kept, because only the text that survived says whether there
-        // is anything for a gap to separate.
-        let icon_advance = advance(&content);
-        let fixed = icon_advance + style.padding * 2.0;
+        let (content, text_width, icon_advance, width) = fit(content, text);
         // Truncation can take the last of it, which an icon still carries - a spinner
         // included, since a module waiting on its first answer has nothing else.
         if content.is_empty() && style.icon.is_none() && !waiting && art.is_none() {
             continue;
         }
-
-        let text_width = text.measure(&content);
-        let width = (text_width + fixed).max(style.min_width);
+        // Where a module a click has set travelling is coming from, and the widest it is
+        // between the two: what it draws eases from one wording's width to the other's,
+        // and what it charges stays at the wider of them for the whole travel.
+        let (width, reserve) = match travelling {
+            Some(Leaving { from, at }) => {
+                let (.., was) = fit(strip(wording_at(module, from).render(&values)), text);
+                (was + (width - was) * at, width.max(was))
+            }
+            None => (width, width),
+        };
         // A module with nothing left to draw in is left out entirely, rather than drawn
         // over whatever the run was making room for.
         if width > available {
             continue;
         }
-        left = available - width;
+        // Charging the wider of the two wordings is what keeps a travel from re-truncating
+        // the modules behind it: they would otherwise be measured against a budget that
+        // moved on every frame, and a window title among them would shed and regain a
+        // character at a time all the way through.
+        left = (available - reserve).max(0.0);
         modules.push(SizedModule {
             width,
+            reserve,
+            // Cut at its own edge while it is travelling: the wording it is going to was
+            // fitted to the width it lands at, which is not the width it is being drawn
+            // in until it arrives.
+            clipped: travelling.is_some(),
             text_width,
             hover_style,
             icon_advance,
@@ -1433,16 +1509,22 @@ fn finish_group(
     }
 
     let content: f32 = modules.iter().map(|m| m.width).sum();
+    // What the modules between them have reserved, which is more than they are showing
+    // only while one of them is travelling between two wordings. The island charges the
+    // run that instead, so the groups after it are measured against one budget from end
+    // to end of the travel the way they are through a fold.
+    let held: f32 = modules.iter().map(|m| m.reserve).sum();
     let gaps = between * (modules.len() - 1) as f32;
     // A shaped end needs room of its own: it is drawn beside the modules, not over them.
-    let width = content + gaps + ends.left_width() + ends.right_width() + group.padding * 2.0;
+    let furniture = gaps + ends.left_width() + ends.right_width() + group.padding * 2.0;
+    let width = content + furniture;
     Some(SizedGroup {
         collapse: group
             .collapse
             .as_ref()
             .map(|c| (group.name.clone(), c.button)),
         width,
-        reserve: width,
+        reserve: held + furniture,
         clipped: false,
         travel: 0.0,
         text_inset: 0.0,
@@ -1492,7 +1574,7 @@ impl SizedGroup {
         // every group after it a different budget on every frame, and a window title
         // downstream would shed and regain a character at a time all the way through -
         // which is the artefact the fold holds its own contents still to avoid.
-        self.reserve = self.width.max(shut.width);
+        self.reserve = self.reserve.max(shut.width);
         self.width += (shut.width - self.width) * at;
         self.shift = self.travel(shut.module) * at;
         // The leading module's box: as far as its own edge has been carried, or as far as
@@ -1589,7 +1671,12 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             0 => sized.shift,
             _ => 0.0,
         };
-        let content_x = x + (m.width - content_width) / 2.0 + carried;
+        // Never further in than the module's own padding. A settled box is its content
+        // plus that padding on both sides, so the centre is already at or past it and the
+        // floor changes nothing; a box a click is carrying between two wordings can be
+        // narrower than what is written in it, and centring that would hang the first
+        // characters off the left of the module and into the one before it.
+        let content_x = x + ((m.width - content_width) / 2.0).max(m.style.padding) + carried;
         let placed_icon = m.icon.map(|(icon, level)| PlacedIcon {
             icon,
             level,
@@ -1620,6 +1707,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             icon: placed_icon,
             text: m.text,
             text_x: content_x + m.icon_advance,
+            text_right: m.clipped.then_some(x + width - m.style.padding),
             foreground,
             background,
             radius: paint.radius,
@@ -2002,6 +2090,7 @@ pub fn fault(
                 y: 0.0,
                 width: module_width,
                 height,
+                text_right: None,
                 icon: None,
                 action: None,
                 name: None,
@@ -2138,6 +2227,7 @@ mod tests {
             pages,
             collapsed,
             collapsed_groups: &Default::default(),
+            switching: &Default::default(),
             folding: &Default::default(),
             waiting,
             spin: 3,
@@ -2187,6 +2277,7 @@ padding = 0
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed_groups: &Default::default(),
+                switching: &Default::default(),
                 folding: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
@@ -2242,6 +2333,7 @@ padding = 0
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed_groups: &Default::default(),
+                switching: &Default::default(),
                 folding: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
@@ -2290,6 +2382,7 @@ padding = 0
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
+            switching: &Default::default(),
             folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
@@ -2331,6 +2424,7 @@ padding = 0
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed_groups: &Default::default(),
+                switching: &Default::default(),
                 folding: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
@@ -2408,6 +2502,7 @@ format = "$app_id|$class|'?': $title"
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
+            switching: &Default::default(),
             folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
@@ -2571,6 +2666,7 @@ padding = 0
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
+            switching: &Default::default(),
             folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
@@ -2950,6 +3046,7 @@ padding = 0
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed_groups: &Default::default(),
+                switching: &Default::default(),
                 folding: &Default::default(),
                 collapsed: &Default::default(),
                 waiting: &Default::default(),
@@ -3979,6 +4076,7 @@ background = "#0000aa"
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
+            switching: &Default::default(),
             folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
@@ -4249,6 +4347,8 @@ background = "#aa0000"
             std::sync::LazyLock::new(Default::default);
         static SETTLED: std::sync::LazyLock<std::collections::HashMap<String, f32>> =
             std::sync::LazyLock::new(Default::default);
+        static SHOWING: std::sync::LazyLock<std::collections::HashMap<String, Leaving>> =
+            std::sync::LazyLock::new(Default::default);
         Inputs {
             items,
             native,
@@ -4257,6 +4357,7 @@ background = "#aa0000"
             pages: &EMPTY_MAP,
             collapsed: &EMPTY_SET,
             collapsed_groups: groups,
+            switching: &SHOWING,
             folding: &SETTLED,
             waiting: &WAITING,
             spin: 0,
@@ -4935,5 +5036,158 @@ format_alt = 'alt $text'
         let before = compute(&disabled, &expanded, 200.0, 30.0, &mut Fixed, None);
         let enabled = compute(&cfg, &expanded, 200.0, 30.0, &mut Fixed, None);
         assert_eq!(enabled.damage(&before), Damage::Rects(vec![]));
+    }
+    /// The config a wording travel is measured against: one module with two wordings of
+    /// very different lengths, and a second behind it to be pushed about.
+    const SWITCHING: &str = r##"
+[bar]
+height = 20
+[right]
+groups = ["g"]
+[group.g]
+modules = ["a", "b"]
+padding = 0
+spacing = 0
+[module.a]
+format = "$text"
+format_alt = "$text spelled out at length"
+padding = 2
+[module.b]
+format = "$text"
+padding = 2
+"##;
+
+    /// A module between two wordings is drawn at neither of them: it leaves the width the
+    /// settled one had and arrives at the width the new one wants, and everything in
+    /// between is the travel. Landing anywhere but exactly on those two ends is a jump on
+    /// the first frame or the last.
+    #[test]
+    fn a_wording_on_its_way_is_drawn_between_the_two_widths() {
+        let cfg = Config::parse(SWITCHING).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("a", "42%"), item("b", "x")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let width = |inputs: &Inputs<'_>| {
+            compute(&cfg, inputs, 400.0, 20.0, &mut Fixed, None).groups[0].modules[0].width
+        };
+
+        let first = width(&inputs);
+        let second: std::collections::HashMap<String, usize> = [("a".to_string(), 1)].into();
+        inputs.alt = &second;
+        let alt = width(&inputs);
+        assert!(alt > first, "the second wording is the longer one");
+
+        let steps: Vec<(f32, std::collections::HashMap<String, Leaving>)> =
+            [(0.0, first), (0.5, (first + alt) / 2.0), (1.0, alt)]
+                .into_iter()
+                .map(|(at, want)| (want, [("a".to_string(), Leaving { from: 0, at })].into()))
+                .collect();
+        for (want, travelling) in &steps {
+            inputs.switching = travelling;
+            let got = width(&inputs);
+            assert!((got - want).abs() < 0.001, "{got} against {want}");
+        }
+    }
+
+    /// What a travelling module charges is the wider of its two wordings from end to end
+    /// of the travel. Charging what it is showing would hand the module behind it a
+    /// different budget on every frame, and a title there would shed and regain a
+    /// character at a time all the way through.
+    #[test]
+    fn a_wording_on_its_way_measures_its_neighbour_once() {
+        let cfg = Config::parse(SWITCHING).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [
+            item("a", "42%"),
+            item("b", "a window title with plenty in it"),
+        ];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        // Narrow enough that the module behind has to be cut, which is what makes a
+        // budget that moves show up as text that changes.
+        let title = |inputs: &Inputs<'_>| {
+            compute(&cfg, inputs, 46.0, 20.0, &mut Fixed, None).groups[0].modules[1]
+                .text
+                .clone()
+        };
+
+        let second: std::collections::HashMap<String, usize> = [("a".to_string(), 1)].into();
+        inputs.alt = &second;
+        let settled = title(&inputs);
+        let steps: Vec<(f32, std::collections::HashMap<String, Leaving>)> =
+            [0.0, 0.25, 0.5, 0.75, 1.0]
+                .into_iter()
+                .map(|at| (at, [("a".to_string(), Leaving { from: 0, at })].into()))
+                .collect();
+        for (at, travelling) in &steps {
+            inputs.switching = travelling;
+            let got = title(&inputs);
+            assert_eq!(got, settled, "the title was re-cut at {at}");
+        }
+    }
+
+    /// A wording is fitted to the width it lands at, so until it lands it is holding more
+    /// than its box: it is cut at its own edge, short of the fills by the padding nothing
+    /// is ever written in, and it never hangs off the left into the module before it.
+    #[test]
+    fn a_wording_wider_than_its_box_is_cut_at_it() {
+        let cfg = Config::parse(SWITCHING).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("a", "42%"), item("b", "x")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let second: std::collections::HashMap<String, usize> = [("a".to_string(), 1)].into();
+        inputs.alt = &second;
+
+        let settled = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        assert_eq!(
+            settled.groups[0].modules[0].text_right, None,
+            "a module that has arrived is not cut at all"
+        );
+
+        let travelling: std::collections::HashMap<String, Leaving> =
+            [("a".to_string(), Leaving { from: 0, at: 0.25 })].into();
+        inputs.switching = &travelling;
+        let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        let module = &frame.groups[0].modules[0];
+        let cut = module.text_right.expect("a travelling module is cut");
+        assert!((cut - (module.x + module.width - 2.0)).abs() < 0.001);
+        assert!(
+            module.text_x >= module.x + 2.0 - 0.001,
+            "the wording starts inside the module, not in the one before it"
+        );
+        assert!(
+            module.text_x + Fixed.measure(&module.text) > cut,
+            "a quarter of the way out it is still holding more than it shows"
+        );
+    }
+
+    /// A module folded down to its icon says the same thing in every wording, so there is
+    /// nothing for a click to travel between and nothing to cut.
+    #[test]
+    fn a_folded_module_does_not_travel_between_wordings() {
+        let cfg = Config::parse(&SWITCHING.replace(
+            "[module.a]",
+            "[module.a]\ncollapsible = true\ncollapse_button = \"right\"\nicon = \"cpu\"",
+        ))
+        .unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("a", "42%"), item("b", "x")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let folded: std::collections::HashSet<String> = ["a".to_string()].into();
+        inputs.collapsed = &folded;
+
+        let settled = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        let travelling: std::collections::HashMap<String, Leaving> =
+            [("a".to_string(), Leaving { from: 0, at: 0.5 })].into();
+        inputs.switching = &travelling;
+        let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        assert_eq!(frame.groups[0].modules[0].text_right, None);
+        assert_eq!(
+            frame.groups[0].modules[0].width,
+            settled.groups[0].modules[0].width
+        );
     }
 }

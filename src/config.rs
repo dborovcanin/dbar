@@ -534,6 +534,8 @@ struct RawModule {
     /// Further wordings, which a left click moves through and back round. One is written
     /// as a string; several as a list.
     format_alt: Option<RawAlt>,
+    /// How long the module takes to travel between two of those wordings: "150ms".
+    alt_animation: Option<String>,
     /// How often to read, for a source dbar measures itself: "2s", "500ms", "1m".
     interval: Option<String>,
     /// Which filesystem a `disk` module is about. Defaults to the root.
@@ -987,6 +989,10 @@ pub struct Module {
     /// The further wordings a left click moves through, in order. Empty when the config
     /// gives none, and a click then does nothing.
     pub format_alt: Vec<Format>,
+    /// How long the module takes to get from the width one wording asked for to the width
+    /// the next one does. `None` swaps them in a single redraw, which is the default and
+    /// the only shape that costs nothing.
+    pub alt_animation: Option<Duration>,
     pub style: Style,
     /// Checked in order; the first match replaces the module's style.
     pub states: Vec<StateRule>,
@@ -2337,6 +2343,27 @@ fn resolve_group(
             })?);
         }
 
+        let alt_animation = raw_module
+            .and_then(|m| m.alt_animation.as_deref())
+            .map(parse_duration)
+            .transpose()
+            .with_context(|| format!("in [module.{module_name}]: alt_animation"))?;
+        if let Some(animation) = alt_animation {
+            if format_alt.is_empty() {
+                bail!("[module.{module_name}]: alt_animation without format_alt");
+            }
+            // The same ceiling a fold answers to, for the same reason: a module changing
+            // its mind redraws at screen rate for the whole of the travel, which is only
+            // affordable because it is over in a fraction of a second.
+            if animation > LONGEST_ANIMATION {
+                bail!(
+                    "[module.{module_name}]: alt_animation is {animation:?}, longer than \
+                     {LONGEST_ANIMATION:?} - the module redraws at screen rate for the \
+                     whole of it"
+                );
+            }
+        }
+
         let alt_button = raw_module
             .and_then(|m| m.alt_button)
             .unwrap_or(Button::Left);
@@ -2395,6 +2422,7 @@ fn resolve_group(
             on_click: on_click.map(std::sync::Arc::new),
             format,
             format_alt,
+            alt_animation,
             style,
             states,
         });
@@ -2476,6 +2504,7 @@ fn resolve_group(
                 on_click: None,
                 format: resolve_format(&Source::Provider, None)?,
                 format_alt: Vec::new(),
+                alt_animation: None,
                 style: fallback,
                 states: Vec::new(),
             }]
@@ -4083,6 +4112,38 @@ icon = 'cpu'",
             // not a slower animation - it is the permanent tick the bar exists without.
             (format!("{shut}\ncollapse_animation = '15s'"), "longer than"),
             (format!("{shut}\ncollapse_animation = '1h'"), "longer than"),
+        ] {
+            let error = format!("{:#}", parse(&extra).unwrap_err());
+            assert!(
+                error.contains(message),
+                "{error:?} should mention {message}"
+            );
+        }
+    }
+
+    /// A wording swaps in one redraw unless the config gives it a span to travel over,
+    /// and a span belongs to a module that has somewhere to travel to.
+    #[test]
+    fn a_wording_swap_is_instant_unless_the_config_gives_it_a_time() {
+        let prefix = "[left]\ngroups = ['g']\n[group.g]\nmodules = ['m']\n[module.m]\n\
+                      source = 'cpu'\n";
+        let parse = |extra: &str| Config::parse(&format!("{prefix}{extra}"));
+        let module = |cfg: &Config| cfg.positions[0].groups[0].modules[0].clone();
+        let alt = "format_alt = '$utilization'";
+
+        assert!(module(&parse(alt).unwrap()).alt_animation.is_none());
+        assert_eq!(
+            module(&parse(&format!("{alt}\nalt_animation = '120ms'")).unwrap()).alt_animation,
+            Some(Duration::from_millis(120))
+        );
+        for (extra, message) in [
+            (format!("{alt}\nalt_animation = '120'"), "unit"),
+            // Nowhere to travel to, so the key is one that would be spelled correctly and
+            // do nothing at all.
+            ("alt_animation = '120ms'".to_string(), "without format_alt"),
+            // The same ceiling a fold answers to: past it this is not a slower travel, it
+            // is the permanent tick the bar exists without.
+            (format!("{alt}\nalt_animation = '15s'"), "longer than"),
         ] {
             let error = format!("{:#}", parse(&extra).unwrap_err());
             assert!(

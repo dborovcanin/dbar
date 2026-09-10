@@ -732,6 +732,12 @@ source = "memory"
 interval = "5s"
 format = " $percent.n(w:4) "
 format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
+# How long the module takes to get from the width one wording asked for to the
+# width the next one wants. Leave it out and the wordings swap in one redraw, which
+# is the default and costs nothing at idle. While one is on its way the bar redraws
+# at about the rate the screen refreshes, and stops the moment it arrives - the same
+# bargain `collapse_animation` makes for a whole island.
+alt_animation = "120ms"
 style = "warm"
 icon = "memory"
 

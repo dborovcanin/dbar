@@ -68,13 +68,13 @@ const SPIN_AFTER: std::time::Duration = std::time::Duration::from_millis(400);
 /// also the whole price of the spinner, since every step is a redraw, which is why it is
 /// paid only while a program is actually out and never at idle.
 const SPIN_STEP: std::time::Duration = std::time::Duration::from_millis(60);
-/// How often a fold on its way is moved along.
+/// How often a travel on its way is moved along.
 ///
-/// A fold lasts a fraction of a second and is the only thing on the bar that has to look
-/// continuous, so it is stepped at about the rate a screen refreshes rather than at the
-/// spinner's. The redraw it asks for is still held back by the frame callback, so a
-/// compositor that draws more slowly than this simply drops the steps in between.
-const FOLD_STEP: std::time::Duration = std::time::Duration::from_millis(16);
+/// A fold or a wording lasts a fraction of a second and is the only thing on the bar that
+/// has to look continuous, so it is stepped at about the rate a screen refreshes rather
+/// than at the spinner's. The redraw it asks for is still held back by the frame callback,
+/// so a compositor that draws more slowly than this simply drops the steps in between.
+const TRAVEL_STEP: std::time::Duration = std::time::Duration::from_millis(16);
 
 /// A group on its way between open and shut.
 ///
@@ -123,8 +123,6 @@ struct Folds {
     /// Kept beside the folds rather than worked out while laying out, so that a frame is a
     /// function of what it is given and the clock stays up here where the timer is.
     at: std::collections::HashMap<String, f32>,
-    /// Whether a timer is already moving them along.
-    scheduled: bool,
 }
 
 impl Folds {
@@ -182,16 +180,112 @@ impl Folds {
             }
         }
         let going = !self.travelling.is_empty();
-        self.scheduled = going;
         (going, going || was > 0)
     }
 
-    /// Whether a fold has started that nothing is moving along yet.
+    fn idle(&self) -> bool {
+        self.travelling.is_empty()
+    }
+}
+
+/// Every module on its way from one wording to the next.
+///
+/// The wording a click chose is settled the moment it lands, the same way a fold's end is:
+/// this is only how the module gets from the width the wording it is leaving asked for to
+/// the width the one it is going to wants.
+#[derive(Default)]
+struct Wordings {
+    /// The ramp each travelling module is riding, by name.
+    travelling: std::collections::HashMap<String, Fold>,
+    /// Which wording each is coming from and how far it has got, which is the only part
+    /// layout is shown.
+    at: std::collections::HashMap<String, crate::layout::Leaving>,
+}
+
+impl Wordings {
+    /// Send a module off from the wording it was showing to the one it has just been given.
+    ///
+    /// Always a whole travel from a standing start, which is where this differs from a
+    /// fold: a fold has two ends and can be turned around between them, while a click here
+    /// picks the next of however many wordings, and the width it is leaving is the one it
+    /// had arrived at rather than a point half way along.
+    fn start(&mut self, name: String, from: usize, over: std::time::Duration) {
+        self.travelling.insert(
+            name.clone(),
+            Fold {
+                from: 0.0,
+                to: 1.0,
+                started: std::time::Instant::now(),
+                over,
+            },
+        );
+        self.at
+            .insert(name, crate::layout::Leaving { from, at: 0.0 });
+    }
+
+    /// Forget a module's travel, for one whose config no longer asks for any.
+    fn settle(&mut self, name: &str) {
+        self.travelling.remove(name);
+        self.at.remove(name);
+    }
+
+    /// Move every wording along, and say whether any is still travelling and whether the
+    /// bar has to be drawn again.
+    fn step(&mut self, now: std::time::Instant) -> (bool, bool) {
+        let was = self.travelling.len();
+        let Wordings { travelling, at } = self;
+        // Arriving takes a module out of here entirely, and layout reads the settled
+        // wording again - which is what takes the wording it left behind off the frame's
+        // work, and its own edge out of the clip.
+        travelling.retain(|_, ramp| !ramp.arrived(now));
+        at.retain(|name, _| travelling.contains_key(name));
+        for (name, ramp) in travelling.iter() {
+            // Put there by `start` alongside the ramp itself, so this only ever writes
+            // over a number and never allocates a name.
+            if let Some(leaving) = at.get_mut(name) {
+                leaving.at = ramp.at(now);
+            }
+        }
+        let going = !self.travelling.is_empty();
+        (going, going || was > 0)
+    }
+
+    fn idle(&self) -> bool {
+        self.travelling.is_empty()
+    }
+}
+
+/// Everything on the bar that is on its way somewhere, and whether anything is stepping it.
+///
+/// One timer moves them all: a second one would wake the bar twice a frame to work out the
+/// same positions, and the frame callback would throw one of the two redraws away.
+#[derive(Default)]
+struct Travels {
+    /// Islands between open and shut.
+    folds: Folds,
+    /// Modules between one wording and the next.
+    wordings: Wordings,
+    /// Whether a timer is already moving them along.
+    scheduled: bool,
+}
+
+impl Travels {
+    /// Move everything along, and say whether any is still going and whether the bar has
+    /// to be drawn again.
+    fn step(&mut self, now: std::time::Instant) -> (bool, bool) {
+        let (folding, folds_changed) = self.folds.step(now);
+        let (switching, wordings_changed) = self.wordings.step(now);
+        let going = folding || switching;
+        self.scheduled = going;
+        (going, folds_changed || wordings_changed)
+    }
+
+    /// Whether a travel has started that nothing is moving along yet.
     ///
     /// Says so once and then claims the job, the way a command starting claims the
-    /// spinner: two timers on one fold would step it twice as fast.
+    /// spinner: two timers on one travel would step it twice as fast.
     fn claim(&mut self) -> bool {
-        if self.travelling.is_empty() || self.scheduled {
+        if self.scheduled || (self.folds.idle() && self.wordings.idle()) {
             return false;
         }
         self.scheduled = true;
@@ -201,7 +295,7 @@ impl Folds {
     /// Give the job back, for a caller that claimed it and then could not start the timer.
     ///
     /// Without this a failed insert would leave the claim standing for the life of the
-    /// process: nothing else drains the folds, so every island afterwards would sit at the
+    /// process: nothing else drains a travel, so every island afterwards would sit at the
     /// width it was caught at with its contents cut off, and no click would settle it.
     fn release(&mut self) {
         self.scheduled = false;
@@ -430,8 +524,9 @@ pub struct App {
     collapsed: std::collections::HashSet<String>,
     /// Group state is shared by all outputs and independent of child gestures.
     collapsed_groups: std::collections::HashSet<String>,
-    /// Groups still travelling towards that state.
-    folds: Folds,
+    /// Groups still travelling towards that state, and modules still travelling between
+    /// two of their wordings.
+    travels: Travels,
     /// Which sources each realtime signal reads again.
     signals: std::collections::HashMap<i32, Vec<Which>>,
     /// The way to ask a command module's program for another reading, by source.
@@ -544,7 +639,7 @@ impl App {
             children: Vec::new(),
             collapsed: std::collections::HashSet::new(),
             collapsed_groups: std::collections::HashSet::new(),
-            folds: Folds::default(),
+            travels: Travels::default(),
             signals: config_signals,
             triggers: std::collections::HashMap::new(),
             running: std::collections::HashMap::new(),
@@ -1350,10 +1445,12 @@ impl App {
         let Some(over) = self.fold_time(&name) else {
             // Nothing to unwind: a group whose config never asked for a fold cannot have
             // one in flight, but one whose config changed under a reload could.
-            self.folds.settle(&name);
+            self.travels.folds.settle(&name);
             return;
         };
-        self.folds.turn(name, f32::from(u8::from(shut)), over);
+        self.travels
+            .folds
+            .turn(name, f32::from(u8::from(shut)), over);
     }
 
     /// How long this group's fold is meant to take, if it takes any time at all.
@@ -1367,27 +1464,38 @@ impl App {
             .and_then(|collapse| collapse.animation)
     }
 
-    /// Move every fold along, and say when the next step is wanted.
+    /// How long this module's wordings take to swap, if they take any time at all.
+    fn alt_time(&self, name: &str) -> Option<std::time::Duration> {
+        self.config
+            .positions
+            .iter()
+            .flat_map(|position| &position.groups)
+            .flat_map(|group| &group.modules)
+            .find(|module| module.name == name)
+            .and_then(|module| module.alt_animation)
+    }
+
+    /// Move every travel along, and say when the next step is wanted.
     ///
-    /// Returning nothing stops the timer, which is the frame the last fold arrives on: a
+    /// Returning nothing stops the timer, which is the frame the last one arrives on: a
     /// bar with nothing travelling is back to costing nothing.
-    pub fn on_fold(&mut self) -> Option<std::time::Instant> {
+    pub fn on_travel(&mut self) -> Option<std::time::Instant> {
         let now = std::time::Instant::now();
-        let (travelling, changed) = self.folds.step(now);
+        let (travelling, changed) = self.travels.step(now);
         if changed {
             self.invalidate();
         }
-        travelling.then(|| now + FOLD_STEP)
+        travelling.then(|| now + TRAVEL_STEP)
     }
 
-    /// Whether a fold has started that nothing is moving along yet.
-    pub fn take_fold_timer(&mut self) -> bool {
-        self.folds.claim()
+    /// Whether a travel has started that nothing is moving along yet.
+    pub fn take_travel_timer(&mut self) -> bool {
+        self.travels.claim()
     }
 
     /// Give that job back, for a caller that claimed it and could not start the timer.
-    pub fn release_fold_timer(&mut self) {
-        self.folds.release()
+    pub fn release_travel_timer(&mut self) {
+        self.travels.release()
     }
 
     /// Take the sources a watcher covers off the timer.
@@ -1565,7 +1673,7 @@ impl App {
             pages,
             collapsed,
             collapsed_groups,
-            folds,
+            travels,
             waiting,
             spin,
             tray,
@@ -1585,7 +1693,8 @@ impl App {
             pages,
             collapsed,
             collapsed_groups,
-            folding: &folds.at,
+            switching: &travels.wordings.at,
+            folding: &travels.folds.at,
             waiting,
             spin: *spin,
             tray,
@@ -1793,8 +1902,19 @@ impl App {
                 let Some(name) = named else {
                     return;
                 };
-                let showing = self.alt.entry(name).or_insert(0);
-                *showing = (*showing + 1) % views;
+                let showing = self.alt.entry(name.clone()).or_insert(0);
+                let from = *showing;
+                *showing = (from + 1) % views;
+                // The wording flips at once whether or not anything is animated, so a
+                // click is never lost and a module caught part way still knows what it is
+                // showing.
+                match self.alt_time(&name) {
+                    Some(over) => self.travels.wordings.start(name, from, over),
+                    // Nothing to unwind: a module whose config never asked for a travel
+                    // cannot have one in flight, but one whose config changed under a
+                    // reload could.
+                    None => self.travels.wordings.settle(&name),
+                }
                 self.invalidate();
             }
             // Muting, which the sound server reports back the way it reports a volume
@@ -2318,6 +2438,7 @@ mod tests {
             icon: None,
             text: String::new(),
             text_x: 0.0,
+            text_right: None,
             foreground: crate::color::Color::TRANSPARENT,
             background: crate::color::Color::TRANSPARENT,
             radius: 0.0,
@@ -2377,54 +2498,99 @@ mod tests {
         assert_eq!(turned.at(started + over), 0.0);
     }
 
-    /// The timer that moves folds along exists only while something is travelling, which
+    /// The timer that moves travels along exists only while something is travelling, which
     /// is the whole of what keeps a bar with nobody clicking on it at idle. Everything
     /// that could leave it running - a claim nobody honoured, a fold that never arrives,
     /// a turn that never settles - is a bar spinning a 16 ms timer forever.
     #[test]
-    fn folds_run_a_timer_only_while_something_is_travelling() {
+    fn travels_run_a_timer_only_while_something_is_travelling() {
         let over = std::time::Duration::from_millis(200);
-        let mut folds = Folds::default();
+        let mut travels = Travels::default();
 
         // Nothing travelling, so there is no job to claim and nothing to step.
-        assert!(!folds.claim());
-        let (travelling, changed) = folds.step(std::time::Instant::now());
+        assert!(!travels.claim());
+        let (travelling, changed) = travels.step(std::time::Instant::now());
         assert!(!travelling && !changed);
 
-        folds.turn("a".to_string(), 1.0, over);
-        assert_eq!(folds.at.get("a").copied(), Some(0.0));
+        travels.folds.turn("a".to_string(), 1.0, over);
+        assert_eq!(travels.folds.at.get("a").copied(), Some(0.0));
         // Claimed once and then not again, so two timers never step one fold together.
-        assert!(folds.claim());
-        assert!(!folds.claim());
+        assert!(travels.claim());
+        assert!(!travels.claim());
 
-        let started = folds.travelling["a"].started;
-        let (travelling, changed) = folds.step(started + over / 2);
+        let started = travels.folds.travelling["a"].started;
+        let (travelling, changed) = travels.step(started + over / 2);
         assert!(travelling && changed);
-        assert!((folds.at["a"] - 0.5).abs() < 0.001);
+        assert!((travels.folds.at["a"] - 0.5).abs() < 0.001);
 
         // Arriving takes the group out of both maps, asks for one last draw, and stops.
-        let (travelling, changed) = folds.step(started + over);
+        let (travelling, changed) = travels.step(started + over);
         assert!(
             !travelling && changed,
             "the frame a fold arrives on is a change"
         );
-        assert!(folds.travelling.is_empty() && folds.at.is_empty());
+        assert!(travels.folds.travelling.is_empty() && travels.folds.at.is_empty());
         // And having stopped, the claim is free for the next click rather than held by a
         // timer that has already dropped itself.
-        assert!(!folds.scheduled);
-        folds.turn("a".to_string(), 0.0, over);
-        assert!(folds.claim());
+        assert!(!travels.scheduled);
+        travels.folds.turn("a".to_string(), 0.0, over);
+        assert!(travels.claim());
+    }
+
+    /// One timer serves a fold and a wording alike, so a module set travelling while an
+    /// island already is joins the timer that is running rather than starting a second.
+    #[test]
+    fn a_wording_and_a_fold_share_one_timer() {
+        let over = std::time::Duration::from_millis(200);
+        let mut travels = Travels::default();
+
+        // A wording on its own is enough to want the timer.
+        travels.wordings.start("m".to_string(), 0, over);
+        assert!(travels.claim());
+        travels.folds.turn("a".to_string(), 1.0, over);
+        assert!(!travels.claim(), "the running timer moves both");
+
+        let started = travels.wordings.travelling["m"].started;
+        let (travelling, changed) = travels.step(started + over / 2);
+        assert!(travelling && changed);
+        assert!((travels.wordings.at["m"].at - 0.5).abs() < 0.001);
+        assert_eq!(travels.wordings.at["m"].from, 0);
+
+        // Both arrive, and the timer stops for the two of them at once.
+        let (travelling, _) = travels.step(started + over * 2);
+        assert!(!travelling);
+        assert!(travels.wordings.travelling.is_empty() && travels.wordings.at.is_empty());
+    }
+
+    /// A wording is a whole travel from a standing start every time: a module clicked
+    /// again half way is going somewhere else, and there is no half-way between three
+    /// wordings to carry on from.
+    #[test]
+    fn a_wording_clicked_again_starts_over_from_the_one_it_was_heading_for() {
+        let over = std::time::Duration::from_millis(200);
+        let mut travels = Travels::default();
+        travels.wordings.start("m".to_string(), 0, over);
+        let started = travels.wordings.travelling["m"].started;
+        travels.step(started + over / 2);
+
+        travels.wordings.start("m".to_string(), 1, over);
+        let leaving = travels.wordings.at["m"];
+        assert_eq!(leaving.from, 1);
+        assert_eq!(leaving.at, 0.0);
+        assert!(!travels.wordings.travelling["m"].arrived(started + over));
     }
 
     /// A claim that could not be honoured has to be given back. Nothing else drains the
-    /// folds, so a claim left standing is every island afterwards frozen half shut.
+    /// travels, so a claim left standing is every island afterwards frozen half shut.
     #[test]
     fn a_claim_nothing_honoured_is_given_back() {
-        let mut folds = Folds::default();
-        folds.turn("a".to_string(), 1.0, std::time::Duration::from_millis(200));
-        assert!(folds.claim());
-        folds.release();
-        assert!(folds.claim(), "a released claim can be taken again");
+        let mut travels = Travels::default();
+        travels
+            .folds
+            .turn("a".to_string(), 1.0, std::time::Duration::from_millis(200));
+        assert!(travels.claim());
+        travels.release();
+        assert!(travels.claim(), "a released claim can be taken again");
     }
 
     /// A fold turned around covers what is left of its range, not the whole of it. Caught

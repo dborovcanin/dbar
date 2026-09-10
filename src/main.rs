@@ -244,7 +244,7 @@ fn schedule_fold(handle: &calloop::LoopHandle<'static, App>) -> Result<()> {
     handle
         .insert_source(
             calloop::timer::Timer::from_duration(std::time::Duration::from_millis(0)),
-            |_, _, app: &mut App| match app.on_fold() {
+            |_, _, app: &mut App| match app.on_travel() {
                 Some(next) => calloop::timer::TimeoutAction::ToInstant(next),
                 None => calloop::timer::TimeoutAction::Drop,
             },
@@ -547,11 +547,11 @@ fn main() -> Result<()> {
             .context("dispatching events")?;
         // A click is a Wayland event, and the pointer handler has no way to reach the
         // loop from inside a dispatch, so a fold it started is picked up here instead.
-        if app.take_fold_timer()
+        if app.take_travel_timer()
             && let Err(e) = schedule_fold(&handle_for_fold)
         {
             log::error!("{e}");
-            app.release_fold_timer();
+            app.release_travel_timer();
         }
         // Anything the handlers marked dirty but could not draw yet gets drawn here.
         app.draw_if_needed();

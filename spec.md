@@ -1,936 +1,625 @@
-# Lightweight Wayland Status Bar Specification
+# dbar Native Status Engine — Plan
 
-## 1. Goal
+## 0. Decisions
 
-Build a lightweight, native Wayland status bar for Sway/SwayFX with richer rendering than `swaybar`, while avoiding the dependency and styling complexity of Waybar.
+Locked, and the rest of this document follows from them:
 
-The bar should:
+1. **dbar owns its configuration dialect.** It is i3status-rust *inspired* — same
+   mental model of blocks, formats, intervals, thresholds and states — but it is
+   dbar's format and it is richer. Compatibility is never a reason to accept a
+   worse design.
+2. **Breaking changes are free.** The project is days old. Prefer the right shape
+   over migration comfort, every time.
+3. **The i3bar protocol stays**, as an input backend, roughly as implemented now.
+   It is how dbar consumes `i3status-rs`, `py3status` and anything else legacy.
+4. **dbar collects its own data**, so it runs with no external status process.
+   First targets are the cheap ones: cpu, memory, backlight.
+5. **Interfaces stay renderer-neutral**, so a GPU backend can replace tiny-skia
+   without touching layout, formatting or collection.
+6. **Config and format grammar stay small and legible**, but never at the cost of
+   expressiveness.
 
-- be written in Rust;
-- use native Wayland/layer-shell integration;
-- use `i3status-rust` as the primary status-data provider;
-- support attractive vector-rendered UI;
-- support Powerline-style layouts without relying on Powerline/Nerd Font separator glyphs;
-- support transparency and compositor-provided blur;
-- remain event-driven and lightweight;
-- expose a deliberately small declarative configuration format;
-- avoid becoming a general-purpose GUI toolkit or CSS engine.
-
----
-
-## 2. Design Principles
-
-### 2.1 Small renderer, rich output
-
-The renderer should provide only the primitives needed by a status bar:
-
-- text;
-- vector icons;
-- rectangles;
-- rounded rectangles;
-- borders;
-- alpha/transparency;
-- gradients where useful;
-- separator/transition shapes;
-- clipping;
-- hover/pressed states.
-
-It should not expose arbitrary widget trees, CSS, JavaScript, Lua, or a browser-style layout engine.
-
-### 2.2 Event-driven
-
-The bar should not run a permanent animation/render loop.
-
-Redraw only when:
-
-- `i3status-rust` emits an update;
-- Sway emits an IPC event;
-- pointer input changes state;
-- output geometry changes;
-- a short animation is active.
-
-Idle CPU usage should be effectively zero.
-
-### 2.3 Geometry, not font hacks
-
-Decorative elements should be rendered directly.
-
-Do **not** use font glyphs for:
-
-- Powerline separators;
-- chevrons;
-- slanted edges;
-- rounded transitions;
-- borders;
-- structural UI shapes.
-
-This avoids font alignment, fallback, baseline, and HiDPI problems.
+Non-goal: running an unmodified `i3status-rust` config file. Reusing its *ideas*
+is worth it; reusing its *file* buys a bar with no visual configuration.
 
 ---
 
-## 3. High-Level Architecture
+## 1. Target architecture
 
 ```text
-                 ┌──────────────────────┐
-                 │    i3status-rust     │
-                 │                      │
-                 │ CPU / RAM / NET /    │
-                 │ BAT / CLOCK / etc.   │
-                 └──────────┬───────────┘
-                            │
-                     i3bar JSON / API
-                            │
-                            ▼
-┌────────────────────────────────────────────────────┐
-│                    custom-bar                      │
-│                                                    │
-│  status provider                                   │
-│       │                                            │
-│       ▼                                            │
-│  normalized block state                            │
-│       │                                            │
-│       ├───────────────┐                            │
-│       ▼               ▼                            │
-│  layout engine    interaction engine               │
-│       │               │                            │
-│       └───────┬───────┘                            │
-│               ▼                                    │
-│        vector renderer                             │
-│               │                                    │
-│               ▼                                    │
-│       Wayland layer-shell                          │
-└────────────────────────────────────────────────────┘
+                 config  (dbar dialect)
+                    │
+        ┌───────────┼────────────┬──────────────┐
+        ▼           ▼            ▼              ▼
+   collectors   i3bar child   sway IPC     command modules
+   (native)     (protocol)    (protocol)      (later)
+        │           │            │              │
+        └───────────┴─────┬──────┴──────────────┘
+                          ▼
+                       Reading            typed fields + state
+                          │
+                          ▼
+                      formatter           format string → text
+                          │
+                          ▼
+                     StatusItem           id, text, fields, state, icon, action
+                          │
+                ┌─────────┴─────────┐
+                ▼                   ▼
+             layout             interaction
+                └─────────┬─────────┘
+                          ▼
+                        Frame             pure geometry + colour
+                          │
+                          ▼
+                   Backend (trait)        tiny-skia now, GPU later
+                          │
+                          ▼
+                       Wayland
 ```
 
-Optional data sources may later include:
+Two rules keep this honest:
 
-```text
-StatusProvider
-├── I3BarProvider
-│   └── external i3status-rs
-├── SwayProvider
-│   └── workspaces / focused window
-└── NativeI3StatusProvider
-    └── optional direct i3status-rust integration
-```
+- nothing below `StatusItem` knows where data came from;
+- nothing below `Frame` knows about config, format or protocol.
 
-The first implementation should prefer the standard i3bar process boundary because it:
+Both already half-hold in the current code (`layout.rs` is documented as
+"purely geometric"); the plan is to finish the job.
 
-- keeps the bar decoupled from i3status-rust internals;
-- allows alternative i3bar-compatible providers;
-- avoids GPL linkage concerns if the bar uses a more permissive license;
-- keeps the renderer independently testable.
+A third rule follows from those two once there is more than one screen. Everything
+above `StatusItem` happens once for the session: one round of collecting, one set of
+readings, one i3bar child. Everything from layout down happens once per screen, because
+that is where width, scale and the pointer come in. `App` owns the first half and a
+`Bar` owns the second - its surface, its shm pool, its clip mask, its `Frame` - so a
+second monitor costs one more buffer and no more wake-ups. What a screen is showing
+reaches layout as `Inputs::output`, and is the only thing there that knows a screen
+exists at all.
 
 ---
 
-## 4. Suggested Rust Stack
+## 2. What exists today
 
-Preferred direction:
+Worth stating, because the plan is an edit to this and not a greenfield design.
 
-```text
-Rust
-├── smithay-client-toolkit
-├── wayland-client
-├── wayland-protocols-wlr
-├── calloop
-├── serde
-├── toml
-├── tiny-skia or equivalent 2D renderer
-└── text shaping/rasterization library
-```
+| Area | State |
+|---|---|
+| `config.rs` | 945 LOC. `[bar] [status] [colors] [left|center|right] [style.*] [group.*] [module.*]`, two-stage raw→resolved with a style cascade, `deny_unknown_fields` |
+| `layout.rs` | groups, modules, separators, edges, clipping, hit testing, `Measure` trait, `Frame` of placed geometry |
+| `render.rs` | tiny-skia; vector separators (line/slant/chevron/notch/round/curve), edged rects, icons |
+| `icon.rs` | built-in vector icons in a unit square, graded levels |
+| `status.rs` | i3bar child process, reader thread → calloop channel, click stream, pango stripping |
+| `sway.rs` | workspaces and focused window over IPC |
+| `app.rs` | layer shell, event-driven redraw, frame-callback throttling |
 
-Avoid GTK, Qt, Electron, and general-purpose GUI frameworks unless a future requirement clearly justifies them.
+The config model is already more expressive than i3status-rust's: named modules
+referenced by name from named groups, a style cascade, ordered state rules with
+specificity, per-side group edges, vector separators with Powerline colour modes.
+That is the asset. The plan grows data collection under it, it does not replace it.
 
----
+Known warts to remove along the way:
 
-## 5. Rendering
-
-### 5.1 Surface
-
-The bar should use a Wayland layer-shell surface.
-
-Requirements:
-
-- top or bottom placement;
-- configurable height;
-- configurable margins;
-- support transparent pixels;
-- proper multi-monitor output handling;
-- logical-coordinate rendering for HiDPI;
-- compositor blur left to SwayFX rather than implemented in the bar.
-
-Example:
-
-```text
-wallpaper
-    ↓
-SwayFX blur
-    ↓
-translucent custom-bar surface
-```
-
-### 5.2 Transparency
-
-Colors should support alpha directly.
-
-Example:
-
-```toml
-[bar.background]
-color = "#1e1e2ecc"
-radius = 10
-```
-
-Where `cc` is the alpha channel.
-
-### 5.3 Icons
-
-Preferred order:
-
-1. built-in vector icon set;
-2. SVG icons;
-3. font icons as an optional fallback.
-
-Structural UI must never require Nerd Font or Powerline glyphs.
+- `status::percent(text)` — scrapes a number back out of rendered text
+  (`layout.rs:309`). The entire reason the semantic model exists.
+- `[status] blocks` positional aliasing — exists only because the i3bar protocol
+  gives blocks no usable names. Native modules must not inherit this.
+- `StateRule::contains` / `strip` — text matching used as a substitute for data.
+  Stays for the i3bar source, where text is all there is; unavailable to native.
+- `[status.block]` generated-provider mode — dbar writing an `i3status-rs` config
+  and shelling out. Superseded by native collection; see §9.
 
 ---
 
-## 6. Layout Model
+## 3. Configuration
 
-The bar should expose three logical positions:
+### 3.1 Shape
 
-```text
-left
-center
-right
-```
-
-Each position contains one or more groups.
-
-Example:
-
-```toml
-[left]
-groups = ["desktop"]
-
-[center]
-groups = ["center"]
-
-[right]
-groups = ["system"]
-```
-
-Groups own:
-
-- module ordering;
-- shared background;
-- radius;
-- padding;
-- separator style;
-- direction;
-- spacing.
-
-This enables floating-island layouts without absolute positioning.
-
-Example:
-
-```text
-╭──────────────╲───────────────╮
-│ 1  2  [3]     ╲ Terminal      │
-╰──────────────╲───────────────╯
-
-                     ╭────────╲────────╲──────────╲───────────╮
-                     │ CPU 12% ╲ RAM 31% ╲ WiFi    ╲ BAT 84%   │
-                     ╰────────╲────────╲──────────╲───────────╯
-```
-
----
-
-## 7. Configuration Format
-
-Use TOML.
-
-Configuration should remain intentionally constrained.
-
-### 7.1 Bar
+Native data sources hook into the **existing** `[module.*]` table via `source`,
+which already distinguishes provider from compositor modules. No `[[block]]`
+array is introduced: dbar names its modules and groups order them, which is
+strictly better than positional arrays.
 
 ```toml
 [bar]
 height = 34
 position = "top"
 margin = 6
-gap = 6
-font = "Inter 10"
+font = "sans-serif 10"
 
-[bar.background]
-color = "#1e1e2ecc"
-radius = 10
-```
-
-### 7.2 Colors
-
-```toml
 [colors]
-background = "#1e1e2e"
-surface = "#313244"
-text = "#cdd6f4"
-accent = "#89b4fa"
-warning = "#f9e2af"
-critical = "#f38ba8"
-```
+surface = "#313244cc"
+text    = "#cdd6f4"
+warn    = "#f9e2af"
+crit    = "#f38ba8"
 
-Named colors may be referenced using `$name`.
+[module.cpu]
+source   = "cpu"
+interval = "2s"
+format   = " $icon $usage.n(d:0,w:3) "
+icon     = "cpu"
 
-Example:
+[module.mem]
+source = "memory"
+format = " $icon $used.n(d:1,unit:bin) {of $total.n(d:0,unit:bin)} "
+icon   = "memory"
 
-```toml
-background = "$surface"
-foreground = "$text"
-```
+[module.light]
+source = "backlight"
+format = " $icon $brightness "
+icon   = "brightness"
 
-### 7.3 Reusable styles
-
-```toml
-[style.default]
-background = "$surface"
-foreground = "$text"
-radius = 8
-padding = 8
-
-[style.accent]
-background = "$accent"
-foreground = "$background"
-
-[style.warning]
-background = "$warning"
-foreground = "$background"
-
-[style.critical]
-background = "$critical"
-foreground = "$background"
-```
-
-### 7.4 Groups
-
-```toml
-[group.desktop]
-modules = ["workspaces", "window"]
-background = "$surface"
-radius = 10
-padding = 4
+[module.time]
+source = "time"
+format = " $icon $now.time(f:'%a %d %b  %R') "
+icon   = "clock"
 
 [group.system]
-modules = ["cpu", "memory", "network", "audio", "battery", "clock"]
+modules    = ["cpu", "mem", "light"]
 background = "$surface"
-radius = 10
-padding = 4
-```
+padding    = 4
+radius     = 10
 
-### 7.5 Modules
-
-```toml
-[module.cpu]
-style = "default"
-icon = "cpu"
-
-[module.memory]
-style = "default"
-icon = "memory"
-
-[module.network]
-style = "default"
-icon = "wifi"
-
-[module.battery]
-style = "default"
-```
-
-### 7.6 State overrides
-
-```toml
-[module.battery.states.warning]
-style = "warning"
-
-[module.battery.states.critical]
-style = "critical"
-```
-
-Configuration precedence:
-
-```text
-built-in defaults
-        ↓
-named style
-        ↓
-group style
-        ↓
-module style
-        ↓
-module state override
-```
-
----
-
-## 8. Supported Style Properties
-
-Keep the initial property set small.
-
-Recommended properties:
-
-```text
-background
-foreground
-opacity
-padding
-margin
-radius
-border-width
-border-color
-separator
-separator-width
-font
-font-size
-icon-size
-min-width
-max-width
-```
-
-A useful rule:
-
-> If a configuration property cannot map almost directly to a layout or rendering field, do not add it.
-
----
-
-## 9. Separators
-
-Separators are a first-class rendering primitive.
-
-They must be drawn as vector geometry, not rendered as font characters.
-
-### 9.1 Group-level configuration
-
-```toml
 [group.system.separator]
 shape = "chevron"
 width = 10
-direction = "right"
-color = "previous"
-overlap = 1
+
+[right]
+groups = ["system", "clock"]
 ```
 
-### 9.2 Initial separator shapes
+Legacy input keeps working, and is the only thing `[i3bar]` is for:
 
-Support a deliberately small set:
+```toml
+[i3bar]
+command = "i3status-rs"
+args    = ["~/.config/i3status-rust/config.toml"]
+names   = ["net", "battery"]   # positional naming, i3bar's own limitation
+
+[module.battery]
+source = "i3bar:battery"
+format = " $icon $text "
+```
+
+`[status]` is renamed to `[i3bar]` (breaking, fine) because it now describes one
+backend among several rather than "the" status source.
+
+### 3.2 Per-module keys
+
+New on `[module.*]`, alongside the existing style cascade and `states`:
 
 ```text
-none
-line
-slant
-chevron
-notch
-round
-curve
+source     required; "cpu" | "memory" | "backlight" | ... | "i3bar:<name>"
+            | "sway:window" | "sway:workspaces" | "sway:language"
+            | "command:<...>"
+format     format string; defaults to a sensible per-source default
+format_alt optional; click toggles between the two
+interval   duration string ("2s", "500ms", "1m"); ignored by event-driven sources
+signal     refresh on SIGRTMIN+N
+[module.x.click]  button → action (see §7)
 ```
 
-Conceptual examples:
+Durations are strings with units, not bare integers. `interval = 2` is
+ambiguous; `interval = "2s"` is not.
 
-```text
-slant
+### 3.3 Thresholds
 
-CPU 12% ╲ RAM 31% ╲ WIFI
+State rules stop keying on scraped text and key on **fields**:
 
+```toml
+[module.cpu.states.warn]
+above = 70            # the source's primary field
+style = "warning"
 
-chevron
+[module.cpu.states.hot]
+field = "temp"        # or any other field it publishes
+above = 80
+style = "critical"
 
-CPU 12% ▶ RAM 31% ▶ WIFI
-
-
-round
-
-CPU 12% ) RAM 31% ) WIFI
+[module.battery.states.low]
+state = "critical"    # or on the state the collector itself declared
+style = "critical"
 ```
 
-These examples are textual approximations only. The real implementation draws paths/polygons.
+`contains`/`strip` remain valid only for `source = "i3bar:*"`, where the block's
+text really is the only signal. Config validation rejects them elsewhere rather
+than silently never matching.
 
-### 9.3 Separator as transition
+---
 
-Internally, a separator should be modeled as a transition between neighboring modules:
-
-```text
-Module A
-    ↓
-Transition(A.style, B.style)
-    ↓
-Module B
-```
-
-This is preferable to treating the separator as an independent text-like object.
-
-Possible representation:
+## 4. Semantic model
 
 ```rust
-struct Separator {
-    shape: SeparatorShape,
-    width: f32,
-    direction: Direction,
-    mode: SeparatorMode,
-    overlap: f32,
+/// What a collector produces for one tick.
+pub struct Reading {
+    pub fields: Fields,          // ordered name -> Value map
+    pub state: State,
+}
+
+pub enum Value {
+    Num { v: f64, unit: Unit },
+    Text(String),
+    Time(std::time::SystemTime),
+    Dur(std::time::Duration),
+    Flag(bool),
+    /// A field the source knows about but cannot supply right now: no battery,
+    /// link down, sensor missing. Drives `{...}` elision in formats.
+    Absent,
+}
+
+pub enum Unit {
+    None, Percent, Bytes, BytesPerSec, Hertz, Celsius, Watts, Volts, Seconds,
+}
+
+pub enum State { Idle, Info, Good, Warning, Critical, Error }
+```
+
+Two deliberate choices:
+
+- **`Value::Num` carries a unit rather than having a variant per shape.**
+  A `Percent`/`Bytes`/`Rate` enum cannot answer "render this with one decimal and
+  a binary prefix" — the formatter needs magnitude *and* unit *and* prefix
+  family, and the unit decides the family (bytes → KiB/MiB, everything else → SI).
+- **`Absent` is a value, not `Option`.** It is the input to conditional format
+  groups, and it is a distinct render from "field does not exist" (a config error).
+
+`State::Error` is included; the earlier draft's `Urgent` is dropped. Urgency is an
+input flag (i3bar's `urgent`, sway's workspace urgency), not a point on the state
+scale, and it already lives in `StateFlags`.
+
+```rust
+pub struct StatusItem {
+    pub id: ModuleId,
+    pub text: String,            // the formatted result
+    pub fields: Fields,          // kept, so thresholds and icons read data not text
+    pub state: State,
+    pub flags: StateFlags,       // urgent / focused / visible
+    pub icon: Option<Icon>,
+    pub action: Option<ActionTarget>,
 }
 ```
 
-### 9.4 Color modes
+Icon grading reads `fields`, not `percent(text)`.
 
-Support:
+---
+
+## 5. Format grammar
+
+Small, total, and expressive enough that no `if` statement is ever needed.
 
 ```text
-previous
-next
-foreground
-background
-fixed
+format      ::= item*
+item        ::= literal | placeholder | group
+placeholder ::= '$' name ( '.' func )? | '${' name ( '.' func )? '}'
+                ( '|' fallback )*
+group       ::= '{' item* '}'
+func        ::= ident '(' arg ( ',' arg )* ')'
+arg         ::= ident ':' ( number | ident | '\'' text '\'' )
+escape      ::= '$$' | '{{' | '}}'
 ```
 
-Example:
+Semantics:
 
-```toml
-[group.system.separator]
-shape = "chevron"
-color = "previous"
-```
+- **A group is dropped whole** if any placeholder inside it resolves to `Absent`.
+  `{ of $total }` disappears when total is unknown. This replaces conditionals.
+- **`|` is a fallback chain**: `$ssid|$device|'offline'`. First non-`Absent` wins.
+- **Unknown field name is a config error**, reported at load, not at render.
 
-Classic Powerline rendering uses the previous module's background for the wedge while the next module's background appears behind it.
-
-### 9.5 Direction
-
-```toml
-direction = "right"
-```
-
-or:
-
-```toml
-direction = "left"
-```
-
-This allows layouts such as:
+Functions, kept deliberately few:
 
 ```text
-Workspaces ▶ Window
-
-                         Clock ◀ Battery ◀ WiFi
+.n(d:, w:, unit:, prefix:, sign:)   numbers
+      d       decimals                       (default: unit-dependent)
+      w       minimum width, space padded
+      unit    si | bin | none | auto         (default auto: bytes→bin, else si)
+      prefix  force a prefix: K, M, G, Ki, Mi, Gi
+      sign    always | auto
+.str(w:, max:, ell:)                text: pad, truncate, ellipsis
+.time(f:'%R')                       SystemTime, strftime
+.dur(style: hms | short | long)     Duration → "1:23:45" / "1h23m"
+.up(), .low()                       case
 ```
 
-### 9.6 Overlap
+`$cpu` with no function formats by unit default — percent as `42%`, bytes as
+`7.4 GiB`, temperature as `61°C`. The common case needs no function call at all.
 
-Support a small overlap to prevent antialiased seams:
+Truncation to a pixel budget stays where it already is: `max_width` in the style
+cascade, applied by layout with real text measurement. `.str(max:)` is character
+count, a different tool, and the two do not overlap.
 
-```toml
-overlap = 1
-```
+Formatting never mutates fields. `StatusItem` carries both.
 
-Conceptually:
+---
+
+## 6. Collection
+
+### 6.1 Runtime — no async
+
+**Decision: no async runtime, no tokio.** The current design is a calloop event
+loop plus worker threads feeding calloop channels (`status.rs`, `sway.rs` both do
+this). Collection follows the same shape:
+
+- **Polled collectors** (procfs/sysfs) read on the main thread from a calloop
+  `Timer`. A `/proc/stat` read is microseconds; a thread would cost more than it
+  saves.
+- **Event-driven sources** (D-Bus, PipeWire, udev, inotify) get a worker thread
+  that owns its connection and pushes `Reading`s over a calloop channel — one
+  more source in the loop, same as the sway thread.
+
+This keeps zero async dependencies in a bar whose whole selling point is being
+small, and it keeps every source uniform from the event loop's point of view.
+
+### 6.2 Scheduler
+
+- Modules are bucketed by interval; one timer per distinct interval, not per
+  module. Ten 1-second modules cause one wakeup, not ten.
+- The `time` source aligns to the next boundary implied by its format — a format
+  with no `%S` ticks on the minute, not every second.
+- A tick collects every due source, then invalidates **once**. N updates, one
+  redraw.
+- A collector that errors yields `State::Error`, renders with the error style, and
+  backs off (double up to a cap, reset on success). It is logged once per
+  transition, not per tick.
+- Where the kernel offers notification, use it instead of polling: `poll()` on
+  the backlight's `actual_brightness`, which is the attribute the backlight class
+  notifies on, and udev for battery. A watched source is taken off the timer
+  entirely, and goes back on it only if its file disappears. Polling stays for
+  genuinely sampled metrics (cpu, throughput), which is an accepted cost against
+  spec.md's zero-idle-wakeup goal and should be documented as such.
+- The bar animates only where something is genuinely in flight, and every case owns
+  a timer that exists for as long as that is true and no longer. A command module
+  whose program is still running steps a spinner at 60ms, and draws nothing for the
+  first 400ms of a run, so the scripts that answer straight away never animate at
+  all. A click can also set geometry travelling - an island between open and shut,
+  a module between two of its wordings - and those share one timer stepping at 16ms
+  that drops itself on the frame the last of them arrives. Being bounded by work
+  the user can point at is the test any further exception has to pass; an animation
+  that runs while nothing is happening is the thing being ruled out.
+
+### 6.3 Layout
+
+`src/collect/` in the same crate — not a `dbar-sys` crate. `-sys` conventionally
+means FFI bindings to a C library, and a workspace split at under 4k LOC is
+overhead with no payoff. Split later when the collector set earns it.
 
 ```text
-module A ends at x = 100
-separator starts at x = 99
+src/collect/
+├── mod.rs        Source trait, registry, scheduler
+├── cpu.rs        /proc/stat
+├── memory.rs     /proc/meminfo
+├── backlight.rs  /sys/class/backlight
+├── battery.rs    /sys/class/power_supply
+├── load.rs       /proc/loadavg
+├── disk.rs       statvfs
+├── temp.rs       /sys/class/hwmon
+├── net.rs        /sys/class/net counters
+└── time.rs
 ```
 
-This avoids one-pixel wallpaper gaps between independently antialiased edges.
+```rust
+pub trait Source {
+    /// Field names this source can publish; validated against formats at load.
+    fn fields(&self) -> &'static [FieldSpec];
+    fn read(&mut self) -> Result<Reading>;
+}
+```
 
-### 9.7 Outer edges
+External crates are welcome *inside* a collector for the hard subsystems
+(PipeWire, BlueZ, NetworkManager, UPower, MPRIS). dbar owns the `Source` trait and
+the field names; it does not own the D-Bus plumbing.
 
-Internal separators and group edges should be separate concepts.
+### 6.4 Licensing
 
-Example:
+Collectors are written from documented kernel interfaces (`/proc`, `/sys`,
+`statvfs`) and public crate APIs. No line-by-line translation of GPL-3.0-only
+i3status-rust collectors. Test fixtures are captured from a live machine, not
+copied from another project's repository.
+
+---
+
+## 7. Actions
+
+```rust
+pub enum ActionTarget {
+    /// Route back over the i3bar click protocol.
+    I3Bar { name: Option<String>, instance: Option<String> },
+    /// Handled inside dbar: toggle format_alt, adjust backlight, mute.
+    Native { module: ModuleId, action: NativeAction },
+    /// Run a shell command.
+    Command(String),
+    /// Send a compositor command over IPC.
+    Sway(String),
+}
+```
+
+Config surface:
 
 ```toml
-[group.system.edges]
-left = "round"
-right = "round"
-radius = 10
+[module.light.click]
+scroll_up   = "brightness +5%"
+scroll_down = "brightness -5%"
+
+[module.time.click]
+left = "format_alt"
 ```
 
-Result:
+Hit testing is unchanged — `Frame` already carries per-module rectangles; only
+what a rectangle points at changes, from a block index to an `ActionTarget`.
+
+`signal = N` on a module refreshes it on `SIGRTMIN+N`, matching the muscle memory
+of every i3 user's `pkill -SIGRTMIN+8 i3status` scripts.
+
+---
+
+## 8. Renderer seam
+
+`Frame` is already pure geometry and colour. Two things stand between it and a
+GPU backend:
+
+1. **Presentation is hard-wired.** `render::render_to_buffer` writes to an shm
+   pixmap. Introduce:
+
+   ```rust
+   pub trait Backend {
+       fn present(&mut self, frame: &Frame, size: Size, scale: i32) -> Result<()>;
+       fn measure(&mut self) -> &mut dyn Measure;
+   }
+   ```
+
+   `App` holds `Box<dyn Backend>`; the shm/tiny-skia backend is the first impl.
+
+2. ~~**Icons hand out `tiny_skia::Path`.**~~ Done: `icon.rs` emits `PathCmd`
+   commands in the unit square and the backend converts. Separator and edge
+   geometry in `render.rs` is still built as `tiny_skia` paths, but it is built
+   *inside* the backend rather than handed to it, so it moves with the backend
+   rather than blocking one.
+
+Text is isolated for both halves now: `Measure` for layout, and `DrawText` for
+drawing, which hands back a rasterised run - where it sits relative to the
+origin, and either coverage to tint or premultiplied pixels for a glyph that
+carries its own colour. The backend places and colours it. A GPU backend uploads
+those same bytes to an atlas.
+
+With that and the icons, `tiny_skia` appears in `render.rs` and nowhere else.
+What remains of item 1 is the presentation call itself, which is two functions
+wide: `render::render_to_buffer` and `App::draw`. A `Backend` trait is worth
+shaping against a second backend rather than inventing against one.
+
+A group with an `opacity` is drawn opaque onto a spare pixmap and composited
+once, which is the only way a filled separator and a translucent island can
+coexist: fills that are already translucent composite where they overlap, and a
+filled separator lays its ground across the whole gap and its shape over the
+top. A GPU backend does the same thing with a render target and one textured
+quad. The layer is sized to the widest island that asks for one and grown only,
+so no redraw allocates.
+
+---
+
+## 9. i3bar backend
+
+Kept, permanently, unchanged in behaviour:
 
 ```text
-╭────────▶────────▶────────╮
-│ CPU 12%   RAM 31%   WIFI │
-╰────────▶────────▶────────╯
+src/status/
+├── mod.rs      StatusItem, Value, State, the source registry
+├── i3bar.rs    child process, reader thread, click stream, pango stripping
+└── native.rs   collectors → Reading → StatusItem
 ```
 
----
+`Block` is renamed `I3BarBlock` and confined to `i3bar.rs`. It converts to
+`StatusItem` with `text` from `full_text`, `state` from `urgent`, and fields
+limited to `$text` — because text is genuinely all the protocol offers.
 
-## 10. Interaction
-
-Support:
-
-- hover;
-- left click;
-- middle click;
-- right click;
-- scroll up;
-- scroll down.
-
-Click events should be forwarded to `i3status-rust` where appropriate.
-
-Optional custom actions:
-
-```toml
-[module.audio.actions]
-left = "pavucontrol"
-middle = "wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle"
-scroll-up = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%+"
-scroll-down = "wpctl set-volume @DEFAULT_AUDIO_SINK@ 5%-"
-```
-
-Pointer handling requires mapping coordinates to rendered module rectangles.
+**`[status.block]` generated-provider mode is removed.** Having dbar write an
+`i3status-rs` config file and shell out made sense as a bridge; once dbar collects
+its own data it is a second, weaker config dialect living inside the first. Users
+who want an external provider point `[i3bar] args` at their own file.
 
 ---
 
-## 11. Custom Modules
+## 10. Phases
 
-Support simple command-driven modules.
+Each phase ends with the bar working. No phase leaves a broken tree.
 
-Example:
+**Where this stands.** P0 through P5 are done, and so is most of what follows.
+What is left of each:
 
-```toml
-[module.kernel]
-type = "command"
-command = "uname -r"
-interval = "60s"
-icon = "linux"
-format = "{output}"
-```
+- **P5 — Backend seam.** Done. `Frame` is positioned geometry and colour, down to
+  the bar's own ground and corner radii, and icons and separators are described
+  without reference to the rasteriser. `render_to_buffer` takes no config, so a
+  different backend is a matter of reading `Frame` differently.
+- **P6 — Event-driven sources.** Audio through PipeWire and the player through
+  MPRIS both run on worker threads feeding a `calloop` channel, as does the tray.
+  The battery is read from sysfs on the kernel's uevent rather than through
+  UPower, and the network from `/proc` and netlink rather than NetworkManager -
+  fewer dependencies for the same answers. Bluetooth is the one that is missing.
+- **P7 — Tooling and docs.** `--check-config` is in, and `--fields` prints what
+  every source publishes. `docs/configuration.md`, `docs/formatting.md` and
+  `docs/sources.md` are not written; `examples/showcase.toml` documents the whole
+  surface instead, and is parsed by the test suite so it cannot drift.
 
-Keep formatting deliberately limited.
+### P0 — Decouple
 
-Possible placeholders:
+- `Block` → `I3BarBlock`, moved into `src/status/i3bar.rs`.
+- Introduce `StatusItem`, `Value`, `Unit`, `State`, `Fields`, `ActionTarget`.
+- `layout.rs` consumes `StatusItem`; hit testing carries `ActionTarget`.
+- Delete `status::percent`; icon grading and thresholds read fields. For the
+  i3bar source, a single parsed field keeps current behaviour alive.
 
-```text
-{value}
-{icon}
-{name}
-{output}
-```
+*Done when:* rendering is byte-identical, and nothing under `layout.rs` mentions
+i3bar.
 
-Do not add:
+### P1 — Format engine
 
-- loops;
-- arbitrary expressions;
-- embedded scripting;
-- JavaScript;
-- Lua.
+- Grammar from §5: parser, `Absent` group elision, `|` chains, `.n .str .time
+  .dur`.
+- Formats validated against source field specs at config load.
+- Table-driven tests: (fields, format) → exact string.
 
-If complex behavior is needed, users can supply an external script.
+*Done when:* `format` works end to end on the i3bar source's `$text`.
 
----
+### P2 — First collectors
 
-## 12. Animation
+- `src/collect/` with the `Source` trait and the interval-bucketed scheduler.
+- `cpu`, `memory`, `backlight`, `time`.
+- `[module.*] source = "cpu"` wired through config.
 
-Animation should be optional and short-lived.
+*Done when:* a config with no `[i3bar]` table renders a working bar and no child
+process is spawned.
 
-Good use cases:
+### P3 — Config rework
 
-- hover fade;
-- workspace indicator movement;
-- subtle state transition;
-- opacity interpolation.
+- `[status]` → `[i3bar]`; generated-provider mode removed.
+- `interval`, `format`, `format_alt`, `signal` on modules.
+- Field-keyed thresholds; `contains`/`strip` restricted to the i3bar source and
+  rejected elsewhere.
+- Error state styling.
+- `examples/` and `README.md` rewritten to the native-first config.
 
-Example:
+### P4 — Collector breadth
 
-```text
-alpha: 0.70 → 0.90
-```
+`battery` (sysfs), `disk`, `load`, `temperature`, `net` throughput. Sysfs
+notification where available instead of polling.
 
-The renderer should wake only while an animation is active.
+### P5 — Backend seam
 
-Do not run a permanent 60 FPS loop.
+`Backend` trait, neutral path description for icons and separators, tiny-skia
+backend behind it. No GPU code — only the seam that makes it possible.
 
----
+### P6 — Event-driven sources
 
-## 13. Non-Goals
+Audio (PipeWire/WirePlumber), UPower, NetworkManager, Bluetooth, MPRIS, each on a
+worker thread feeding a calloop channel.
 
-The project should intentionally avoid becoming:
+### P7 — Tooling and docs
 
-- a full desktop shell;
-- a replacement for Quickshell;
-- a general GUI framework;
-- a CSS engine;
-- an HTML-like layout system;
-- a JavaScript runtime;
-- a plugin host;
-- a notification daemon;
-- a launcher;
-- a control center.
-
-Tray and popups may be added later, but they should not shape the initial architecture.
-
----
-
-## 14. Initial Feature Scope
-
-### V0
-
-- Wayland layer-shell surface;
-- top/bottom placement;
-- transparency;
-- basic text rendering;
-- i3status-rust/i3bar input;
-- left/center/right layout;
-- basic groups;
-- rounded backgrounds;
-- click forwarding.
-
-### V1
-
-- reusable styles;
-- named colors;
-- vector icons;
-- separator primitives;
-- Powerline-style transitions;
-- hover states;
-- module state styling;
-- multi-monitor support;
-- HiDPI support.
-
-### V1.x
-
-- short animations;
-- command modules;
-- SVG icon loading;
-- richer outer-edge shapes;
-- optional Sway-specific workspace/window integration.
-
-### Later
-
-- tray;
-- popups;
-- direct i3status-rust library integration if worthwhile;
-- additional status-provider backends.
+- `dbar --check-config` — validates, resolves and reports unknown fields, unknown
+  format placeholders, unreachable state rules. *(Done: it reads the config the way
+  a run would, without a compositor, and reports the first thing wrong with it.
+  `--fields` lists what each source publishes.)*
+- `docs/configuration.md`, `docs/formatting.md`, `docs/sources.md`.
 
 ---
 
-## 15. Example Complete Configuration
+## 11. Testing
 
-```toml
-[bar]
-height = 34
-position = "top"
-margin = 6
-gap = 6
-font = "Inter 10"
-
-[colors]
-background = "#1e1e2e"
-surface = "#313244cc"
-text = "#cdd6f4"
-accent = "#89b4fa"
-warning = "#f9e2af"
-critical = "#f38ba8"
-
-[left]
-groups = ["desktop"]
-
-[right]
-groups = ["system"]
-
-[style.default]
-foreground = "$text"
-padding = 8
-
-[style.focused]
-background = "$accent"
-foreground = "$background"
-
-[style.warning]
-background = "$warning"
-foreground = "$background"
-
-[style.critical]
-background = "$critical"
-foreground = "$background"
-
-[group.desktop]
-modules = ["workspaces", "window"]
-background = "$surface"
-radius = 10
-padding = 4
-
-[group.desktop.separator]
-shape = "slant"
-width = 10
-direction = "right"
-color = "previous"
-overlap = 1
-
-[group.system]
-modules = ["cpu", "memory", "network", "audio", "battery", "clock"]
-background = "$surface"
-radius = 10
-padding = 4
-
-[group.system.separator]
-shape = "chevron"
-width = 10
-direction = "left"
-color = "previous"
-overlap = 1
-
-[group.system.edges]
-left = "round"
-right = "round"
-radius = 10
-
-[module.workspaces]
-style = "default"
-
-[module.window]
-style = "default"
-
-[module.cpu]
-style = "default"
-icon = "cpu"
-
-[module.memory]
-style = "default"
-icon = "memory"
-
-[module.network]
-style = "default"
-icon = "wifi"
-
-[module.audio]
-style = "default"
-icon = "volume"
-
-[module.battery]
-style = "default"
-icon = "battery"
-
-[module.battery.states.warning]
-style = "warning"
-
-[module.battery.states.critical]
-style = "critical"
-
-[module.clock]
-style = "default"
-```
-
-Expected visual direction:
-
-```text
-╭──────────────╲───────────────╮
-│ 1  2  [3]     ╲ Terminal      │
-╰──────────────╲───────────────╯
-
-                     ╭────────╲────────╲──────────╲───────────╮
-                     │ CPU 12% ╲ RAM 31% ╲ WiFi    ╲ BAT 84%   │
-                     ╰────────╲────────╲──────────╲───────────╯
-```
-
-Again, all separators and structural edges are vector-rendered geometry, not font glyphs.
+- **Collectors:** parse captured fixtures (`/proc/stat`, `/proc/meminfo`, a sysfs
+  battery tree), so tests do not depend on the developer's hardware. Rate
+  collectors get two fixtures and an explicit elapsed time.
+- **Formatter:** exact-output table tests, including `Absent` elision, fallback
+  chains, prefix families and width padding.
+- **Layout:** already testable with a stub `Measure`; extend to threshold and
+  state-rule selection.
+- **Config:** load every `examples/*.toml` in a test, plus a set of deliberately
+  broken configs asserting the *error messages*, not just the failure.
 
 ---
 
-## 16. Core Product Definition
+## 12. Non-goals
 
-The project can be summarized as:
-
-> A tiny, event-driven, native Wayland status-bar renderer with i3bar-compatible status input and a constrained declarative styling model.
-
-The defining visual feature is:
-
-> Powerline-style composition implemented as real vector geometry rather than font glyphs.
-
-The defining architectural constraint is:
-
-> Rich enough to look polished, but deliberately too small to become CSS, GTK, or a desktop shell.
-
----
-
-## 17. Implementation Status
-
-### 17.1 Done
-
-**V0** — wlr-layer-shell surface with top/bottom placement, margins and an
-exclusive zone; per-pixel transparency; text shaping and font fallback;
-i3bar-protocol input; left/center/right positions holding groups; rounded
-backgrounds; click and scroll forwarding; integer HiDPI buffer scaling.
-
-**V1, in part** — separators as real vector geometry (`none`, `line`, `slant`,
-`chevron`, `notch`, `round`, `curve`), each mirrorable, with the Powerline
-colour modes and an overlap that hides antialiasing seams; per-side group edges
-with contents clipped to the group outline; reusable styles and named colours;
-a built-in vector icon set, including icons graded over five steps by a
-percentage read from the module's own text; `min_width` and `max_width`, the
-latter truncating with an ellipsis; module state styling keyed on a
-value, on text the provider writes, on its urgent flag, or on the pointer, with
-the matched text removable so a state marker need not be read; workspaces and the
-focused window over the compositor's own IPC, with workspaces expanding into one
-clickable rectangle each.
-
-Two things were added that the specification did not anticipate:
-
-- **Block naming, in two modes.** The i3bar protocol gives a provider no way to
-  name its blocks usefully — i3status-rs numbers them and rejects a `name` key —
-  so without help a group selects on `"0"` and `"1"` and silently follows a
-  different block whenever the provider is reordered. Declaring blocks under
-  `[[status.block]]` has dbar write the provider's own configuration and start
-  it against that, so they are declared once; `[status] blocks` still names an
-  external provider's blocks by position.
-- **Failure diagnostics.** A group list matching nothing logs a warning naming
-  the blocks that are actually arriving, and a provider failure bypasses the
-  group configuration entirely so it cannot be hidden by a module list.
-
-### 17.2 What's left
-
-Roughly in the order the work depends on itself.
-
-**Multi-monitor.** One surface, bound to no particular output. Wants a bar per
-output, plus hotplug handling. The renderer already takes a size and a scale,
-so this is a matter of holding several of them.
-
-**Hover states.** Pointer enter, motion and leave already arrive; nothing keeps
-per-module pointer state or redraws on it. Fits the module state mechanism as a
-condition alongside `below`, `above` and `urgent`.
-
-**Expand on click.** A module showing a longer form while active. Some
-providers cover this themselves — i3status-rs `format_alt` toggles on click for
-several blocks, and dbar already forwards the click — but a general version
-needs per-module toggle state and somewhere to put the second form.
-
-**Colour work.** Gradients, which the specification asks for and the renderer
-does not yet do; theme files; derived colours such as lighten and darken.
-
-**On-click actions.** Running a command on click or scroll, per §10, instead of
-or alongside forwarding to the provider. Workspace switching already does this
-for its own case, so the mechanism is half built.
-
-**Application identity.** The focused window's `app_id` is available over the
-same IPC connection the window title arrives on, and is the prerequisite for
-application icons.
-
-**System tray.** StatusNotifierItem over D-Bus. Tray icons arrive as pixmaps or
-as icon-theme names, so this needs the raster arm of the icon artwork and, for
-menus, popup surfaces.
-
-**Animations.** Short and opt-in, per §12: hover fades and workspace indicator
-movement, driven by frame callbacks, with the bar still idle when nothing is
-moving.
-
-### 17.3 Smaller known gaps
-
-- Fractional scaling. Only integer buffer scale is honoured today.
-- SVG icon loading, and application icons behind it.
-- Command modules, per §11.
-- Names are applied only once the provider has emitted as many blocks as are
-  named, since a short array would put every later name on the wrong block. A
-  provider that emits a different number keeps working positionally, with a
-  warning.
-- Text is not clipped to the group outline. Backgrounds and separators are;
-  text sits inside the padding, where it has not mattered.
-- Overflow is bounded per module rather than for the bar as a whole. A centred
-  run is kept clear of its neighbours and `max_width` truncates a module that
-  would outgrow it, but a bar whose modules all fit individually and not
-  collectively still collides; nothing drops or shrinks a whole group.
+- Running an unmodified i3status-rust config file.
+- Depending on i3status-rust internals, or copying its collector implementations.
+- CSS, or an embedded interpreter. Running a user's own command as a source is in scope
+  (`source = "command"` with a `command = [...]` argv); growing a language of dbar's own
+  is not.
+- Async runtime.
+- A widget tree. The renderer draws text, icons, rects and separators; that is
+  the whole vocabulary.

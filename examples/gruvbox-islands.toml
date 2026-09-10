@@ -452,6 +452,7 @@ source = "memory"
 interval = "5s"
 format = "$percent.n(d:0)"
 format_alt = "$used.n(d:1) of $total.n(d:0){  swap $swap_percent}"
+alt_animation = "120ms"
 min_width = 77
 style = "tile_alt"
 icon = "memory"
@@ -508,8 +509,16 @@ interval = "2s"
 # `format_alt` is a list, so a left click goes round three views rather than
 # toggling between two: what it is on, what it is doing, and how well it can
 # hear it. The icon grades on the signal, so it says that much without a click.
+#
+# The three are very different lengths, so `alt_animation` gives the module the
+# same treatment the island gets from `collapse_animation`: it travels between
+# the width one wording asked for and the width the next one wants instead of
+# jumping, and the modules beside it slide along with it. Leave it out and the
+# swap is one redraw. Either way it costs nothing at rest - the timer runs only
+# while something is moving and stops the frame it arrives.
 format = "$ssid|$device"
 format_alt = ["$down{  $up}", "$signal.n(d:0){  $dbm.n(d:0) dBm}"]
+alt_animation = "120ms"
 style = "tile_alt"
 icon = "wifi"
 

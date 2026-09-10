@@ -4,7 +4,7 @@ A small, event-driven Wayland status bar for Sway/SwayFX. It reads what it shows
 `/proc` and `/sys`, renders with `tiny-skia` on a `wlr-layer-shell` surface, and can also
 take data from any i3bar-protocol provider.
 
-`dbar-native.md` is the standing plan: architecture, phases, and what is deliberately out
+`spec.md` is the standing plan: architecture, phases, and what is deliberately out
 of scope. Read it before starting anything structural.
 
 ## What this project is trying to be

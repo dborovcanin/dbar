@@ -435,6 +435,14 @@ struct Cut<'a> {
 }
 
 impl Cut<'_> {
+    /// The same cut, stopped at `col` as well as wherever it already stopped.
+    fn stopped(self, col: i32) -> Self {
+        Cut {
+            stop: Some(self.stop.map_or(col, |stop| stop.min(col))),
+            ..self
+        }
+    }
+
     /// `[x0, x1) x [y0, y1)` narrowed to what this cut can answer for.
     ///
     /// Everything the mask was built for is inside its cleared box, so a run reaching past
@@ -1440,6 +1448,16 @@ fn draw_group(
                 tools.icons,
             );
         }
+        // A module part way between two wordings is the one thing cut at its own edge
+        // rather than at the island's: what is written on it was fitted to the width it
+        // lands at, and until it lands that is not the width it is drawn in. Rounded up,
+        // because the column is where the wording stops rather than the last one it
+        // reaches, and a wording that exactly fills its box must not lose its last pixel
+        // to it on the frame before it arrives.
+        let wording = match module.text_right {
+            Some(right) => wording.stopped(((right + offset.0) * scale).ceil() as i32),
+            None => wording,
+        };
         // Layout already placed the text; only the vertical centring is ours.
         let ty = module.y + (module.height - tools.line_height) / 2.0;
         let (tx, ty) = (module.text_x + offset.0, ty + offset.1);
@@ -1910,6 +1928,7 @@ format = "$text"
                         alt: &Default::default(),
                         pages: &Default::default(),
                         collapsed_groups: &Default::default(),
+                        switching: &Default::default(),
                         folding: &Default::default(),
                         collapsed: &Default::default(),
                         waiting: &Default::default(),
@@ -2174,6 +2193,7 @@ format = "$text"
             }),
             text: text.to_string(),
             text_x: x + 16.0,
+            text_right: None,
             foreground: INK,
             background,
             radius: 0.0,
@@ -2673,6 +2693,7 @@ background = '#458588'
                 pages: &Default::default(),
                 collapsed_groups: &Default::default(),
                 collapsed: &Default::default(),
+                switching: &Default::default(),
                 folding,
                 waiting: &Default::default(),
                 spin: 0,
@@ -2795,6 +2816,7 @@ background = '#458588'
                     pages: &Default::default(),
                     collapsed_groups: shut,
                     collapsed: &Default::default(),
+                    switching: &Default::default(),
                     folding,
                     waiting: &Default::default(),
                     spin: 0,
@@ -2875,6 +2897,7 @@ background = '#458588'
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
             collapsed: &Default::default(),
+            switching: &Default::default(),
             folding: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -2964,6 +2987,7 @@ background = '#458588'
                 pages: &Default::default(),
                 collapsed_groups: shut,
                 collapsed: &Default::default(),
+                switching: &Default::default(),
                 folding,
                 waiting: &Default::default(),
                 spin: 0,
@@ -3055,6 +3079,7 @@ format = '$text'
                 pages: &Default::default(),
                 collapsed: &Default::default(),
                 collapsed_groups: &Default::default(),
+                switching: &Default::default(),
                 folding: &Default::default(),
                 waiting: &Default::default(),
                 spin: 0,
@@ -3175,6 +3200,7 @@ format = '$text'
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
+            switching: &Default::default(),
             folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
@@ -3444,6 +3470,7 @@ background = "#83a598"
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
             collapsed: &Default::default(),
+            switching: &Default::default(),
             folding: &folding,
             waiting: &Default::default(),
             spin: 0,
@@ -3713,6 +3740,7 @@ background = "#83a598"
                 pages: &Default::default(),
                 collapsed: &Default::default(),
                 collapsed_groups: &Default::default(),
+                switching: &Default::default(),
                 folding,
                 waiting: &Default::default(),
                 spin: 0,
@@ -3851,6 +3879,7 @@ background = "#83a598"
                 pages: &Default::default(),
                 collapsed: &Default::default(),
                 collapsed_groups: &Default::default(),
+                switching: &Default::default(),
                 folding,
                 waiting: &Default::default(),
                 spin: 0,
@@ -3970,6 +3999,7 @@ background = "#83a598"
                 pages: &Default::default(),
                 collapsed: &Default::default(),
                 collapsed_groups: &Default::default(),
+                switching: &Default::default(),
                 folding,
                 waiting: &Default::default(),
                 spin: 0,
@@ -4109,6 +4139,7 @@ background = "#83a598"
                             pages: &Default::default(),
                             collapsed: &Default::default(),
                             collapsed_groups: groups,
+                            switching: &Default::default(),
                             folding: &Default::default(),
                             waiting: &Default::default(),
                             spin: 0,
@@ -4167,5 +4198,98 @@ background = "#83a598"
                 }
             }
         }
+    }
+    /// A module part way between two wordings is drawn at a width the wording it is going
+    /// to was never fitted to, so what is written on it has to stop at the module's own
+    /// edge. Left to run on it would land on the module beside it, or outside the island
+    /// altogether - the same artefact a fold's clip exists for, one level down.
+    #[test]
+    fn a_travelling_wording_stops_at_the_module_it_is_drawn_in() {
+        let config = r##"
+[bar]
+height = 20
+background = { color = "#00000000" }
+[left]
+groups = ["g"]
+[group.g]
+modules = ["a"]
+padding = 0
+background = "#00000000"
+[module.a]
+format = "$text"
+format_alt = "$text spelled out at considerable length"
+padding = 4
+background = "#00000000"
+foreground = "#ffffffff"
+"##;
+        let cfg = crate::config::Config::parse(config).unwrap();
+        let mut fields = crate::status::Fields::default();
+        fields.set("text", crate::status::Value::Text("42%".to_string()));
+        let items = [crate::status::StatusItem {
+            id: Some("a".to_string()),
+            fields,
+            state: Default::default(),
+            urgent: false,
+            foreground: None,
+            background: None,
+            action: None,
+        }];
+        let native = crate::collect::Registry::new(&Default::default());
+        let showing: std::collections::HashMap<String, usize> = [("a".to_string(), 1)].into();
+        let frame = |switching: &std::collections::HashMap<String, crate::layout::Leaving>| {
+            let inputs = crate::layout::Inputs {
+                items: &items,
+                native: &native,
+                sway: &Default::default(),
+                alt: &showing,
+                pages: &Default::default(),
+                collapsed: &Default::default(),
+                collapsed_groups: &Default::default(),
+                switching,
+                folding: &Default::default(),
+                waiting: &Default::default(),
+                spin: 0,
+                tray: &Default::default(),
+                output: None,
+            };
+            crate::layout::compute(
+                &cfg,
+                &inputs,
+                480.0,
+                20.0,
+                &mut Blocks {
+                    scale: 1.0,
+                    run: None,
+                },
+                None,
+            )
+        };
+
+        let settled = frame(&Default::default());
+        let mut overflowed = false;
+        for step in 0..20 {
+            let at = step as f32 / 20.0;
+            let travelling =
+                frame(&[("a".to_string(), crate::layout::Leaving { from: 0, at })].into());
+            let module = &travelling.groups[0].modules[0];
+            assert!(module.width <= settled.groups[0].modules[0].width + 0.001);
+            overflowed |= module.text.chars().count() as f32 * BLOCK
+                > module.text_right.expect("a travelling module is cut") - module.text_x;
+            for scale in [1.0, 2.0] {
+                let shot = shot(&travelling, scale);
+                let width = shot.width();
+                let edge = ((module.x + module.width) * scale).ceil() as u32;
+                for (n, pixel) in shot.pixels().iter().enumerate() {
+                    assert!(
+                        n as u32 % width < edge || pixel.alpha() == 0,
+                        "the wording ran past its module at {at} scale {scale}"
+                    );
+                }
+            }
+        }
+        assert!(
+            overflowed,
+            "the travel has to hold more than it shows for the cut to mean anything"
+        );
     }
 }

@@ -123,6 +123,10 @@ root at all.
   wheel moves between tracks, over MPRIS on the session bus
 - `collapsible = true`: a click folds a module down to its icon, and the next one
   unfolds it; `collapse_button` says which, and defaults to the right
+- `collapse_animation` on a group and `alt_animation` on a module: the change of
+  width a click asks for is travelled rather than jumped. The timer exists only
+  while something is moving and drops itself on the frame it arrives, so a bar
+  nobody is clicking on still costs nothing
 - `refresh_button = "left"`: a click reads the source again — what a reading
   fetched over the network wants instead of an interval
 - `pages = true` on a command module: every line of a run is a reading of its
@@ -158,7 +162,7 @@ root at all.
 no compositor needed; `dbar --fields` prints what every source publishes, and
 `dbar --fields cpu` just the one.
 
-Not yet implemented: Bluetooth. See [dbar-native.md](dbar-native.md)
+Not yet implemented: Bluetooth. See [spec.md](spec.md)
 for where this is going.
 
 ## What it costs to leave running
@@ -736,7 +740,8 @@ even if its children become empty, provided the icon fits the available width;
 an expanded empty group disappears as usual. Group background, opacity, padding,
 edges and caps remain in effect, and neighboring joins use the icon's style.
 [gruvbox-islands.toml](examples/gruvbox-islands.toml) uses right click to fold CPU, RAM and
-temperature into a Tux penguin.
+temperature into a Tux penguin. `collapse_animation` gives the fold a span to
+travel over rather than a jump — see [Animation](#animation).
 
 Groups in one alignment can also share transitions, without merging their module
 lists. This is opt-in independently for `left`, `center`, and `right`:
@@ -832,6 +837,50 @@ modules = ["cpu", "memory", "time"]
 [module.cpu]
 style = "default"
 ```
+
+### Animation
+
+Two clicks change how wide something is: folding a group down to its icon, and
+moving a module on to its next wording. Both jump by default, in one redraw, and
+both can travel instead:
+
+```toml
+[group.system]
+collapsible = true
+collapse_button = "right"
+collapse_animation = "250ms"   # the island between its two widths
+
+[module.network]
+format = "$ssid|$device"
+format_alt = ["$down{  $up}", "$signal.n(d:0){  $dbm.n(d:0) dBm}"]
+alt_animation = "120ms"        # the module between two of its wordings
+```
+
+Both take a duration with a unit — `"150ms"`, `"1s"` — and both are refused when
+there is nothing to travel: `collapse_animation` without `collapsible`, or
+`alt_animation` without `format_alt`, is a startup error rather than a key that
+is spelled correctly and does nothing. Neither may be longer than ten seconds.
+
+While something is travelling the bar redraws at about the rate the screen
+refreshes, eased so it leaves and arrives slowly. Everything else about the click
+is settled the moment it lands, so a group caught half shut still knows it is
+shut, and a wording clicked again half way is already showing the new one.
+
+The two share a single 16 ms timer that exists only while something is actually
+moving and drops itself on the frame the last one arrives. Nothing is
+interpolated at rest, and a bar nobody is clicking on wakes for none of it — the
+same bargain the spinner makes, which draws nothing until a command has been out
+for 400 ms.
+
+What travels is the edge, not the writing. A folding island holds the contents it
+was measured with and sweeps its own end over them, and a module changing wording
+is laid out in the wording it is going to and cut off at its own edge. Both charge
+their run the wider of the two widths for the whole travel, so a window title
+further along is measured once rather than shedding and regaining a character on
+every frame.
+
+[gruvbox-islands.toml](examples/gruvbox-islands.toml) uses both: the system island folds
+into Tux over 250 ms, and RAM and the network travel between their wordings.
 
 ### Sources
 
@@ -1017,7 +1066,8 @@ a second, the module shows a spinner where its icon goes until the reading lands
 and a module that has never answered appears with the spinner alone rather than
 waiting to exist. Nothing is drawn before that, so a script that answers straight
 away never animates and costs no wake-ups: this is the only thing on the bar that
-moves on its own, and it moves only while your program is actually running.
+moves without being clicked on - see [Animation](#animation) for the two that a
+click sets going - and it moves only while your program is actually running.
 
 They are arguments and nothing more, so a command that is `["sh", "-c", "..."]`
 gets them the way `sh` hands out arguments after a script: the first lands in
