@@ -2438,7 +2438,7 @@ mod tests {
             icon: None,
             text: String::new(),
             text_x: 0.0,
-            text_right: None,
+            content_right: None,
             foreground: crate::color::Color::TRANSPARENT,
             background: crate::color::Color::TRANSPARENT,
             radius: 0.0,

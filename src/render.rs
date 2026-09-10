@@ -1438,6 +1438,13 @@ fn draw_group(
                 false => clip,
             },
         );
+        // A wording travel can grow an icon out of a box narrower than the icon itself.
+        // Give it the same straight module cutoff as the wording; the group mask still
+        // supplies any rounded or folding edge underneath it.
+        let module_stop = module
+            .content_right
+            .map(|right| ((right + offset.0) * scale).ceil() as i32);
+        let marks = module_stop.map_or(marks, |stop| marks.stopped(stop));
         if let Some(icon) = &module.icon {
             draw_icon_cached(
                 pixmap,
@@ -1449,15 +1456,12 @@ fn draw_group(
             );
         }
         // A module part way between two wordings is the one thing cut at its own edge
-        // rather than at the island's: what is written on it was fitted to the width it
-        // lands at, and until it lands that is not the width it is drawn in. Rounded up,
-        // because the column is where the wording stops rather than the last one it
-        // reaches, and a wording that exactly fills its box must not lose its last pixel
-        // to it on the frame before it arrives.
-        let wording = match module.text_right {
-            Some(right) => wording.stopped(((right + offset.0) * scale).ceil() as i32),
-            None => wording,
-        };
+        // rather than at the island's: its contents were fitted to the width it lands at,
+        // and until it lands that is not the width they are drawn in. Rounded up, because
+        // the column is where the contents stop rather than the last one they reach, and
+        // something that exactly fills its box must not lose its last pixel to it on the
+        // frame before it arrives.
+        let wording = module_stop.map_or(wording, |stop| wording.stopped(stop));
         // Layout already placed the text; only the vertical centring is ours.
         let ty = module.y + (module.height - tools.line_height) / 2.0;
         let (tx, ty) = (module.text_x + offset.0, ty + offset.1);
@@ -2193,7 +2197,7 @@ format = "$text"
             }),
             text: text.to_string(),
             text_x: x + 16.0,
-            text_right: None,
+            content_right: None,
             foreground: INK,
             background,
             radius: 0.0,
@@ -4274,8 +4278,8 @@ foreground = "#ffffffff"
             let module = &travelling.groups[0].modules[0];
             assert!(module.width <= settled.groups[0].modules[0].width + 0.001);
             overflowed |= module.text.chars().count() as f32 * BLOCK
-                > module.text_right.expect("a travelling module is cut") - module.text_x;
-            for scale in [1.0, 2.0] {
+                > module.content_right.expect("a travelling module is cut") - module.text_x;
+            for scale in [1.0, 1.5, 2.0] {
                 let shot = shot(&travelling, scale);
                 let width = shot.width();
                 let edge = ((module.x + module.width) * scale).ceil() as u32;
@@ -4291,5 +4295,85 @@ foreground = "#ffffffff"
             overflowed,
             "the travel has to hold more than it shows for the cut to mean anything"
         );
+    }
+
+    /// An icon can belong only to the wording a module is growing towards. It is already
+    /// full-sized then, so the moving module edge must cut it the same way it cuts text;
+    /// otherwise the whole icon appears on the first frame while its box is still a sliver.
+    #[test]
+    fn a_travelling_icon_stops_at_the_module_it_is_drawn_in() {
+        let config = r##"
+[bar]
+height = 20
+background = { color = "#00000000" }
+[left]
+groups = ["g"]
+[group.g]
+modules = ["a"]
+padding = 0
+background = "#00000000"
+[module.a]
+format = ""
+format_alt = "SHOW"
+padding = 0
+background = "#00000000"
+foreground = "#ffffffff"
+[module.a.states.show]
+contains = "SHOW"
+strip = true
+icon = "cpu"
+"##;
+        let cfg = crate::config::Config::parse(config).unwrap();
+        let items = [crate::status::StatusItem {
+            id: Some("a".to_string()),
+            fields: crate::status::Fields::default(),
+            state: Default::default(),
+            urgent: false,
+            foreground: None,
+            background: None,
+            action: None,
+        }];
+        let native = crate::collect::Registry::new(&Default::default());
+        let showing: std::collections::HashMap<String, usize> = [("a".to_string(), 1)].into();
+        for at in [0.1, 0.5, 0.9] {
+            let switching = [("a".to_string(), crate::layout::Leaving { from: 0, at })].into();
+            let inputs = crate::layout::Inputs {
+                items: &items,
+                native: &native,
+                sway: &Default::default(),
+                alt: &showing,
+                pages: &Default::default(),
+                collapsed: &Default::default(),
+                collapsed_groups: &Default::default(),
+                switching: &switching,
+                folding: &Default::default(),
+                waiting: &Default::default(),
+                spin: 0,
+                tray: &Default::default(),
+                output: None,
+            };
+            let frame = crate::layout::compute(
+                &cfg,
+                &inputs,
+                100.0,
+                20.0,
+                &mut Blocks {
+                    scale: 1.0,
+                    run: None,
+                },
+                None,
+            );
+            let module = &frame.groups[0].modules[0];
+            for scale in [1.0, 1.5, 2.0] {
+                let image = shot(&frame, scale);
+                let edge = ((module.x + module.width) * scale).ceil() as u32;
+                assert!(
+                    image.pixels().iter().enumerate().all(|(n, pixel)| {
+                        n as u32 % image.width() < edge || pixel.alpha() == 0
+                    }),
+                    "the icon ran past its module at {at} scale {scale}"
+                );
+            }
+        }
     }
 }

@@ -281,15 +281,15 @@ pub struct PlacedModule {
     pub text: String,
     /// Left edge of the text, already offset past any icon.
     pub text_x: f32,
-    /// Where the module's wording stops, for one holding more than it shows.
+    /// Where the module's contents stop, for one holding more than it shows.
     ///
     /// A module travelling between two wordings is drawn at a width neither of them was
-    /// fitted to, so what is written on it has to be cut at the box it is in rather than
-    /// at the box it was measured for. Short of the fills by the module's own padding,
-    /// because nothing is written in padding: cutting at the fills would leave glyphs
-    /// standing in it to the last frame and take them away in one step. `None` on every
-    /// module that has arrived, which is all of them but the one under a click.
-    pub text_right: Option<f32>,
+    /// fitted to, so its icon and wording have to be cut at the box it is in rather than
+    /// at the box they were measured for. Short of the fills by the module's own padding,
+    /// because nothing is drawn in padding: cutting at the fills would leave the last
+    /// pixels standing in it and take them away in one step. `None` on every module that
+    /// has arrived, which is all of them but the one under a click.
+    pub content_right: Option<f32>,
     pub foreground: Color,
     pub background: Color,
     pub radius: f32,
@@ -536,7 +536,7 @@ impl SamePaint for PlacedModule {
             && self.height == other.height
             && self.text == other.text
             && self.text_x == other.text_x
-            && self.text_right == other.text_right
+            && self.content_right == other.content_right
             && self.foreground == other.foreground
             && self.background == other.background
             && self.radius == other.radius
@@ -733,9 +733,10 @@ struct SizedGroup {
     background: Color,
     opacity: f32,
     edges: Edges,
+    /// Vertical padding is settled: wording travel changes width, not height.
     padding: f32,
-    /// Horizontal space between neighbouring modules.
-    advance: f32,
+    /// Horizontal padding travels when every module in the island appears or disappears.
+    horizontal_padding: f32,
     separator: Separator,
     ends: Ends,
     /// Module widths paired with their content.
@@ -880,8 +881,15 @@ struct SizedModule {
     /// between two wordings: that one is charged the wider of the two from end to end of
     /// the travel, so nothing behind it is re-measured on the way.
     reserve: f32,
-    /// Whether what is written on it reaches past the box it is being drawn in and has to
-    /// be cut off at its own edge.
+    /// How much of a drawn module exists at this point of a wording travel.
+    presence: f32,
+    /// Whether the module exists at each endpoint, for reserving the wider topology.
+    from_drawn: bool,
+    to_drawn: bool,
+    /// The visible part of the gap before this module.
+    before: f32,
+    /// Whether its icon or wording reaches past the box it is being drawn in and has to be
+    /// cut off at its own edge.
     clipped: bool,
     text_width: f32,
     /// The module's name, when a gesture on it has to name it.
@@ -1223,6 +1231,10 @@ fn size_group(
         modules.push(SizedModule {
             width,
             reserve: width,
+            presence: 1.0,
+            from_drawn: true,
+            to_drawn: true,
+            before: 0.0,
             clipped: false,
             text_width: 0.0,
             name: None,
@@ -1434,12 +1446,23 @@ fn size_group(
         // that is not there: travelled on to, the box shrinks away instead of being taken
         // off between two frames, and travelled from, it grows out of nothing the way it
         // went in.
-        let was = travelling
-            .map(|leaving| fitted(wording_at(module, leaving.from).render(&values), text))
-            .map(|leaving| leaving.width);
-        if !arriving.drawn && was.is_none() {
+        let leaving = travelling
+            .map(|leaving| fitted(wording_at(module, leaving.from).render(&values), text));
+        if !arriving.drawn && leaving.as_ref().is_none_or(|leaving| !leaving.drawn) {
             continue;
         }
+        let from_drawn = leaving
+            .as_ref()
+            .map_or(arriving.drawn, |leaving| leaving.drawn);
+        let to_drawn = arriving.drawn;
+        let presence = match travelling {
+            Some(Leaving { at, .. }) => {
+                f32::from(u8::from(from_drawn))
+                    + (f32::from(u8::from(to_drawn)) - f32::from(u8::from(from_drawn))) * at
+            }
+            None => f32::from(u8::from(to_drawn)),
+        };
+        let was = leaving.map(|leaving| leaving.width);
         let Fitted {
             style,
             hover_style,
@@ -1469,6 +1492,10 @@ fn size_group(
         modules.push(SizedModule {
             width,
             reserve,
+            presence,
+            from_drawn,
+            to_drawn,
+            before: 0.0,
             // Cut at its own edge while it is travelling: the wording it is going to was
             // fitted to the width it lands at, which is not the width it is being drawn
             // in until it arrives.
@@ -1558,13 +1585,24 @@ fn shut_width(style: &Style, icon_advance: f32) -> f32 {
 
 fn finish_group(
     group: &GroupCfg,
-    ends: Ends,
+    mut ends: Ends,
     between: f32,
-    modules: Vec<SizedModule>,
+    mut modules: Vec<SizedModule>,
 ) -> Option<SizedGroup> {
     if modules.is_empty() {
         return None;
     }
+
+    // A gap belongs to the visible run before the module, rather than to either endpoint
+    // outright. This makes the right gap survive when a middle module disappears while
+    // the redundant left one shrinks with it, and handles the same topology at either end
+    // of a group. The prefix maximum is the nearest visible run on the left.
+    let mut prior = 0.0_f32;
+    for module in &mut modules {
+        module.before = between * module.presence.min(prior);
+        prior = prior.max(module.presence);
+    }
+    let presence = prior;
 
     let content: f32 = modules.iter().map(|m| m.width).sum();
     // What the modules between them have reserved, which is more than they are showing
@@ -1572,9 +1610,23 @@ fn finish_group(
     // run that instead, so the groups after it are measured against one budget from end
     // to end of the travel the way they are through a fold.
     let held: f32 = modules.iter().map(|m| m.reserve).sum();
-    let gaps = between * (modules.len() - 1) as f32;
+    let gaps: f32 = modules.iter().map(|m| m.before).sum();
     // A shaped end needs room of its own: it is drawn beside the modules, not over them.
-    let furniture = gaps + ends.left_width() + ends.right_width() + group.padding * 2.0;
+    // When the whole island appears or disappears, its horizontal padding and caps are
+    // part of the width being travelled. Vertical padding stays put: this is a width
+    // animation and changing height would make the contents bob while they move.
+    let full_ends = ends.left_width() + ends.right_width();
+    ends.width *= presence;
+    ends.overlap *= presence;
+    let horizontal_padding = group.padding * presence;
+    let furniture = gaps + ends.left_width() + ends.right_width() + horizontal_padding * 2.0;
+    // Reserve the wider endpoint topology so modules in later groups are fitted once for
+    // the whole travel. Several modules can move at once, so count both endpoints rather
+    // than assuming one appearing module or one disappearing module.
+    let from = modules.iter().filter(|module| module.from_drawn).count();
+    let to = modules.iter().filter(|module| module.to_drawn).count();
+    let reserved_gaps = between * from.saturating_sub(1).max(to.saturating_sub(1)) as f32;
+    let reserved_furniture = reserved_gaps + full_ends + group.padding * 2.0;
     let width = content + furniture;
     Some(SizedGroup {
         collapse: group
@@ -1582,7 +1634,7 @@ fn finish_group(
             .as_ref()
             .map(|c| (group.name.clone(), c.button)),
         width,
-        reserve: held + furniture,
+        reserve: held + reserved_furniture,
         clipped: false,
         travel: 0.0,
         text_inset: 0.0,
@@ -1592,7 +1644,7 @@ fn finish_group(
         opacity: group.opacity,
         edges: group.edges,
         padding: group.padding,
-        advance: between,
+        horizontal_padding,
         separator: group.separator,
         ends,
         modules,
@@ -1698,10 +1750,10 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     let group_x = x;
     let inner_y = sized.padding;
     let inner_h = (height - sized.padding * 2.0).max(0.0);
-    x += sized.padding;
+    x += sized.horizontal_padding;
 
     let separator = sized.separator;
-    let draw_separators = !separator.shape.is_none() && sized.advance > 0.0;
+    let draw_separators = !separator.shape.is_none();
 
     let mut modules: Vec<PlacedModule> = Vec::with_capacity(sized.modules.len());
     let mut separators = Vec::new();
@@ -1710,9 +1762,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     let lead = ends.left_width();
     x += lead;
     for (i, m) in sized.modules.into_iter().enumerate() {
-        if i > 0 {
-            x += sized.advance;
-        }
+        x += m.before;
         // The box a fold is taking to the shut island's width, for the leading module; the
         // measured one for everything behind it, which packs along after that box and is
         // pushed off the end by it.
@@ -1765,7 +1815,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             icon: placed_icon,
             text: m.text,
             text_x: content_x + m.icon_advance,
-            text_right: m.clipped.then_some(x + width - m.style.padding),
+            content_right: m.clipped.then_some(x + width - m.style.padding),
             foreground,
             background,
             radius: paint.radius,
@@ -1788,7 +1838,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     {
         separators.push(end_separator(
             ends.left,
-            group_x + sized.padding,
+            group_x + sized.horizontal_padding,
             inner_y,
             lead,
             inner_h,
@@ -1804,7 +1854,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     // left behind at the content's edge is a cap outside the island, and the clip that
     // keeps the content in would take it off the screen altogether.
     let trail_x = match sized.clipped {
-        true => group_x + sized.width - trail - sized.padding,
+        true => group_x + sized.width - trail - sized.horizontal_padding,
         false => x,
     };
     // Where the contents stop, for an island holding more than it shows. The cap hangs
@@ -1813,13 +1863,24 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     let content_right = sized.clipped.then_some(trail_x);
     if draw_separators {
         for pair in modules.windows(2) {
-            separators.push(separator_between(
-                separator,
-                &pair[0],
-                &pair[1],
-                sized.background,
-                None,
-            ));
+            let width = (pair[1].x - pair[0].x - pair[0].width).max(0.0);
+            if width > 0.0 {
+                let overlap = match separator.width > 0.0 {
+                    true => separator.overlap * (width / separator.width).clamp(0.0, 1.0),
+                    false => 0.0,
+                };
+                separators.push(separator_between(
+                    Separator {
+                        width,
+                        overlap,
+                        ..separator
+                    },
+                    &pair[0],
+                    &pair[1],
+                    sized.background,
+                    None,
+                ));
+            }
         }
     }
     if trail > 0.0
@@ -2148,7 +2209,7 @@ pub fn fault(
                 y: 0.0,
                 width: module_width,
                 height,
-                text_right: None,
+                content_right: None,
                 icon: None,
                 action: None,
                 name: None,
@@ -5200,7 +5261,7 @@ padding = 2
 
         let settled = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
         assert_eq!(
-            settled.groups[0].modules[0].text_right, None,
+            settled.groups[0].modules[0].content_right, None,
             "a module that has arrived is not cut at all"
         );
 
@@ -5209,7 +5270,7 @@ padding = 2
         inputs.switching = &travelling;
         let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
         let module = &frame.groups[0].modules[0];
-        let cut = module.text_right.expect("a travelling module is cut");
+        let cut = module.content_right.expect("a travelling module is cut");
         assert!((cut - (module.x + module.width - 2.0)).abs() < 0.001);
         assert!(
             module.text_x >= module.x + 2.0 - 0.001,
@@ -5242,7 +5303,7 @@ padding = 2
             [("a".to_string(), Leaving { from: 0, at: 0.5 })].into();
         inputs.switching = &travelling;
         let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
-        assert_eq!(frame.groups[0].modules[0].text_right, None);
+        assert_eq!(frame.groups[0].modules[0].content_right, None);
         assert_eq!(
             frame.groups[0].modules[0].width,
             settled.groups[0].modules[0].width
@@ -5313,7 +5374,8 @@ height = 20
 groups = ["g"]
 [group.g]
 modules = ["a"]
-padding = 0
+padding = 7
+ends = { left = "slant", right = "slant", width = 3 }
 [module.a]
 format = "$text"
 format_alt = ""
@@ -5326,7 +5388,9 @@ padding = 2
         let mut inputs = group_inputs(&items, &native, &none);
         let frame = |inputs: &Inputs<'_>| compute(&cfg, inputs, 400.0, 20.0, &mut Fixed, None);
 
-        let open = frame(&inputs).groups[0].modules[0].width;
+        let open_frame = frame(&inputs);
+        let open = open_frame.groups[0].modules[0].width;
+        let open_group = open_frame.groups[0].width;
         let second: std::collections::HashMap<String, usize> = [("a".to_string(), 1)].into();
         inputs.alt = &second;
         assert!(
@@ -5335,7 +5399,7 @@ padding = 2
         );
 
         // On its way out: the width it had, then half of it, and nothing written on it.
-        let steps: Vec<(f32, std::collections::HashMap<String, Leaving>)> = [0.0, 0.5]
+        let steps: Vec<(f32, std::collections::HashMap<String, Leaving>)> = [0.0, 0.5, 1.0]
             .into_iter()
             .map(|at| (at, [("a".to_string(), Leaving { from: 0, at })].into()))
             .collect();
@@ -5350,6 +5414,12 @@ padding = 2
                 module.width,
                 open * (1.0 - at)
             );
+            assert!(
+                (drawn.groups[0].width - open_group * (1.0 - at)).abs() < 0.001,
+                "the island's padding and caps jumped at {at}: {} against {}",
+                drawn.groups[0].width,
+                open_group * (1.0 - at)
+            );
         }
 
         // And the way back: out of nothing rather than in at full width.
@@ -5358,7 +5428,76 @@ padding = 2
         let back: std::collections::HashMap<String, Leaving> =
             [("a".to_string(), Leaving { from: 1, at: 0.5 })].into();
         inputs.switching = &back;
-        let module = &frame(&inputs).groups[0].modules[0];
+        let grown = frame(&inputs);
+        let module = &grown.groups[0].modules[0];
         assert!((module.width - open / 2.0).abs() < 0.001);
+        assert!((grown.groups[0].width - open_group / 2.0).abs() < 0.001);
+    }
+
+    /// A disappearing module takes one of the gaps around it away. The other becomes the
+    /// ordinary gap between the modules that remain, so neither spacing nor a configured
+    /// separator can stay at full width and then vanish on the last frame.
+    #[test]
+    fn a_hidden_wording_travels_with_its_inter_module_gap() {
+        let config = r##"
+[bar]
+height = 20
+[left]
+groups = ["g"]
+[group.g]
+modules = ["a", "b", "c"]
+padding = 0
+[group.g.separator]
+shape = "slant"
+width = 10
+overlap = 2
+[module.a]
+format = "$text"
+padding = 0
+[module.b]
+format = "$text"
+format_alt = ""
+padding = 0
+[module.c]
+format = "$text"
+padding = 0
+"##;
+        let cfg = Config::parse(config).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("a", "a"), item("b", "b"), item("c", "c")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let open = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        let open_width = open.groups[0].width;
+
+        let showing: std::collections::HashMap<String, usize> = [("b".to_string(), 1)].into();
+        inputs.alt = &showing;
+        let closed = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        let closed_width = closed.groups[0].width;
+        assert!((open_width - closed_width - 11.0).abs() < 0.001);
+
+        let steps: Vec<_> = [0.0, 0.5, 1.0]
+            .into_iter()
+            .map(|at| (at, [("b".to_string(), Leaving { from: 0, at })].into()))
+            .collect();
+        for (at, travelling) in &steps {
+            inputs.switching = travelling;
+            let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+            let want = open_width + (closed_width - open_width) * *at;
+            assert!(
+                (frame.groups[0].width - want).abs() < 0.001,
+                "the gap jumped at {at}: {} against {want}",
+                frame.groups[0].width
+            );
+            let separators = &frame.groups[0].separators;
+            if *at < 1.0 {
+                assert_eq!(separators.len(), 2);
+                assert!((separators[0].width - 10.0 * (1.0 - at)).abs() < 0.001);
+                assert!((separators[0].overlap - 2.0 * (1.0 - at)).abs() < 0.001);
+            } else {
+                assert_eq!(separators.len(), 1);
+            }
+            assert!((separators.last().unwrap().width - 10.0).abs() < 0.001);
+        }
     }
 }
