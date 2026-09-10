@@ -341,26 +341,31 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
     IconArt::Paths(out)
 }
 
-/// The Arch Linux mark: a peak with its underside cut away, standing on two feet.
+/// The Arch Linux mark: a peak with the underside cut into an arch, standing on two feet.
 ///
-/// Drawn as one filled outline rather than a stroked chevron, because the legs are wider
-/// at the foot than at the apex and the flare at the bottom is a turn in the edge itself.
-/// A stroke of one width could say neither.
+/// One filled contour, traced the way the official artwork is: down the left flank, out
+/// along the ground, up and over the arch between the feet, then back out to the right.
+/// The two nicks in the flanks are turns in that same edge, not separate shapes, which is
+/// why nothing here is stroked - a single stroke width could describe neither the flare at
+/// the feet nor the taper of a nick.
 fn arch(out: &mut Vec<IconPath>) {
     let mut mark = Outline::new();
-    mark.move_to(0.50, 0.07);
-    for (x, y) in [
-        // Down the right side, out at the flare, then back up the inside of the notch.
-        (0.745, 0.68),
-        (0.950, 0.94),
-        (0.675, 0.94),
-        (0.500, 0.42),
-        (0.325, 0.94),
-        (0.050, 0.94),
-        (0.255, 0.68),
-    ] {
-        mark.line_to(x, y);
-    }
+    mark.move_to(0.5000, 0.0700);
+    mark.cubic_to(0.4599, 0.1650, 0.4357, 0.2271, 0.3911, 0.3192);
+    mark.cubic_to(0.4185, 0.3472, 0.4521, 0.3798, 0.5066, 0.4167);
+    mark.cubic_to(0.4480, 0.3934, 0.4080, 0.3700, 0.3781, 0.3457);
+    mark.cubic_to(0.3210, 0.4608, 0.2316, 0.6248, 0.0500, 0.9400);
+    mark.cubic_to(0.1928, 0.8604, 0.3033, 0.8113, 0.4064, 0.7926);
+    mark.cubic_to(0.4019, 0.7742, 0.3994, 0.7543, 0.3996, 0.7335);
+    mark.line_to(0.3998, 0.7291);
+    mark.cubic_to(0.4020, 0.6408, 0.4496, 0.5729, 0.5059, 0.5775);
+    mark.cubic_to(0.5622, 0.5821, 0.6060, 0.6575, 0.6037, 0.7458);
+    mark.cubic_to(0.6033, 0.7624, 0.6013, 0.7784, 0.5980, 0.7933);
+    mark.cubic_to(0.6999, 0.8125, 0.8093, 0.8615, 0.9500, 0.9400);
+    mark.cubic_to(0.9222, 0.8906, 0.8975, 0.8461, 0.8738, 0.8037);
+    mark.cubic_to(0.8366, 0.7758, 0.7977, 0.7395, 0.7185, 0.7002);
+    mark.cubic_to(0.7729, 0.7138, 0.8119, 0.7297, 0.8423, 0.7473);
+    mark.cubic_to(0.6019, 0.3146, 0.5824, 0.2570, 0.5000, 0.0700);
     mark.close();
     finish(mark, Ink::Fill, out);
 }
