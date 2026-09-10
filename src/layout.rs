@@ -846,6 +846,32 @@ fn wording_at(module: &ModuleCfg, showing: usize) -> &Format {
     }
 }
 
+/// One wording of a module, fitted to the room its run has left.
+///
+/// Everything here answers to the text: a state rule can key on what the module says, so
+/// the style, the icon and the padding are all the wording's own rather than the module's.
+/// A module travelling between two of them is fitted twice, and that is the whole reason
+/// this is a value rather than a run of locals.
+#[derive(Default)]
+struct Fitted {
+    /// Whether the module is drawn at all.
+    ///
+    /// A wording that renders empty hides the module, the way the i3bar protocol asks, and
+    /// one that strips or truncates away to nothing hides it unless an icon is left to
+    /// carry it. Not drawn is a width of nothing rather than an absence, which is what
+    /// lets a click on to a wording that says nothing shrink the box away instead of
+    /// taking it off the bar between two frames.
+    drawn: bool,
+    style: Style,
+    hover_style: Option<Style>,
+    icon: Option<(Icon, usize)>,
+    /// What survived stripping and truncation, which is what is actually drawn.
+    content: String,
+    text_width: f32,
+    icon_advance: f32,
+    width: f32,
+}
+
 struct SizedModule {
     /// What the module is drawn at, which is between the two wordings' widths while a
     /// click is carrying it from one to the other.
@@ -1248,11 +1274,6 @@ fn size_group(
             true => None,
             false => inputs.switching.get(&module.name).copied(),
         };
-        // A module with a picture to show is not empty, whatever its wording says: a tray
-        // item is its icon, and most of them have nothing written on them at all.
-        if content.is_empty() && !folded && !waiting && art.is_none() {
-            continue;
-        }
         // The state rules and the graded icons both key on what the source published, not
         // on whatever the text ended up saying; a rule reads the field it names, or the
         // value the source is mainly about.
@@ -1265,12 +1286,9 @@ fn size_group(
                 .unwrap_or(module.style)
         };
         let value = values.primary().and_then(|v| v.num());
-        let style = resolve(false, &content);
 
         // A provider often has to spell a state into the text for a rule to match on. Once
         // it has been matched the wording has done its job, and the icon says it better.
-        // A closure because the wording a click is leaving behind goes through it too: a
-        // travel that started at a width the settled module never had is a jump.
         let strip = |content: String| match module
             .states
             .iter()
@@ -1286,68 +1304,6 @@ fn size_group(
             }
             None => content,
         };
-        let mut content = strip(content);
-        // Stripping can empty the text entirely, which is fine when an icon is left to
-        // carry the module: a muted volume is the icon and nothing else, and so is a
-        // command that has not answered yet.
-        if content.is_empty() && style.icon.is_none() && !waiting && art.is_none() {
-            continue;
-        }
-
-        // Hover is deliberately paint-only. Letting it change padding or the icon would
-        // resize the module under the pointer, which can move the pointer off it and
-        // oscillate, so the metrics always come from the unhovered style.
-        let hovered = resolve(true, &content);
-        let hover_style = (hovered != style).then_some(Style {
-            padding: style.padding,
-            min_width: style.min_width,
-            icon_size: style.icon_size,
-            icon: style.icon,
-            ..hovered
-        });
-
-        // The rules and the icon read what the module would have said, so folding changes
-        // what is drawn without changing what the module is: a paused player keeps its
-        // paused styling while it is a single icon.
-        if folded {
-            content.clear();
-        }
-
-        // A command with a run on its way says so where its icon goes, so the reading
-        // that is coming lands in the place the spinner was and nothing else moves. A
-        // module with no icon of its own grows one for as long as it is waiting.
-        // A picture the source handed over stands in for whatever icon the style names:
-        // an application's own artwork is the thing a tray module exists to show.
-        let icon = match (waiting, art.is_some()) {
-            (true, _) => Some((Icon::Spinner, inputs.spin)),
-            (false, true) => Some((Icon::Raster, 0)),
-            (false, false) => style.icon.map(|icon| {
-                let level = if icon.is_graded() {
-                    value.map(icon::level_of).unwrap_or(0)
-                } else {
-                    0
-                };
-                (icon, level)
-            }),
-        };
-        // The icon and the space after it, which is what the text starts behind. An icon
-        // is as tall as `icon_size` and as wide as its own shape asks for, which is the
-        // same thing for everything but the battery.
-        //
-        // The gap belongs to the text rather than to the icon, so a module with nothing
-        // written on it does not get one. Keeping it would pad the far side of a module
-        // folded down to its icon and leave the icon sitting half a gap off centre, which
-        // is exactly the case the gap was never for.
-        let advance = |content: &str| match icon {
-            Some((icon, _)) if style.icon_size > 0.0 => {
-                let gap = match content.is_empty() {
-                    true => 0.0,
-                    false => style.gap(),
-                };
-                style.icon_size * icon.width() + gap
-            }
-            _ => 0.0,
-        };
         // A module that would outgrow max_width, or the room its run has left, loses text
         // rather than pushing its neighbours aside: a window title has no length limit of
         // its own, and a bar can run out of width whatever the config says.
@@ -1358,12 +1314,88 @@ fn size_group(
             true => left,
             false => left - between,
         };
-        // What a wording costs once it has been fitted to the room the run has left: the
-        // text that survived, how wide that is, what the icon takes, and how wide the
-        // module drawn around them is. A closure because the wording a click is leaving
-        // behind is fitted the same way, so a travel leaves exactly where the settled
-        // module was and arrives exactly where the new one is.
-        let fit = |content: String, text: &mut dyn Measure| {
+        // Everything one wording costs, fitted to the room the run has left. A closure
+        // because the wording a click is leaving behind goes through the whole of it too:
+        // a rule can key on the text, so each wording resolves its own style, its own icon
+        // and its own padding, and measuring the one being left behind in the style the
+        // one arriving happens to wear is a first frame that jumps.
+        let fitted = |raw: String, text: &mut dyn Measure| -> Fitted {
+            let style = resolve(false, &raw);
+            // A wording that renders empty hides the module, which is what the i3bar
+            // protocol means by an empty `full_text`. A module with a picture to show is
+            // not empty whatever its wording says: a tray item is its icon, and most of
+            // them have nothing written on them at all.
+            let hidden = Fitted {
+                drawn: false,
+                style,
+                ..Fitted::default()
+            };
+            if raw.is_empty() && !folded && !waiting && art.is_none() {
+                return hidden;
+            }
+            let mut content = strip(raw);
+            // Stripping can empty the text entirely, which is fine when an icon is left to
+            // carry the module: a muted volume is the icon and nothing else, and so is a
+            // command that has not answered yet.
+            if content.is_empty() && style.icon.is_none() && !waiting && art.is_none() {
+                return hidden;
+            }
+
+            // Hover is deliberately paint-only. Letting it change padding or the icon
+            // would resize the module under the pointer, which can move the pointer off it
+            // and oscillate, so the metrics always come from the unhovered style.
+            let hovered = resolve(true, &content);
+            let hover_style = (hovered != style).then_some(Style {
+                padding: style.padding,
+                min_width: style.min_width,
+                icon_size: style.icon_size,
+                icon: style.icon,
+                ..hovered
+            });
+
+            // The rules and the icon read what the module would have said, so folding
+            // changes what is drawn without changing what the module is: a paused player
+            // keeps its paused styling while it is a single icon.
+            if folded {
+                content.clear();
+            }
+
+            // A command with a run on its way says so where its icon goes, so the reading
+            // that is coming lands in the place the spinner was and nothing else moves. A
+            // module with no icon of its own grows one for as long as it is waiting.
+            // A picture the source handed over stands in for whatever icon the style
+            // names: an application's own artwork is the thing a tray module exists to
+            // show.
+            let icon = match (waiting, art.is_some()) {
+                (true, _) => Some((Icon::Spinner, inputs.spin)),
+                (false, true) => Some((Icon::Raster, 0)),
+                (false, false) => style.icon.map(|icon| {
+                    let level = if icon.is_graded() {
+                        value.map(icon::level_of).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    (icon, level)
+                }),
+            };
+            // The icon and the space after it, which is what the text starts behind. An
+            // icon is as tall as `icon_size` and as wide as its own shape asks for, which
+            // is the same thing for everything but the battery.
+            //
+            // The gap belongs to the text rather than to the icon, so a module with
+            // nothing written on it does not get one. Keeping it would pad the far side of
+            // a module folded down to its icon and leave the icon sitting half a gap off
+            // centre, which is exactly the case the gap was never for.
+            let advance = |content: &str| match icon {
+                Some((icon, _)) if style.icon_size > 0.0 => {
+                    let gap = match content.is_empty() {
+                        true => 0.0,
+                        false => style.gap(),
+                    };
+                    style.icon_size * icon.width() + gap
+                }
+                _ => 0.0,
+            };
             let fixed = advance(&content) + style.padding * 2.0;
             let cap = match style.max_width > 0.0 {
                 true => style.max_width.min(available),
@@ -1378,25 +1410,51 @@ fn size_group(
             // Measured again rather than kept, because only the text that survived says
             // whether there is anything for a gap to separate.
             let icon_advance = advance(&content);
+            // Truncation can take the last of it, which an icon still carries - a spinner
+            // included, since a module waiting on its first answer has nothing else.
+            if content.is_empty() && style.icon.is_none() && !waiting && art.is_none() {
+                return hidden;
+            }
             let text_width = text.measure(&content);
             let width = (text_width + icon_advance + style.padding * 2.0).max(style.min_width);
-            (content, text_width, icon_advance, width)
+            Fitted {
+                drawn: true,
+                style,
+                hover_style,
+                icon,
+                content,
+                text_width,
+                icon_advance,
+                width,
+            }
         };
-        let (content, text_width, icon_advance, width) = fit(content, text);
-        // Truncation can take the last of it, which an icon still carries - a spinner
-        // included, since a module waiting on its first answer has nothing else.
-        if content.is_empty() && style.icon.is_none() && !waiting && art.is_none() {
+        let arriving = fitted(content, text);
+        // The width a module a click has set travelling is coming from. A wording that is
+        // not drawn is a width of nothing at either end of a travel rather than a module
+        // that is not there: travelled on to, the box shrinks away instead of being taken
+        // off between two frames, and travelled from, it grows out of nothing the way it
+        // went in.
+        let was = travelling
+            .map(|leaving| fitted(wording_at(module, leaving.from).render(&values), text))
+            .map(|leaving| leaving.width);
+        if !arriving.drawn && was.is_none() {
             continue;
         }
-        // Where a module a click has set travelling is coming from, and the widest it is
-        // between the two: what it draws eases from one wording's width to the other's,
-        // and what it charges stays at the wider of them for the whole travel.
-        let (width, reserve) = match travelling {
-            Some(Leaving { from, at }) => {
-                let (.., was) = fit(strip(wording_at(module, from).render(&values)), text);
-                (was + (width - was) * at, width.max(was))
-            }
-            None => (width, width),
+        let Fitted {
+            style,
+            hover_style,
+            icon,
+            content,
+            text_width,
+            icon_advance,
+            width,
+            ..
+        } = arriving;
+        // What it draws eases from one wording's width to the other's, and what it charges
+        // stays at the wider of them for the whole travel.
+        let (width, reserve) = match (travelling, was) {
+            (Some(Leaving { at, .. }), Some(was)) => (was + (width - was) * at, width.max(was)),
+            _ => (width, width),
         };
         // A module with nothing left to draw in is left out entirely, rather than drawn
         // over whatever the run was making room for.
@@ -5189,5 +5247,118 @@ padding = 2
             frame.groups[0].modules[0].width,
             settled.groups[0].modules[0].width
         );
+    }
+    /// A state rule can key on what a module says, so the two wordings of a travel can
+    /// resolve different styles - and padding, min_width and the icon are all metrics. Each
+    /// end has to be measured in its own, or the frame the click lands on is the wording it
+    /// is leaving drawn at a width it never had.
+    #[test]
+    fn each_wording_of_a_travel_is_measured_in_its_own_style() {
+        let config = r##"
+[bar]
+height = 20
+[right]
+groups = ["g"]
+[group.g]
+modules = ["a"]
+padding = 0
+[module.a]
+format = "$text up"
+format_alt = "$text"
+padding = 2
+
+[module.a.states.loud]
+contains = "up"
+padding = 10
+"##;
+        let cfg = Config::parse(config).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("a", "42")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let width = |inputs: &Inputs<'_>| {
+            compute(&cfg, inputs, 400.0, 20.0, &mut Fixed, None).groups[0].modules[0].width
+        };
+
+        let first = width(&inputs);
+        let second: std::collections::HashMap<String, usize> = [("a".to_string(), 1)].into();
+        inputs.alt = &second;
+        let alt = width(&inputs);
+        assert!(
+            first > alt + 10.0,
+            "the rule has to move the metrics for this to test anything: {first} and {alt}"
+        );
+
+        // Leaving the padded wording behind, on the frame the click landed: exactly the
+        // width the settled module had, in the style the rule gave it.
+        let travelling: std::collections::HashMap<String, Leaving> =
+            [("a".to_string(), Leaving { from: 0, at: 0.0 })].into();
+        inputs.switching = &travelling;
+        let got = width(&inputs);
+        assert!(
+            (got - first).abs() < 0.001,
+            "the travel started at {got} rather than at {first}"
+        );
+    }
+
+    /// A wording that says nothing takes the module off the bar. Clicked on to, that is a
+    /// width of nothing rather than a module that is suddenly not there: the box travels
+    /// to it and goes when it arrives, and a click back grows it out of nothing again.
+    #[test]
+    fn a_travel_to_a_wording_that_says_nothing_shrinks_the_box_away() {
+        let config = r##"
+[bar]
+height = 20
+[right]
+groups = ["g"]
+[group.g]
+modules = ["a"]
+padding = 0
+[module.a]
+format = "$text"
+format_alt = ""
+padding = 2
+"##;
+        let cfg = Config::parse(config).unwrap();
+        let native = Registry::new(&Default::default());
+        let items = [item("a", "42")];
+        let none = Default::default();
+        let mut inputs = group_inputs(&items, &native, &none);
+        let frame = |inputs: &Inputs<'_>| compute(&cfg, inputs, 400.0, 20.0, &mut Fixed, None);
+
+        let open = frame(&inputs).groups[0].modules[0].width;
+        let second: std::collections::HashMap<String, usize> = [("a".to_string(), 1)].into();
+        inputs.alt = &second;
+        assert!(
+            frame(&inputs).groups.is_empty(),
+            "a wording that says nothing is a module that is not there"
+        );
+
+        // On its way out: the width it had, then half of it, and nothing written on it.
+        let steps: Vec<(f32, std::collections::HashMap<String, Leaving>)> = [0.0, 0.5]
+            .into_iter()
+            .map(|at| (at, [("a".to_string(), Leaving { from: 0, at })].into()))
+            .collect();
+        for (at, travelling) in &steps {
+            inputs.switching = travelling;
+            let drawn = frame(&inputs);
+            let module = &drawn.groups[0].modules[0];
+            assert!(module.text.is_empty(), "at {at}");
+            assert!(
+                (module.width - open * (1.0 - at)).abs() < 0.001,
+                "at {at}: {} against {}",
+                module.width,
+                open * (1.0 - at)
+            );
+        }
+
+        // And the way back: out of nothing rather than in at full width.
+        let showing: std::collections::HashMap<String, usize> = Default::default();
+        inputs.alt = &showing;
+        let back: std::collections::HashMap<String, Leaving> =
+            [("a".to_string(), Leaving { from: 1, at: 0.5 })].into();
+        inputs.switching = &back;
+        let module = &frame(&inputs).groups[0].modules[0];
+        assert!((module.width - open / 2.0).abs() < 0.001);
     }
 }
