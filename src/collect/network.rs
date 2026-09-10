@@ -134,9 +134,7 @@ impl Network {
             return (None, None);
         };
 
-        let asked = wireless
-            .network_of(ifindex)
-            .and_then(|ssid| Ok((ssid, wireless.strength_of(ifindex)?)));
+        let asked = wireless.state_of(ifindex);
         match asked {
             Ok(answer) => answer,
             Err(e) => {
