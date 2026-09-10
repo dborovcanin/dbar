@@ -27,7 +27,8 @@ const NL80211_ATTR_STA_INFO: u16 = 21;
 const NL80211_ATTR_BSS: u16 = 47;
 /// Inside `STA_INFO`: the last signal, in dBm, as a signed byte.
 const NL80211_STA_INFO_SIGNAL: u16 = 7;
-/// Inside `BSS`: the raw information elements and association state.
+/// Inside `BSS`: which access point it is, what state it is in, and what it announced.
+const NL80211_BSS_BSSID: u16 = 1;
 const NL80211_BSS_INFORMATION_ELEMENTS: u16 = 6;
 const NL80211_BSS_STATUS: u16 = 9;
 const NL80211_BSS_BEACON_IES: u16 = 11;
@@ -54,11 +55,23 @@ pub struct Wireless {
     network: Option<CachedNetwork>,
 }
 
+/// How many further reads may dump the scan cache for an association it could not name.
+///
+/// A station appears a moment before the scan cache is stamped with the association, so
+/// the name is usually there on the next read. A handful of attempts covers that; past
+/// them the association is one the cache has no name for, and asking again every tick
+/// would cost the dump this cache exists to avoid.
+const UNNAMED_TRIES: u8 = 3;
+
+/// What the last scan-cache dump found, and which association it was for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CachedNetwork {
     ifindex: u32,
     bssid: [u8; 6],
-    ssid: String,
+    /// Kept even when it is `None`: an association the scan cache cannot name is an answer
+    /// too, and one worth remembering rather than dumping the whole cache for again.
+    ssid: Option<String>,
+    tries: u8,
 }
 
 impl CachedNetwork {
@@ -67,9 +80,44 @@ impl CachedNetwork {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What a read should do with the association the station dump just described.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Lookup {
+    /// The cache already answers for this association.
+    Cached(Option<String>),
+    /// The scan cache has to be read, and the answer remembered with this many tries left.
+    Dump { tries: u8 },
+}
+
+/// Decide between the cache and a scan-cache dump.
+///
+/// Split out from [`Wireless::state_of`] because it is the whole of the fix a socket is not
+/// needed to test: a name is held until the access point changes, and an association with
+/// no name is retried a few times and then let be.
+fn lookup(cache: Option<&CachedNetwork>, ifindex: u32, bssid: [u8; 6]) -> Lookup {
+    match cache {
+        Some(network) if network.is_for(ifindex, bssid) => {
+            if network.ssid.is_some() || network.tries == 0 {
+                Lookup::Cached(network.ssid.clone())
+            } else {
+                Lookup::Dump {
+                    tries: network.tries - 1,
+                }
+            }
+        }
+        _ => Lookup::Dump {
+            tries: UNNAMED_TRIES,
+        },
+    }
+}
+
+/// The access point a card is talking to, as a station dump describes it.
+///
+/// The peer address is not optional. It is what tells one association from the next, and
+/// so what the name cache is keyed by; the kernel puts it on every station reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Station {
-    bssid: Option<[u8; 6]>,
+    bssid: [u8; 6],
     signal: Option<i8>,
 }
 
@@ -99,30 +147,23 @@ impl Wireless {
             return Ok((None, None));
         };
 
-        let cached = station.bssid.and_then(|bssid| {
-            self.network
-                .as_ref()
-                .filter(|network| network.is_for(ifindex, bssid))
-                .map(|network| network.ssid.clone())
-        });
-        if let Some(ssid) = cached {
-            return Ok((Some(ssid), station.signal));
-        }
-
-        let ssid = self.network_of(ifindex)?;
-        self.network = match (station.bssid, ssid.as_ref()) {
-            (Some(bssid), Some(ssid)) => Some(CachedNetwork {
-                ifindex,
-                bssid,
-                ssid: ssid.clone(),
-            }),
-            _ => None,
+        let tries = match lookup(self.network.as_ref(), ifindex, station.bssid) {
+            Lookup::Cached(ssid) => return Ok((ssid, station.signal)),
+            Lookup::Dump { tries } => tries,
         };
+
+        let ssid = self.network_of(ifindex, station.bssid)?;
+        self.network = Some(CachedNetwork {
+            ifindex,
+            bssid: station.bssid,
+            ssid: ssid.clone(),
+            tries,
+        });
         Ok((ssid, station.signal))
     }
 
     /// The SSID of the BSS this interface is associated with, from cached scan results.
-    fn network_of(&mut self, ifindex: u32) -> Result<Option<String>> {
+    fn network_of(&mut self, ifindex: u32, bssid: [u8; 6]) -> Result<Option<String>> {
         let mut request = Vec::new();
         request.extend_from_slice(&genl_header(NL80211_CMD_GET_SCAN, 0));
         request.extend_from_slice(&attribute(NL80211_ATTR_IFINDEX, &ifindex.to_ne_bytes()));
@@ -130,7 +171,7 @@ impl Wireless {
 
         let mut found = None;
         self.receive(true, |payload| {
-            if let Some(ssid) = associated_ssid(payload) {
+            if let Some(ssid) = associated_ssid(payload, bssid) {
                 found = Some(ssid);
             }
         })?;
@@ -324,42 +365,46 @@ fn genl_body(payload: &[u8]) -> &[u8] {
 }
 
 /// Read the associated peer and signal from one `GET_STATION` reply.
+///
+/// A reply with no peer address is no use, whatever else it carries: there would be nothing
+/// to key the name cache by, and nothing to match a scan result against.
 fn station(payload: &[u8]) -> Option<Station> {
-    let mut station = Station::default();
-    let mut present = false;
+    let mut bssid = None;
+    let mut signal = None;
     for (kind, value) in attributes(genl_body(payload)) {
         match kind {
-            NL80211_ATTR_MAC if value.len() >= 6 => {
-                station.bssid = value[..6].try_into().ok();
-                present = true;
-            }
+            NL80211_ATTR_MAC if value.len() >= 6 => bssid = value[..6].try_into().ok(),
             NL80211_ATTR_STA_INFO => {
                 // The station's details are a run of attributes of their own.
                 for (inner, bytes) in attributes(value) {
                     if inner == NL80211_STA_INFO_SIGNAL && !bytes.is_empty() {
-                        station.signal = Some(bytes[0] as i8);
-                        present = true;
+                        signal = Some(bytes[0] as i8);
                     }
                 }
             }
             _ => {}
         }
     }
-    present.then_some(station)
+    Some(Station {
+        bssid: bssid?,
+        signal,
+    })
 }
 
 /// Read the SSID from a scan reply only when it describes the current association.
-fn associated_ssid(payload: &[u8]) -> Option<String> {
+fn associated_ssid(payload: &[u8], bssid: [u8; 6]) -> Option<String> {
     for (kind, value) in attributes(genl_body(payload)) {
         if kind != NL80211_ATTR_BSS {
             continue;
         }
 
+        let mut peer = None;
         let mut status = None;
         let mut information = None;
         let mut beacon = None;
         for (inner, bytes) in attributes(value) {
             match inner {
+                NL80211_BSS_BSSID if bytes.len() >= 6 => peer = bytes[..6].try_into().ok(),
                 NL80211_BSS_STATUS if bytes.len() >= 4 => {
                     status = Some(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
                 }
@@ -368,10 +413,16 @@ fn associated_ssid(payload: &[u8]) -> Option<String> {
                 _ => {}
             }
         }
-        if !matches!(
-            status,
-            Some(NL80211_BSS_STATUS_ASSOCIATED | NL80211_BSS_STATUS_IBSS_JOINED)
-        ) {
+        // The dump is filtered to this interface, but the cache can hold more than one
+        // entry that looks joined, so the entry has to be the access point the station
+        // dump named. An IBSS has no such peer - the cell's address belongs to no one
+        // station - so a joined cell is taken on its status alone.
+        let ours = match status {
+            Some(NL80211_BSS_STATUS_ASSOCIATED) => peer == Some(bssid),
+            Some(NL80211_BSS_STATUS_IBSS_JOINED) => true,
+            _ => false,
+        };
+        if !ours {
             continue;
         }
 
@@ -398,7 +449,10 @@ fn ssid_from_ies(mut rest: &[u8]) -> Option<String> {
         }
         let value = &rest[..length];
         if kind == 0 {
-            return Some(String::from_utf8_lossy(value).into_owned());
+            // A hidden network's beacon carries the element with nothing in it, which is
+            // the absence of a name rather than a network named "". Saying so here is what
+            // lets the other set of information elements be tried.
+            return (!value.is_empty()).then(|| String::from_utf8_lossy(value).into_owned());
         }
         rest = &rest[length..];
     }
@@ -485,53 +539,161 @@ mod tests {
         );
     }
 
+    const AP: [u8; 6] = [1, 2, 3, 4, 5, 6];
+    const OTHER_AP: [u8; 6] = [6, 5, 4, 3, 2, 1];
+
     #[test]
     fn a_station_reply_carries_the_cache_key_and_signal() {
         let mut details = Vec::new();
         details.extend_from_slice(&attribute(NL80211_STA_INFO_SIGNAL, &[(-45i8) as u8]));
 
         let mut reply = genl_header(NL80211_CMD_GET_STATION, 0).to_vec();
-        reply.extend_from_slice(&attribute(NL80211_ATTR_MAC, &[1, 2, 3, 4, 5, 6]));
+        reply.extend_from_slice(&attribute(NL80211_ATTR_MAC, &AP));
         reply.extend_from_slice(&attribute(NL80211_ATTR_STA_INFO | 0x8000, &details));
 
         assert_eq!(
             station(&reply),
             Some(Station {
-                bssid: Some([1, 2, 3, 4, 5, 6]),
+                bssid: AP,
                 signal: Some(-45),
             })
         );
     }
 
     #[test]
+    fn a_station_with_no_signal_is_still_an_association() {
+        let mut reply = genl_header(NL80211_CMD_GET_STATION, 0).to_vec();
+        reply.extend_from_slice(&attribute(NL80211_ATTR_MAC, &AP));
+        reply.extend_from_slice(&attribute(NL80211_ATTR_STA_INFO | 0x8000, &[]));
+
+        assert_eq!(
+            station(&reply),
+            Some(Station {
+                bssid: AP,
+                signal: None,
+            })
+        );
+    }
+
+    #[test]
+    fn a_station_reply_without_a_peer_address_is_no_station_at_all() {
+        let mut details = Vec::new();
+        details.extend_from_slice(&attribute(NL80211_STA_INFO_SIGNAL, &[(-45i8) as u8]));
+
+        let mut reply = genl_header(NL80211_CMD_GET_STATION, 0).to_vec();
+        reply.extend_from_slice(&attribute(NL80211_ATTR_STA_INFO | 0x8000, &details));
+
+        assert_eq!(station(&reply), None);
+    }
+
+    #[test]
     fn an_ssid_cache_entry_belongs_to_one_interface_and_access_point() {
         let cached = CachedNetwork {
             ifindex: 3,
-            bssid: [1, 2, 3, 4, 5, 6],
-            ssid: "Cafe".to_string(),
+            bssid: AP,
+            ssid: Some("Cafe".to_string()),
+            tries: 0,
         };
-        assert!(cached.is_for(3, [1, 2, 3, 4, 5, 6]));
-        assert!(!cached.is_for(4, [1, 2, 3, 4, 5, 6]));
-        assert!(!cached.is_for(3, [6, 5, 4, 3, 2, 1]));
+        assert!(cached.is_for(3, AP));
+        assert!(!cached.is_for(4, AP));
+        assert!(!cached.is_for(3, OTHER_AP));
+    }
+
+    #[test]
+    fn a_name_is_held_until_the_access_point_changes() {
+        let cached = CachedNetwork {
+            ifindex: 3,
+            bssid: AP,
+            ssid: Some("Cafe".to_string()),
+            tries: 0,
+        };
+        assert_eq!(
+            lookup(Some(&cached), 3, AP),
+            Lookup::Cached(Some("Cafe".to_string()))
+        );
+        assert_eq!(
+            lookup(Some(&cached), 3, OTHER_AP),
+            Lookup::Dump {
+                tries: UNNAMED_TRIES
+            }
+        );
+        assert_eq!(
+            lookup(None, 3, AP),
+            Lookup::Dump {
+                tries: UNNAMED_TRIES
+            }
+        );
+    }
+
+    /// An association appears a moment before the scan cache can name it, so a miss is
+    /// worth another look - but only a few, or every tick pays for the dump.
+    #[test]
+    fn an_association_with_no_name_is_retried_and_then_let_be() {
+        let mut cache = None;
+        let mut dumps = 0;
+        for _ in 0..20 {
+            if let Lookup::Dump { tries } = lookup(cache.as_ref(), 3, AP) {
+                dumps += 1;
+                cache = Some(CachedNetwork {
+                    ifindex: 3,
+                    bssid: AP,
+                    ssid: None,
+                    tries,
+                });
+            }
+        }
+        assert_eq!(dumps, 1 + UNNAMED_TRIES as usize);
     }
 
     #[test]
     fn only_an_associated_scan_result_supplies_its_ssid() {
-        let reply = scan_reply(NL80211_BSS_STATUS_ASSOCIATED, Some(b"\x00\x04Cafe"), None);
-        assert_eq!(associated_ssid(&reply).as_deref(), Some("Cafe"));
+        let reply = scan_reply(
+            AP,
+            NL80211_BSS_STATUS_ASSOCIATED,
+            Some(b"\x00\x04Cafe"),
+            None,
+        );
+        assert_eq!(associated_ssid(&reply, AP).as_deref(), Some("Cafe"));
 
-        let authenticated = scan_reply(0, Some(b"\x00\x0aNot joined"), None);
-        assert_eq!(associated_ssid(&authenticated), None);
+        let authenticated = scan_reply(AP, 0, Some(b"\x00\x0aNot joined"), None);
+        assert_eq!(associated_ssid(&authenticated, AP), None);
     }
 
     #[test]
+    fn an_associated_entry_for_another_access_point_is_not_ours() {
+        let reply = scan_reply(
+            OTHER_AP,
+            NL80211_BSS_STATUS_ASSOCIATED,
+            Some(b"\x00\x08Next door"),
+            None,
+        );
+        assert_eq!(associated_ssid(&reply, AP), None);
+    }
+
+    /// An IBSS cell's address belongs to no one station, so the peer cannot be matched
+    /// against it and the status has to be enough.
+    #[test]
     fn beacon_ies_supply_the_ssid_when_probe_ies_do_not() {
         let reply = scan_reply(
+            OTHER_AP,
             NL80211_BSS_STATUS_IBSS_JOINED,
             Some(&[1, 1, 0x82]),
             Some(b"\x00\x04mesh"),
         );
-        assert_eq!(associated_ssid(&reply).as_deref(), Some("mesh"));
+        assert_eq!(associated_ssid(&reply, AP).as_deref(), Some("mesh"));
+    }
+
+    #[test]
+    fn a_hidden_networks_empty_name_falls_through_to_the_other_elements() {
+        assert_eq!(ssid_from_ies(&[0, 0]), None);
+
+        let reply = scan_reply(
+            AP,
+            NL80211_BSS_STATUS_ASSOCIATED,
+            Some(b"\x00\x00"),
+            Some(b"\x00\x04Cafe"),
+        );
+        assert_eq!(associated_ssid(&reply, AP).as_deref(), Some("Cafe"));
     }
 
     #[test]
@@ -540,8 +702,14 @@ mod tests {
         assert_eq!(ssid_from_ies(&[1]), None);
     }
 
-    fn scan_reply(status: u32, probe_ies: Option<&[u8]>, beacon_ies: Option<&[u8]>) -> Vec<u8> {
+    fn scan_reply(
+        bssid: [u8; 6],
+        status: u32,
+        probe_ies: Option<&[u8]>,
+        beacon_ies: Option<&[u8]>,
+    ) -> Vec<u8> {
         let mut bss = Vec::new();
+        bss.extend_from_slice(&attribute(NL80211_BSS_BSSID, &bssid));
         bss.extend_from_slice(&attribute(NL80211_BSS_STATUS, &status.to_ne_bytes()));
         if let Some(ies) = probe_ies {
             bss.extend_from_slice(&attribute(NL80211_BSS_INFORMATION_ELEMENTS, ies));
