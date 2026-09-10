@@ -10,6 +10,7 @@
 //! the requests return - so it happens on the collector's own tick like any other read.
 
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result, bail};
 
@@ -32,6 +33,8 @@ const NL80211_BSS_BSSID: u16 = 1;
 const NL80211_BSS_INFORMATION_ELEMENTS: u16 = 6;
 const NL80211_BSS_STATUS: u16 = 9;
 const NL80211_BSS_BEACON_IES: u16 = 11;
+/// The address of the whole multi-link device, when the BSS is one link of one.
+const NL80211_BSS_MLD_ADDR: u16 = 22;
 const NL80211_BSS_STATUS_ASSOCIATED: u32 = 1;
 const NL80211_BSS_STATUS_IBSS_JOINED: u32 = 2;
 
@@ -55,13 +58,21 @@ pub struct Wireless {
     network: Option<CachedNetwork>,
 }
 
-/// How many further reads may dump the scan cache for an association it could not name.
+/// Dumps in a row that find no name before the retry slows to [`UNNAMED_INTERVAL`].
 ///
 /// A station appears a moment before the scan cache is stamped with the association, so
-/// the name is usually there on the next read. A handful of attempts covers that; past
-/// them the association is one the cache has no name for, and asking again every tick
-/// would cost the dump this cache exists to avoid.
-const UNNAMED_TRIES: u8 = 3;
+/// the name is usually there on the next read; a few immediate retries cover that.
+const UNNAMED_TRIES: u32 = 3;
+
+/// How long an association the scan cache could not name waits before it is asked about
+/// again.
+///
+/// The retry never stops, because the reason for the miss is not always the association's
+/// own: a cache the kernel has not filled in yet fills in later, and a name that arrives
+/// late still belongs on the bar. Waiting this long between attempts is what keeps that
+/// from costing a dump on every tick, and it is a wait rather than a count of reads so
+/// that the cost does not follow whatever `interval` the module was given.
+const UNNAMED_INTERVAL: Duration = Duration::from_secs(30);
 
 /// What the last scan-cache dump found, and which association it was for.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -71,7 +82,10 @@ struct CachedNetwork {
     /// Kept even when it is `None`: an association the scan cache cannot name is an answer
     /// too, and one worth remembering rather than dumping the whole cache for again.
     ssid: Option<String>,
-    tries: u8,
+    /// Dumps in a row that have found no name for this association, and when the last of
+    /// them was. Both are only ever read while `ssid` is `None`.
+    misses: u32,
+    asked: Instant,
 }
 
 impl CachedNetwork {
@@ -85,30 +99,30 @@ impl CachedNetwork {
 enum Lookup {
     /// The cache already answers for this association.
     Cached(Option<String>),
-    /// The scan cache has to be read, and the answer remembered with this many tries left.
-    Dump { tries: u8 },
+    /// The scan cache has to be read, after this many dumps that found nothing.
+    Dump { misses: u32 },
 }
 
 /// Decide between the cache and a scan-cache dump.
 ///
-/// Split out from [`Wireless::state_of`] because it is the whole of the fix a socket is not
-/// needed to test: a name is held until the access point changes, and an association with
-/// no name is retried a few times and then let be.
-fn lookup(cache: Option<&CachedNetwork>, ifindex: u32, bssid: [u8; 6]) -> Lookup {
-    match cache {
-        Some(network) if network.is_for(ifindex, bssid) => {
-            if network.ssid.is_some() || network.tries == 0 {
-                Lookup::Cached(network.ssid.clone())
-            } else {
-                Lookup::Dump {
-                    tries: network.tries - 1,
-                }
-            }
-        }
-        _ => Lookup::Dump {
-            tries: UNNAMED_TRIES,
-        },
+/// Split out from [`Wireless::state_of`] because it is the whole of the decision a socket
+/// is not needed to test: a name is held until the access point changes, and an
+/// association with no name is retried at once a few times and slowly after that.
+fn lookup(cache: Option<&CachedNetwork>, ifindex: u32, bssid: [u8; 6], now: Instant) -> Lookup {
+    let Some(network) = cache.filter(|network| network.is_for(ifindex, bssid)) else {
+        return Lookup::Dump { misses: 0 };
+    };
+    if network.ssid.is_some() {
+        return Lookup::Cached(network.ssid.clone());
     }
+    if network.misses < UNNAMED_TRIES
+        || now.saturating_duration_since(network.asked) >= UNNAMED_INTERVAL
+    {
+        return Lookup::Dump {
+            misses: network.misses,
+        };
+    }
+    Lookup::Cached(None)
 }
 
 /// The access point a card is talking to, as a station dump describes it.
@@ -147,9 +161,10 @@ impl Wireless {
             return Ok((None, None));
         };
 
-        let tries = match lookup(self.network.as_ref(), ifindex, station.bssid) {
+        let now = Instant::now();
+        let misses = match lookup(self.network.as_ref(), ifindex, station.bssid, now) {
             Lookup::Cached(ssid) => return Ok((ssid, station.signal)),
-            Lookup::Dump { tries } => tries,
+            Lookup::Dump { misses } => misses,
         };
 
         let ssid = self.network_of(ifindex, station.bssid)?;
@@ -157,7 +172,8 @@ impl Wireless {
             ifindex,
             bssid: station.bssid,
             ssid: ssid.clone(),
-            tries,
+            misses: if ssid.is_some() { 0 } else { misses + 1 },
+            asked: now,
         });
         Ok((ssid, station.signal))
     }
@@ -399,12 +415,14 @@ fn associated_ssid(payload: &[u8], bssid: [u8; 6]) -> Option<String> {
         }
 
         let mut peer = None;
+        let mut mld = None;
         let mut status = None;
         let mut information = None;
         let mut beacon = None;
         for (inner, bytes) in attributes(value) {
             match inner {
                 NL80211_BSS_BSSID if bytes.len() >= 6 => peer = bytes[..6].try_into().ok(),
+                NL80211_BSS_MLD_ADDR if bytes.len() >= 6 => mld = bytes[..6].try_into().ok(),
                 NL80211_BSS_STATUS if bytes.len() >= 4 => {
                     status = Some(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
                 }
@@ -415,10 +433,12 @@ fn associated_ssid(payload: &[u8], bssid: [u8; 6]) -> Option<String> {
         }
         // The dump is filtered to this interface, but the cache can hold more than one
         // entry that looks joined, so the entry has to be the access point the station
-        // dump named. An IBSS has no such peer - the cell's address belongs to no one
-        // station - so a joined cell is taken on its status alone.
+        // dump named. Either address answers to that name: a multi-link association is a
+        // station at the device's own address, while each BSS behind it is one link with a
+        // BSSID of its own. An IBSS has no such peer at all - the cell's address belongs
+        // to no one station - so a joined cell is taken on its status alone.
         let ours = match status {
-            Some(NL80211_BSS_STATUS_ASSOCIATED) => peer == Some(bssid),
+            Some(NL80211_BSS_STATUS_ASSOCIATED) => peer == Some(bssid) || mld == Some(bssid),
             Some(NL80211_BSS_STATUS_IBSS_JOINED) => true,
             _ => false,
         };
@@ -588,12 +608,7 @@ mod tests {
 
     #[test]
     fn an_ssid_cache_entry_belongs_to_one_interface_and_access_point() {
-        let cached = CachedNetwork {
-            ifindex: 3,
-            bssid: AP,
-            ssid: Some("Cafe".to_string()),
-            tries: 0,
-        };
+        let cached = named("Cafe");
         assert!(cached.is_for(3, AP));
         assert!(!cached.is_for(4, AP));
         assert!(!cached.is_for(3, OTHER_AP));
@@ -601,48 +616,83 @@ mod tests {
 
     #[test]
     fn a_name_is_held_until_the_access_point_changes() {
-        let cached = CachedNetwork {
-            ifindex: 3,
-            bssid: AP,
-            ssid: Some("Cafe".to_string()),
-            tries: 0,
-        };
+        let cached = named("Cafe");
+        let much_later = cached.asked + UNNAMED_INTERVAL * 100;
         assert_eq!(
-            lookup(Some(&cached), 3, AP),
+            lookup(Some(&cached), 3, AP, much_later),
             Lookup::Cached(Some("Cafe".to_string()))
         );
         assert_eq!(
-            lookup(Some(&cached), 3, OTHER_AP),
-            Lookup::Dump {
-                tries: UNNAMED_TRIES
+            lookup(Some(&cached), 3, OTHER_AP, much_later),
+            Lookup::Dump { misses: 0 }
+        );
+        assert_eq!(lookup(None, 3, AP, much_later), Lookup::Dump { misses: 0 });
+    }
+
+    /// An association appears a moment before the scan cache can name it, so the first
+    /// misses are retried at once - but not every tick after that, or the cache saves
+    /// nothing at all.
+    #[test]
+    fn an_association_with_no_name_is_retried_at_once_only_so_often() {
+        let start = Instant::now();
+        let mut cache = None;
+        let mut dumps = 0;
+        // A read every two seconds, which is the interval the module ships with, for as
+        // long as one wait lasts: what happens after it is the next test's business.
+        for read in 0..UNNAMED_INTERVAL.as_secs() / 2 {
+            let now = start + Duration::from_secs(read * 2);
+            if let Lookup::Dump { misses } = lookup(cache.as_ref(), 3, AP, now) {
+                dumps += 1;
+                cache = Some(unnamed(misses + 1, now));
             }
+        }
+        assert_eq!(dumps, UNNAMED_TRIES);
+    }
+
+    /// The scan cache is not always slow for a reason of the association's own, so a name
+    /// that turns up late has to reach the bar rather than being shut out for good.
+    #[test]
+    fn an_association_with_no_name_is_asked_about_again_later() {
+        let asked = Instant::now();
+        let cache = unnamed(UNNAMED_TRIES, asked);
+        assert_eq!(
+            lookup(Some(&cache), 3, AP, asked + UNNAMED_INTERVAL / 2),
+            Lookup::Cached(None)
         );
         assert_eq!(
-            lookup(None, 3, AP),
+            lookup(Some(&cache), 3, AP, asked + UNNAMED_INTERVAL),
             Lookup::Dump {
-                tries: UNNAMED_TRIES
+                misses: UNNAMED_TRIES
+            }
+        );
+
+        let settled = unnamed(UNNAMED_TRIES * 1000, asked);
+        assert_eq!(
+            lookup(Some(&settled), 3, AP, asked + UNNAMED_INTERVAL),
+            Lookup::Dump {
+                misses: UNNAMED_TRIES * 1000
             }
         );
     }
 
-    /// An association appears a moment before the scan cache can name it, so a miss is
-    /// worth another look - but only a few, or every tick pays for the dump.
-    #[test]
-    fn an_association_with_no_name_is_retried_and_then_let_be() {
-        let mut cache = None;
-        let mut dumps = 0;
-        for _ in 0..20 {
-            if let Lookup::Dump { tries } = lookup(cache.as_ref(), 3, AP) {
-                dumps += 1;
-                cache = Some(CachedNetwork {
-                    ifindex: 3,
-                    bssid: AP,
-                    ssid: None,
-                    tries,
-                });
-            }
+    fn named(ssid: &str) -> CachedNetwork {
+        CachedNetwork {
+            ifindex: 3,
+            bssid: AP,
+            ssid: Some(ssid.to_string()),
+            misses: 0,
+            asked: Instant::now(),
         }
-        assert_eq!(dumps, 1 + UNNAMED_TRIES as usize);
+    }
+
+    fn unnamed(misses: u32, asked: Instant) -> CachedNetwork {
+        CachedNetwork {
+            ifindex: 3,
+            bssid: AP,
+            ssid: None,
+            misses,
+            asked,
+        }
     }
 
     #[test]
@@ -694,6 +744,34 @@ mod tests {
             Some(b"\x00\x04Cafe"),
         );
         assert_eq!(associated_ssid(&reply, AP).as_deref(), Some("Cafe"));
+    }
+
+    /// A multi-link association is a station at the device's own address, and the BSS
+    /// behind it is one link with a BSSID that is not that address.
+    #[test]
+    fn a_multi_link_association_is_found_by_the_devices_own_address() {
+        const MLD: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];
+
+        let mut bss = Vec::new();
+        bss.extend_from_slice(&attribute(NL80211_BSS_BSSID, &AP));
+        bss.extend_from_slice(&attribute(NL80211_BSS_MLD_ADDR, &MLD));
+        bss.extend_from_slice(&attribute(
+            NL80211_BSS_STATUS,
+            &NL80211_BSS_STATUS_ASSOCIATED.to_ne_bytes(),
+        ));
+        bss.extend_from_slice(&attribute(
+            NL80211_BSS_INFORMATION_ELEMENTS,
+            b"\x00\x04Cafe",
+        ));
+
+        let mut reply = genl_header(NL80211_CMD_GET_SCAN, 0).to_vec();
+        reply.extend_from_slice(&attribute(NL80211_ATTR_BSS | 0x8000, &bss));
+
+        assert_eq!(associated_ssid(&reply, MLD).as_deref(), Some("Cafe"));
+        // The link's own address still answers, which is what a station dump gives when
+        // the association is not a multi-link one.
+        assert_eq!(associated_ssid(&reply, AP).as_deref(), Some("Cafe"));
+        assert_eq!(associated_ssid(&reply, OTHER_AP), None);
     }
 
     #[test]
