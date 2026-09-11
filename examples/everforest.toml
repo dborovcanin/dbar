@@ -23,17 +23,17 @@ icon_size = 17
 
 [colors]
 # Everforest dark, medium contrast.
-base = "#2d353b"      # bg0
-surface = "#343f44"   # bg1
-raised = "#3d484d"    # bg2
-line = "#475258"      # bg3
-text = "#d3c6aa"      # fg
-subtext = "#859289"   # grey1
+base = "#2d353b"     # bg0
+surface = "#343f44"  # bg1
+raised = "#3d484d"   # bg2
+line = "#475258"     # bg3
+text = "#d3c6aa"     # fg
+subtext = "#859289"  # grey1
 green = "#a7c080"
 aqua = "#83c092"
 blue = "#7fbbb3"
-warning = "#dbbc7f"   # yellow
-critical = "#e67e80"  # red
+warning = "#dbbc7f"  # yellow
+critical = "#e67e80" # red
 
 [left]
 groups = ["desktop"]
@@ -123,6 +123,9 @@ radius = 10
 modules = ["cpu", "memory", "temperature", "network"]
 opacity = 0.92
 radius = 10
+collapsible = true
+collapse_button = "right"
+collapse_animation = "180ms"
 
 [group.system.separator]
 shape = "round"
@@ -130,6 +133,11 @@ width = 14
 direction = "right"
 color = "previous"
 overlap = 1
+
+[group.system.collapsed]
+style = "tile"
+icon = "arch"
+
 
 [group.power]
 modules = ["volume", "brightness", "battery"]
