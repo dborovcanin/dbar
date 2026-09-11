@@ -261,12 +261,16 @@ sudo make install  # installs /usr/bin/dbar (override with PREFIX=)
 sudo make uninstall
 ```
 
-Maintainers publish the version in `Cargo.toml` with `make release`. The command
-requires a clean `main` at `origin/main`, builds the locked release, pushes an
-annotated `v<version>` tag, then waits for GitHub Actions to build
-`dbar-linux-x86_64` in Arch Linux, create the GitHub release, and attach the
-binary and its SHA-256 checksum. `make release-bundle` builds equivalent local
-assets without tagging or publishing anything.
+Releases are made by pushing a tag. `make release` checks that `main` is clean
+and matches `origin/main`, then tags the version in `Cargo.toml` as `v<version>`
+and pushes it; `git push origin v0.1.0` by hand does the same thing. The tag is
+what GitHub Actions reacts to: it builds `dbar-linux-x86_64` in Arch Linux,
+creates the release, and attaches the binary and its SHA-256 checksum. Nothing
+is built or uploaded from a maintainer's machine, and a failed run is re-run
+from the Actions tab rather than re-tagged.
+
+`make release-bundle` builds the same binary and checksum locally, under
+`target/release-assets`, without tagging or publishing anything.
 
 ## Run
 

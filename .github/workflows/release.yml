@@ -1,12 +1,11 @@
 name: Release
 
+# A v* tag is the whole trigger: pushing one builds the binary and publishes the
+# release. Nothing is built on a maintainer's machine, and nothing has to be
+# dispatched by hand.
 on:
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Existing version tag to publish
-        required: true
-        type: string
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: write
@@ -15,35 +14,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  linux-x86_64:
+  build:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     timeout-minutes: 30
     steps:
+      # Everything the build links against: xkbcommon for the toolkit's keyboard
+      # handling, wayland for the client, pipewire for the volume. libspa
+      # generates its bindings with clang.
       - name: Install the Arch Linux build environment
         run: |
           pacman -Syu --noconfirm --needed \
             git \
-            curl \
             clang \
             pkgconf \
             libxkbcommon \
             wayland \
-            libpipewire \
-            github-cli
+            libpipewire
 
       - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.tag }}
-
-      - name: Require a version tag
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
-        run: |
-          case "$RELEASE_TAG" in
-            v*) ;;
-            *) echo "release workflow must run against a v* tag" >&2; exit 1 ;;
-          esac
 
       - uses: dtolnay/rust-toolchain@1.89.0
 
@@ -52,26 +41,28 @@ jobs:
       - name: Build the downloadable binary
         run: |
           cargo build --release --locked
-          mkdir -p target/release-assets
-          install -m 755 target/release/dbar target/release-assets/dbar-linux-x86_64
-          cd target/release-assets
+          mkdir -p dist
+          install -m755 target/release/dbar dist/dbar-linux-x86_64
+          cd dist
           sha256sum dbar-linux-x86_64 >dbar-linux-x86_64.sha256
 
-      - name: Create the GitHub release and upload the assets
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ inputs.tag }}
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          tag=$RELEASE_TAG
-          asset=target/release-assets/dbar-linux-x86_64
-          checksum=$asset.sha256
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "$asset" "$checksum" --clobber
-          else
-            gh release create "$tag" "$asset" "$checksum" \
-              --verify-tag \
-              --generate-notes \
-              --title "$tag"
-          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dbar-linux-x86_64
+          path: dist/dbar-linux-x86_64*
+
+  # Publishing runs outside the container, so the release action gets the
+  # runner's own node rather than whatever the Arch image happens to carry.
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create the GitHub release and attach the assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dbar-linux-x86_64*
+          generate_release_notes: true

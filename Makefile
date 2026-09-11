@@ -41,10 +41,17 @@ uninstall:
 clean:
 	$(CARGO) clean
 
-# Build the downloadable Linux binary and its checksum without publishing it.
+# The same binary and checksum the Release workflow uploads, built locally and
+# published nowhere - for checking what a release would ship.
 release-bundle:
-	CARGO=$(CARGO) sh scripts/release.sh --bundle-only
+	$(CARGO) build --release --locked
+	@mkdir -p target/release-assets
+	install -m755 target/release/$(BIN) target/release-assets/$(BIN)-linux-x86_64
+	@cd target/release-assets && \
+		sha256sum $(BIN)-linux-x86_64 >$(BIN)-linux-x86_64.sha256
+	@echo "Bundled target/release-assets/$(BIN)-linux-x86_64"
 
-# Build, tag the version from Cargo.toml, push the tag, and publish the assets.
+# Tag the version in Cargo.toml and push it. GitHub Actions builds and
+# publishes the release from that tag.
 release:
-	CARGO=$(CARGO) sh scripts/release.sh
+	sh scripts/release.sh
