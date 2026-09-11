@@ -1113,7 +1113,7 @@ impl Pixels {
         if self == Pixels::AsWritten {
             return;
         }
-        for px in canvas.chunks_exact_mut(4) {
+        for px in canvas.as_chunks_mut::<4>().0 {
             px.swap(0, 2);
         }
     }
@@ -1876,7 +1876,12 @@ format = "$text"
             written, swapped,
             "the island is not grey, so the two must differ"
         );
-        for (a, b) in written.chunks_exact(4).zip(swapped.chunks_exact(4)) {
+        for (a, b) in written
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(swapped.as_chunks::<4>().0)
+        {
             assert_eq!(
                 [a[2], a[1], a[0], a[3]],
                 [b[0], b[1], b[2], b[3]],

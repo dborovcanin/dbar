@@ -530,7 +530,7 @@ fn rasterise(
         let (sr, sg, sb) = (up(c.r()), up(c.g()), up(c.b()));
         for row in 0..h as usize {
             let line = (((y - min_y) as usize + row) * width + (x - min_x) as usize) * 4;
-            for px in rgba[line..line + w as usize * 4].chunks_exact_mut(4) {
+            for px in rgba[line..line + w as usize * 4].as_chunks_mut::<4>().0 {
                 px[0] = over(sr, u32::from(px[0]), a) as u8;
                 px[1] = over(sg, u32::from(px[1]), a) as u8;
                 px[2] = over(sb, u32::from(px[2]), a) as u8;

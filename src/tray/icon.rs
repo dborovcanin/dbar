@@ -76,7 +76,7 @@ fn better_size(candidate: u32, current: u32, target: u32) -> bool {
 fn argb_to_rgba(pixels: &[u8], width: u32, height: u32) -> Vec<u8> {
     let count = width as usize * height as usize;
     let mut out = Vec::with_capacity(count * 4);
-    for pixel in pixels.chunks_exact(4).take(count) {
+    for pixel in pixels.as_chunks::<4>().0.iter().take(count) {
         let (a, r, g, b) = (pixel[0], pixel[1], pixel[2], pixel[3]);
         let premultiply = |c: u8| ((u32::from(c) * u32::from(a) + 127) / 255) as u8;
         out.extend_from_slice(&[premultiply(r), premultiply(g), premultiply(b), a]);
@@ -480,7 +480,13 @@ mod tests {
             <defs><style type="text/css">.Text { color:#00ff00; }</style></defs>
             <path style="fill:currentColor" class="Text" d="M 0 0 H 10 V 10 H 0 Z"/></svg>"##;
         let raster = from_svg(svg, 4).expect("a styled path renders");
-        let opaque = raster.pixels.chunks_exact(4).filter(|p| p[3] > 0).count();
+        let opaque = raster
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|p| p[3] > 0)
+            .count();
         assert!(opaque > 0, "the path was drawn as nothing");
         assert_eq!(
             &raster.pixels[..4],
@@ -498,7 +504,9 @@ mod tests {
         let raster = from_svg(svg, 20).expect("a wide rectangle renders");
         let row = |y: usize| {
             raster.pixels[y * 20 * 4..(y + 1) * 20 * 4]
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|p| p[3] > 0)
                 .count()
         };

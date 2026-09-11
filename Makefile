@@ -6,7 +6,7 @@ BIN   := dbar
 PREFIX ?= /usr
 DESTDIR ?=
 
-.PHONY: all prod run check test fmt clippy clean install uninstall
+.PHONY: all prod run check test fmt clippy clean install uninstall release-bundle release
 
 # Fast iteration build.
 all:
@@ -40,3 +40,11 @@ uninstall:
 
 clean:
 	$(CARGO) clean
+
+# Build the downloadable Linux binary and its checksum without publishing it.
+release-bundle:
+	CARGO=$(CARGO) sh scripts/release.sh --bundle-only
+
+# Build, tag the version from Cargo.toml, push the tag, and publish the assets.
+release:
+	CARGO=$(CARGO) sh scripts/release.sh

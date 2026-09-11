@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to publish
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 30
+    steps:
+      - name: Install the Arch Linux build environment
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git \
+            curl \
+            clang \
+            pkgconf \
+            libxkbcommon \
+            wayland \
+            libpipewire \
+            github-cli
+
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Require a version tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          case "$RELEASE_TAG" in
+            v*) ;;
+            *) echo "release workflow must run against a v* tag" >&2; exit 1 ;;
+          esac
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the downloadable binary
+        run: |
+          cargo build --release --locked
+          mkdir -p target/release-assets
+          install -m 755 target/release/dbar target/release-assets/dbar-linux-x86_64
+          cd target/release-assets
+          sha256sum dbar-linux-x86_64 >dbar-linux-x86_64.sha256
+
+      - name: Create the GitHub release and upload the assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          tag=$RELEASE_TAG
+          asset=target/release-assets/dbar-linux-x86_64
+          checksum=$asset.sha256
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" "$checksum" --clobber
+          else
+            gh release create "$tag" "$asset" "$checksum" \
+              --verify-tag \
+              --generate-notes \
+              --title "$tag"
+          fi

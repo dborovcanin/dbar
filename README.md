@@ -48,6 +48,16 @@ opt-in, and a bar that does not name one never starts one.
 
 ## Quick start
 
+Download the latest prebuilt Arch Linux binary (x86-64):
+
+```sh
+curl -LO https://github.com/dborovcanin/dbar/releases/latest/download/dbar-linux-x86_64
+chmod +x dbar-linux-x86_64
+sudo install -m755 dbar-linux-x86_64 /usr/local/bin/dbar
+```
+
+Or build it from source:
+
 ```sh
 git clone https://github.com/dborovcanin/dbar && cd dbar
 make prod                                          # optimized build
@@ -57,9 +67,11 @@ sudo make install                                  # keep it: /usr/bin/dbar
 
 ### What it needs
 
-A compositor with `wlr-layer-shell` — Sway or SwayFX — and Rust 1.89 or newer.
-The build links xkbcommon, Wayland and PipeWire, and generates bindings for the
-last of those with `clang`:
+A compositor with `wlr-layer-shell` — Sway or SwayFX. The initial downloaded
+binary targets current Arch Linux and uses its system xkbcommon, Wayland and
+PipeWire libraries, which are normally already present with Sway. Building from
+source additionally needs Rust 1.89 or newer and `clang` to generate the
+PipeWire bindings:
 
 ```sh
 # Arch
@@ -248,6 +260,13 @@ make prod          # optimized build
 sudo make install  # installs /usr/bin/dbar (override with PREFIX=)
 sudo make uninstall
 ```
+
+Maintainers publish the version in `Cargo.toml` with `make release`. The command
+requires a clean `main` at `origin/main`, builds the locked release, pushes an
+annotated `v<version>` tag, then waits for GitHub Actions to build
+`dbar-linux-x86_64` in Arch Linux, create the GitHub release, and attach the
+binary and its SHA-256 checksum. `make release-bundle` builds equivalent local
+assets without tagging or publishing anything.
 
 ## Run
 
