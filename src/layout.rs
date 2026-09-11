@@ -7,7 +7,7 @@ use crate::collect::{Registry, Which};
 use crate::color::Color;
 use crate::config::{
     Config, Ends, Group as GroupCfg, Module as ModuleCfg, Scope, Separator, SeparatorColor, Source,
-    StateFlags, Style,
+    StateFlags, Style, WorkspaceIcon,
 };
 use crate::format::Format;
 use crate::geometry::{Direction, EdgeShape, Edges, SeparatorShape};
@@ -870,6 +870,8 @@ struct Fitted {
     style: Style,
     hover_style: Option<Style>,
     icon: Option<(Icon, usize)>,
+    /// A source-owned native icon follows its wording; configured style icons lead it.
+    icon_after_text: bool,
     /// What survived stripping and truncation, which is what is actually drawn.
     content: String,
     text_width: f32,
@@ -904,6 +906,7 @@ struct SizedModule {
     /// Width of the icon plus its gap, or zero.
     icon_advance: f32,
     icon: Option<(Icon, usize)>,
+    icon_after_text: bool,
     /// Pixels for an icon that arrived as a picture, carried beside `icon`.
     art: Option<Arc<crate::icon::Raster>>,
     text: String,
@@ -940,6 +943,8 @@ struct Candidate<'g> {
     /// An icon the source brought with it, as pixels, for a source whose artwork is not
     /// dbar's to choose.
     art: Option<Arc<crate::icon::Raster>>,
+    /// A native icon selected by the source rather than by the module's style.
+    icon: Option<Icon>,
 }
 
 /// Everything a group shows, in the order the group asks for.
@@ -965,6 +970,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
         action: item.action.clone(),
         pages: 1,
         art: None,
+        icon: None,
     };
 
     if group.wildcard {
@@ -997,12 +1003,14 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                             action: None,
                             pages: 1,
                             art: None,
+                            icon: None,
                         });
                     }
                     continue;
                 };
                 out.push(Candidate {
                     art: None,
+                    icon: None,
                     module,
                     text: wording(module, inputs.alt).render(&reading.fields),
                     flags: StateFlags {
@@ -1043,6 +1051,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     }
                     out.push(Candidate {
                         art: None,
+                        icon: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
@@ -1077,6 +1086,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     fields.set_primary("index");
                     out.push(Candidate {
                         art: None,
+                        icon: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
@@ -1099,6 +1109,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     fields.set("mode", Value::Text(mode.clone()));
                     out.push(Candidate {
                         art: None,
+                        icon: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
@@ -1134,6 +1145,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     fields.set("status", Value::Text(item.status.name().to_string()));
                     out.push(Candidate {
                         art: item.icon.clone(),
+                        icon: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags {
@@ -1150,17 +1162,28 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     });
                 }
             }
-            Source::SwayWorkspaces(scope) => {
+            Source::SwayWorkspaces(view) => {
                 for workspace in &inputs.sway.workspaces {
-                    if !inputs.on_this_screen(*scope, &workspace.output) {
+                    if !inputs.on_this_screen(view.scope, &workspace.output) {
                         continue;
                     }
                     let mut fields = Fields::default();
                     fields.set("name", Value::Text(workspace.name.clone()));
+                    let mut rendered = wording(module, inputs.alt).render(&fields);
+                    let icon = match view.icon(&workspace.name) {
+                        Some(WorkspaceIcon::Native(icon)) => Some(*icon),
+                        Some(WorkspaceIcon::Text(icon)) if !icon.is_empty() => {
+                            rendered.push(' ');
+                            rendered.push_str(icon);
+                            None
+                        }
+                        _ => None,
+                    };
                     out.push(Candidate {
                         art: None,
+                        icon,
                         module,
-                        text: wording(module, inputs.alt).render(&fields),
+                        text: rendered,
                         flags: StateFlags {
                             urgent: workspace.urgent,
                             focused: workspace.focused,
@@ -1246,6 +1269,7 @@ fn size_group(
             hover_style: None,
             icon_advance,
             icon: Some((icon, 0)),
+            icon_after_text: false,
             art: None,
             text: String::new(),
             style,
@@ -1273,6 +1297,7 @@ fn size_group(
             action,
             pages,
             art,
+            icon: source_icon,
         } = candidate;
         // Whether this module's program is out, which the spinner is drawn for. The check
         // is skipped outright while nothing is waiting, which is nearly always.
@@ -1346,14 +1371,19 @@ fn size_group(
                 style,
                 ..Fitted::default()
             };
-            if raw.is_empty() && !folded && !waiting && art.is_none() {
+            if raw.is_empty() && !folded && !waiting && art.is_none() && source_icon.is_none() {
                 return hidden;
             }
             let mut content = strip(raw);
             // Stripping can empty the text entirely, which is fine when an icon is left to
             // carry the module: a muted volume is the icon and nothing else, and so is a
             // command that has not answered yet.
-            if content.is_empty() && style.icon.is_none() && !waiting && art.is_none() {
+            if content.is_empty()
+                && style.icon.is_none()
+                && !waiting
+                && art.is_none()
+                && source_icon.is_none()
+            {
                 return hidden;
             }
 
@@ -1382,17 +1412,21 @@ fn size_group(
             // A picture the source handed over stands in for whatever icon the style
             // names: an application's own artwork is the thing a tray module exists to
             // show.
-            let icon = match (waiting, art.is_some()) {
-                (true, _) => Some((Icon::Spinner, inputs.spin)),
-                (false, true) => Some((Icon::Raster, 0)),
-                (false, false) => style.icon.map(|icon| {
-                    let level = if icon.is_graded() {
-                        value.map(icon::level_of).unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    (icon, level)
-                }),
+            let (icon, icon_after_text) = match (waiting, art.is_some(), folded, source_icon) {
+                (true, _, _, _) => (Some((Icon::Spinner, inputs.spin)), false),
+                (false, true, _, _) => (Some((Icon::Raster, 0)), false),
+                (false, false, false, Some(icon)) => (Some((icon, 0)), true),
+                (false, false, _, _) => (
+                    style.icon.map(|icon| {
+                        let level = if icon.is_graded() {
+                            value.map(icon::level_of).unwrap_or(0)
+                        } else {
+                            0
+                        };
+                        (icon, level)
+                    }),
+                    false,
+                ),
             };
             // The icon and the space after it, which is what the text starts behind. An
             // icon is as tall as `icon_size` and as wide as its own shape asks for, which
@@ -1428,7 +1462,7 @@ fn size_group(
             let icon_advance = advance(&content);
             // Truncation can take the last of it, which an icon still carries - a spinner
             // included, since a module waiting on its first answer has nothing else.
-            if content.is_empty() && style.icon.is_none() && !waiting && art.is_none() {
+            if content.is_empty() && icon.is_none() {
                 return hidden;
             }
             let text_width = text.measure(&content);
@@ -1438,6 +1472,7 @@ fn size_group(
                 style,
                 hover_style,
                 icon,
+                icon_after_text,
                 content,
                 text_width,
                 icon_advance,
@@ -1471,6 +1506,7 @@ fn size_group(
             style,
             hover_style,
             icon,
+            icon_after_text,
             content,
             text_width,
             icon_advance,
@@ -1508,6 +1544,7 @@ fn size_group(
             hover_style,
             icon_advance,
             icon,
+            icon_after_text,
             art,
             text: content,
             style,
@@ -1789,10 +1826,19 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         // narrower than what is written in it, and centring that would hang the first
         // characters off the left of the module and into the one before it.
         let content_x = x + ((m.width - content_width) / 2.0).max(m.style.padding) + carried;
+        let icon_gap = if m.text.is_empty() {
+            0.0
+        } else {
+            m.style.gap()
+        };
+        let icon_x = match m.icon_after_text {
+            true => content_x + m.text_width + icon_gap,
+            false => content_x,
+        };
         let placed_icon = m.icon.map(|(icon, level)| PlacedIcon {
             icon,
             level,
-            x: content_x,
+            x: icon_x,
             y: inner_y + (inner_h - m.style.icon_size) / 2.0,
             size: m.style.icon_size,
             art: m.art.clone(),
@@ -1818,7 +1864,11 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             height: inner_h,
             icon: placed_icon,
             text: m.text,
-            text_x: content_x + m.icon_advance,
+            text_x: content_x
+                + match m.icon_after_text {
+                    true => 0.0,
+                    false => m.icon_advance,
+                },
             content_right: m.clipped.then_some(x + width - m.style.padding),
             foreground,
             background,
@@ -2478,6 +2528,58 @@ padding = 0
         // A bar that has not been told which screen it is on shows the lot, because half a
         // list is worse than a whole one.
         assert_eq!(on(None), ["1", "2", "3"]);
+    }
+
+    #[test]
+    fn workspace_icons_can_be_native_or_text_and_are_optional() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["ws"]
+
+[module.ws]
+source = "sway:workspaces"
+format = "$name"
+icons = { "1" = "$slack", "2" = "󰘦", "3" = "$chrome" }
+padding = 0
+"##;
+        let cfg = Config::parse(config).expect("test config parses");
+        let sway = two_screens();
+        let inputs = Inputs {
+            items: &[],
+            native: &Registry::new(&Default::default()),
+            sway: &sway,
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed_groups: &Default::default(),
+            switching: &Default::default(),
+            folding: &Default::default(),
+            collapsed: &Default::default(),
+            waiting: &Default::default(),
+            spin: 0,
+            tray: &Default::default(),
+            output: None,
+        };
+        let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
+        let texts: Vec<&str> = frame.groups[0]
+            .modules
+            .iter()
+            .map(|module| module.text.as_str())
+            .collect();
+        assert_eq!(texts, ["1", "2 󰘦", "3"]);
+        let modules = &frame.groups[0].modules;
+        assert_eq!(
+            modules[0].icon.as_ref().map(|icon| icon.icon),
+            Some(Icon::Slack)
+        );
+        assert!(modules[0].icon.as_ref().unwrap().x > modules[0].text_x);
+        assert!(modules[1].icon.is_none());
+        assert_eq!(
+            modules[2].icon.as_ref().map(|icon| icon.icon),
+            Some(Icon::Chrome)
+        );
     }
 
     /// `scope = "session"` is what a single-screen configuration always had, and what

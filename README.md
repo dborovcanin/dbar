@@ -533,7 +533,14 @@ say where they are from:
 ```toml
 [module.workspaces]
 source = "sway:workspaces"
+format = "$name"
 style = "plain"
+
+[module.workspaces.icons]
+"0" = "$arch"
+"1" = "😁"
+"2" = "$code"
+"3" = "$chrome"
 
 [module.workspaces.states.focused]
 focused = true
@@ -550,7 +557,12 @@ style = "plain"
 
 A `sway:workspaces` module expands into one rectangle per workspace, each with
 its own state and its own click target - clicking switches to that workspace.
-`focused` and `visible` join `urgent` as state conditions.
+`focused` and `visible` join `urgent` as state conditions. `icons` maps the
+workspace name to something drawn after it; `default` can supply a fallback.
+A value beginning with `$` names a native dbar icon, while any other value is
+ordinary text, including emoji and icon-font glyphs. An unmapped workspace gets
+no icon or extra gap. This keeps display icons in dbar's config, so Sway
+workspace names can remain plain.
 
 The keyboard layout comes from the same place, and is reported again the moment
 it is switched, so it costs no interval:

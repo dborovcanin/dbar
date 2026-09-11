@@ -133,6 +133,9 @@ pub enum Icon {
     Cpu,
     Tux,
     Arch,
+    Slack,
+    Code,
+    Chrome,
     Memory,
     Disk,
     Clock,
@@ -163,6 +166,9 @@ impl Icon {
             "cpu" => Icon::Cpu,
             "tux" => Icon::Tux,
             "arch" | "arch-linux" => Icon::Arch,
+            "slack" => Icon::Slack,
+            "code" => Icon::Code,
+            "chrome" | "chromium" => Icon::Chrome,
             "memory" | "ram" => Icon::Memory,
             "disk" => Icon::Disk,
             "clock" | "time" => Icon::Clock,
@@ -299,6 +305,9 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
         Icon::Cpu => cpu(&mut out),
         Icon::Tux => tux(&mut out),
         Icon::Arch => arch(&mut out),
+        Icon::Slack => slack(&mut out),
+        Icon::Code => code(&mut out),
+        Icon::Chrome => chrome(&mut out),
         Icon::Memory => memory(&mut out),
         Icon::Disk => disk(&mut out),
         Icon::Clock => clock(&mut out),
@@ -368,6 +377,112 @@ fn arch(out: &mut Vec<IconPath>) {
     mark.cubic_to(0.6019, 0.3146, 0.5824, 0.2570, 0.5000, 0.0700);
     mark.close();
     finish(mark, Ink::Fill, out);
+}
+
+/// Slack's four interlocking pairs of pills, reduced to one colour for a status bar.
+///
+/// These are the proportions of the application mark rather than a generic hash: each
+/// arm has a short cap beside the longer stroke and the four pairs rotate around the
+/// empty centre.
+fn slack(out: &mut Vec<IconPath>) {
+    let mut mark = Outline::new();
+    rounded(&mut mark, 0.304, 0.08, 0.472, 0.248, 0.084);
+    rounded(&mut mark, 0.08, 0.304, 0.472, 0.472, 0.084);
+    rounded(&mut mark, 0.752, 0.304, 0.92, 0.472, 0.084);
+    rounded(&mut mark, 0.528, 0.08, 0.696, 0.472, 0.084);
+    rounded(&mut mark, 0.528, 0.752, 0.696, 0.92, 0.084);
+    rounded(&mut mark, 0.528, 0.528, 0.92, 0.696, 0.084);
+    rounded(&mut mark, 0.08, 0.528, 0.248, 0.696, 0.084);
+    rounded(&mut mark, 0.304, 0.528, 0.472, 0.92, 0.084);
+    finish(mark, Ink::Fill, out);
+}
+
+/// A native version of Nerd Fonts' `󰘦`: square-ended braces around three low dots.
+fn code(out: &mut Vec<IconPath>) {
+    let mut braces = Outline::new();
+    // Left brace, traced as a filled band so its ends remain square at small sizes.
+    braces.move_to(0.29, 0.09);
+    braces.line_to(0.20, 0.09);
+    braces.cubic_to(0.12, 0.09, 0.12, 0.16, 0.12, 0.23);
+    braces.line_to(0.12, 0.34);
+    braces.cubic_to(0.12, 0.42, 0.08, 0.46, 0.02, 0.46);
+    braces.line_to(0.02, 0.54);
+    braces.cubic_to(0.08, 0.54, 0.12, 0.58, 0.12, 0.66);
+    braces.line_to(0.12, 0.77);
+    braces.cubic_to(0.12, 0.84, 0.12, 0.91, 0.20, 0.91);
+    braces.line_to(0.29, 0.91);
+    braces.line_to(0.29, 0.83);
+    braces.line_to(0.21, 0.83);
+    braces.line_to(0.21, 0.66);
+    braces.cubic_to(0.21, 0.58, 0.18, 0.53, 0.12, 0.50);
+    braces.cubic_to(0.18, 0.47, 0.21, 0.42, 0.21, 0.34);
+    braces.line_to(0.21, 0.17);
+    braces.line_to(0.29, 0.17);
+    braces.close();
+
+    // The other brace is the same contour reflected horizontally.
+    braces.move_to(0.71, 0.09);
+    braces.line_to(0.80, 0.09);
+    braces.cubic_to(0.88, 0.09, 0.88, 0.16, 0.88, 0.23);
+    braces.line_to(0.88, 0.34);
+    braces.cubic_to(0.88, 0.42, 0.92, 0.46, 0.98, 0.46);
+    braces.line_to(0.98, 0.54);
+    braces.cubic_to(0.92, 0.54, 0.88, 0.58, 0.88, 0.66);
+    braces.line_to(0.88, 0.77);
+    braces.cubic_to(0.88, 0.84, 0.88, 0.91, 0.80, 0.91);
+    braces.line_to(0.71, 0.91);
+    braces.line_to(0.71, 0.83);
+    braces.line_to(0.79, 0.83);
+    braces.line_to(0.79, 0.66);
+    braces.cubic_to(0.79, 0.58, 0.82, 0.53, 0.88, 0.50);
+    braces.cubic_to(0.82, 0.47, 0.79, 0.42, 0.79, 0.34);
+    braces.line_to(0.79, 0.17);
+    braces.line_to(0.71, 0.17);
+    braces.close();
+    finish(braces, Ink::Fill, out);
+
+    let mut dots = Outline::new();
+    for x in [0.34, 0.50, 0.66] {
+        dots.push_circle(x, 0.63, 0.043);
+    }
+    finish(dots, Ink::Fill, out);
+}
+
+/// Chrome's three asymmetric blades and detached centre, inset slightly so its circular
+/// footprint carries the same visual weight as dbar's other native icons.
+fn chrome(out: &mut Vec<IconPath>) {
+    let mut blades = Outline::new();
+
+    // Red blade in the full-colour mark.
+    blades.move_to(0.157, 0.207);
+    blades.cubic_to(0.356, 0.005, 0.662, 0.005, 0.833, 0.172);
+    blades.cubic_to(0.860, 0.199, 0.905, 0.248, 0.901, 0.298);
+    blades.line_to(0.500, 0.298);
+    blades.cubic_to(0.416, 0.298, 0.343, 0.358, 0.299, 0.456);
+    blades.close();
+
+    // Yellow blade.
+    blades.move_to(0.637, 0.349);
+    blades.line_to(0.926, 0.349);
+    blades.cubic_to(0.950, 0.437, 0.950, 0.572, 0.905, 0.662);
+    blades.cubic_to(0.815, 0.842, 0.653, 0.950, 0.472, 0.950);
+    blades.line_to(0.672, 0.616);
+    blades.cubic_to(0.702, 0.563, 0.712, 0.482, 0.671, 0.401);
+    blades.close();
+
+    // Green blade.
+    blades.move_to(0.122, 0.253);
+    blades.line_to(0.338, 0.613);
+    blades.cubic_to(0.383, 0.698, 0.464, 0.716, 0.560, 0.640);
+    blades.line_to(0.413, 0.939);
+    blades.cubic_to(0.212, 0.896, 0.068, 0.734, 0.050, 0.527);
+    blades.cubic_to(0.041, 0.428, 0.068, 0.329, 0.122, 0.253);
+    blades.close();
+    finish(blades, Ink::Fill, out);
+
+    let mut hub = Outline::new();
+    hub.push_circle(0.50, 0.50, 0.151);
+    finish(hub, Ink::Fill, out);
 }
 
 /// A seated penguin in the same single foreground colour as the other icons.
@@ -812,10 +927,13 @@ fn spinner(out: &mut Vec<IconPath>, frame: usize) {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 22] = [
+    const ALL: [Icon; 25] = [
         Icon::Cpu,
         Icon::Tux,
         Icon::Arch,
+        Icon::Slack,
+        Icon::Code,
+        Icon::Chrome,
         Icon::Memory,
         Icon::Disk,
         Icon::Clock,
@@ -907,5 +1025,13 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn code_ink_has_its_inset_and_is_vertically_centred() {
+        let (_, y0, _, y1) = ink_bounds(Icon::Code, 0).expect("code has visible ink");
+        assert!((y0 - 0.09).abs() < 0.001);
+        assert!((y1 - 0.91).abs() < 0.001);
+        assert!(((y0 + y1) / 2.0 - 0.5).abs() < 0.001);
     }
 }

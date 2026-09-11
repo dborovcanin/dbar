@@ -392,6 +392,9 @@ overlap = 1
 #              keep running                            default: 30s
 #   layouts    what a sway:language module calls each
 #              layout, keyed by xkb's name for it
+#   icons      decorations after sway workspace names, keyed by
+#              name; `$icon` is native, other values are text,
+#              and `default` is the fallback
 #   scope      how much of the session a sway:workspaces or
 #              sway:window module is about: "output", the
 #              screen its bar is on, or "session"  default: "output"

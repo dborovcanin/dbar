@@ -55,7 +55,7 @@ pub enum Source {
     /// The title of the focused window, on this screen or in the session.
     SwayWindow(Scope),
     /// One entry per workspace, expanded at layout time.
-    SwayWorkspaces(Scope),
+    SwayWorkspaces(WorkspaceView),
     /// The active keyboard layout, with the short forms the module gives its layouts.
     SwayLanguage(BTreeMap<String, String>),
     /// The binding mode the compositor is in.
@@ -78,6 +78,27 @@ pub struct TrayView {
     pub show_passive: bool,
     /// Item ids, first to last. An id the tray does not have costs nothing.
     pub order: Vec<String>,
+}
+
+/// Which workspaces a module shows and the bar-owned decoration beside each name.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceView {
+    pub scope: Scope,
+    /// Workspace name to decoration. `default` is used when no exact name is present.
+    pub icons: BTreeMap<String, WorkspaceIcon>,
+}
+
+impl WorkspaceView {
+    pub fn icon(&self, name: &str) -> Option<&WorkspaceIcon> {
+        self.icons.get(name).or_else(|| self.icons.get("default"))
+    }
+}
+
+/// What follows a workspace name: native vector geometry or ordinary shaped text.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkspaceIcon {
+    Native(Icon),
+    Text(String),
 }
 
 impl TrayView {
@@ -548,6 +569,9 @@ struct RawModule {
     /// A layout named here is what `$short` says; anything else is abbreviated.
     #[serde(default)]
     layouts: BTreeMap<String, String>,
+    /// Native or textual icons for `sway:workspaces`, keyed by name, with optional default.
+    #[serde(default)]
+    icons: BTreeMap<String, String>,
     /// How much of the session a compositor module is about: `output`, which is the screen
     /// this bar is on, or `session`. Defaults to the screen.
     scope: Option<Scope>,
@@ -1841,7 +1865,10 @@ pub fn sources() -> Vec<(&'static str, Source)> {
         ),
         ("provider", Source::Provider),
         ("sway:window", Source::SwayWindow(Scope::Output)),
-        ("sway:workspaces", Source::SwayWorkspaces(Scope::Output)),
+        (
+            "sway:workspaces",
+            Source::SwayWorkspaces(WorkspaceView::default()),
+        ),
         ("sway:language", Source::SwayLanguage(Default::default())),
         ("sway:mode", Source::SwayMode),
         ("tray", Source::Tray(TrayView::default())),
@@ -1858,7 +1885,29 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
     let source = match name {
         "provider" => Source::Provider,
         "sway:window" => Source::SwayWindow(raw.and_then(|m| m.scope).unwrap_or_default()),
-        "sway:workspaces" => Source::SwayWorkspaces(raw.and_then(|m| m.scope).unwrap_or_default()),
+        "sway:workspaces" => {
+            let mut icons = BTreeMap::new();
+            if let Some(written) = raw.map(|m| &m.icons) {
+                for (workspace, name) in written {
+                    let icon = match name.strip_prefix('$') {
+                        Some(native) => {
+                            WorkspaceIcon::Native(Icon::parse(native).ok_or_else(|| {
+                                anyhow!(
+                                    "module {module_name:?} gives workspace {workspace:?} unknown \
+                                 native icon {name:?}"
+                                )
+                            })?)
+                        }
+                        None => WorkspaceIcon::Text(name.clone()),
+                    };
+                    icons.insert(workspace.clone(), icon);
+                }
+            }
+            Source::SwayWorkspaces(WorkspaceView {
+                scope: raw.and_then(|m| m.scope).unwrap_or_default(),
+                icons,
+            })
+        }
         "sway:language" => Source::SwayLanguage(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
         "sway:mode" => Source::SwayMode,
         "tray" => Source::Tray(TrayView {
@@ -1987,6 +2036,11 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
             "layouts",
             raw.is_some_and(|m| !m.layouts.is_empty()),
             "sway:language",
+        ),
+        (
+            "icons",
+            raw.is_some_and(|m| !m.icons.is_empty()),
+            "sway:workspaces",
         ),
         (
             "show_passive",
@@ -3241,6 +3295,30 @@ source = "{source}"
     }
 
     #[test]
+    fn a_workspace_icon_must_name_a_native_icon() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["ws"]
+
+[module.ws]
+source = "sway:workspaces"
+icons = { "1" = "$not-an-icon" }
+"##;
+        let error = format!(
+            "{:#}",
+            Config::parse(config).expect_err("an unknown workspace icon must be rejected")
+        );
+        assert!(error.contains("workspace \"1\""), "{error}");
+        assert!(
+            error.contains("unknown native icon \"$not-an-icon\""),
+            "{error}"
+        );
+    }
+
+    #[test]
     fn a_bar_without_a_language_module_never_asks_for_one() {
         let config = r##"
 [left]
@@ -3772,7 +3850,10 @@ scope = "session"
                 .source
                 .clone()
         };
-        assert_eq!(source("ws"), Source::SwayWorkspaces(Scope::Output));
+        assert_eq!(
+            source("ws"),
+            Source::SwayWorkspaces(WorkspaceView::default())
+        );
         assert_eq!(source("win"), Source::SwayWindow(Scope::Session));
     }
 

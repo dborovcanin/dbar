@@ -352,8 +352,9 @@ right = "round"
 # screen and which is asking for attention. Everything else is a quiet number.
 [module.workspaces]
 source = "sway:workspaces"
+format = "$name"
+icons = { "0" = "$arch", "1" = "$slack", "2" = "$code", "3" = "$chrome" }
 style = "dim"
-min_width = 34
 
 [module.workspaces.states.focused]
 focused = true
