@@ -1002,8 +1002,9 @@ impl App {
             _ => close_below(&mut self.menus, 0),
         }
 
-        let (line, icon_size) = (
+        let (line, middle, icon_size) = (
             self.painter.text.line_height(),
+            self.painter.text.middle(),
             self.config.bar.icon_size.min(20.0),
         );
         let frame = layout::menu(
@@ -1011,6 +1012,7 @@ impl App {
             &self.config.menu,
             icon_size,
             line,
+            middle,
             None,
             &mut self.painter.text,
         );
@@ -1186,6 +1188,7 @@ impl App {
             &config.menu,
             icon_size,
             line,
+            painter.text.middle(),
             menu.hover,
             &mut painter.text,
         );

@@ -41,6 +41,8 @@ struct Shaped {
     /// over and over - most of them every redraw, unchanged. Measuring and drawing share
     /// this, so a value that layout has already sized costs nothing to put on screen.
     shapes: Generations<Buffer>,
+    /// Where the ink's middle sits inside the line box, once it has been measured.
+    middle: Option<f32>,
 }
 
 impl Shaped {
@@ -50,6 +52,7 @@ impl Shaped {
             widths: Generations::new(WIDTHS_KEPT),
             runs: Generations::new(SHAPES_KEPT),
             shapes: Generations::new(SHAPES_KEPT),
+            middle: None,
         }
     }
 }
@@ -77,6 +80,12 @@ fn select(shaped: &mut Vec<Shaped>, scale: f32) -> usize {
 /// reshaping. Reaching it starts again rather than growing without bound, so an output
 /// that came and went does not keep its glyphs forever.
 const SCALES_KEPT: usize = 4;
+
+/// The string `middle` measures the ink of.
+///
+/// A digit is the right shape to ask: it is cap height in every font a bar is likely to be
+/// set in, it sits on the baseline without a descender, and every font has one.
+const REFERENCE: &str = "0";
 
 /// A string already rasterised, as coverage per pixel.
 ///
@@ -377,6 +386,30 @@ impl TextRenderer {
     /// Line height in logical pixels.
     pub fn line_height(&self) -> f32 {
         (self.size * 1.3).ceil()
+    }
+
+    /// Where drawn ink sits inside the line box, in logical pixels from its top.
+    ///
+    /// Centring the line box in a module puts the wording a little high: the box is the
+    /// font's ascent and descent, and neither a digit nor a capital reaches either of
+    /// them, so the slack above the letters is larger than the slack below. Rasterising
+    /// one digit says where the ink actually is, and a module that centres that instead
+    /// centres what is on the screen. A digit rather than the module's own string,
+    /// because the answer has to be the same for every module and not move when a
+    /// wording gains a descender.
+    ///
+    /// Measured once per scale and kept, so this costs one glyph for the life of the bar.
+    pub fn middle(&mut self) -> f32 {
+        if let Some(middle) = self.shaped[self.active].middle {
+            return middle;
+        }
+        let scale = self.scale();
+        let middle = match self.run(REFERENCE) {
+            Some(run) => (run.top as f32 + run.height as f32 / 2.0) / scale,
+            None => self.line_height() / 2.0,
+        };
+        self.shaped[self.active].middle = Some(middle);
+        middle
     }
 
     fn metrics(&self) -> Metrics {

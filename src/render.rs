@@ -26,6 +26,15 @@ pub trait DrawText {
     /// Height of one line, in logical pixels.
     fn line_height(&self) -> f32;
 
+    /// Where ink sits inside the line box, in logical pixels from its top.
+    ///
+    /// What a module centres on. The default is the middle of the box, which is what a
+    /// backend whose glyphs fill their line has; a backend drawing a real font says where
+    /// its letters are instead.
+    fn middle(&mut self) -> f32 {
+        self.line_height() / 2.0
+    }
+
     /// The rasterised form of `text` at the output scale, or nothing to draw.
     ///
     /// The backend places and colours what comes back. Nothing behind this trait knows what
@@ -37,6 +46,10 @@ pub trait DrawText {
 impl DrawText for TextRenderer {
     fn line_height(&self) -> f32 {
         TextRenderer::line_height(self)
+    }
+
+    fn middle(&mut self) -> f32 {
+        TextRenderer::middle(self)
     }
 
     fn run(&mut self, text: &str) -> Option<&TextRun> {
@@ -392,7 +405,8 @@ struct Tools<'a> {
     mask: &'a mut Option<Mask>,
     icons: &'a mut IconCache,
     text: &'a mut dyn DrawText,
-    line_height: f32,
+    /// Where ink sits inside the line box, asked once a frame rather than once a module.
+    middle: f32,
 }
 
 /// Draw an icon through the cache, rasterising it the first time it is seen at this size
@@ -1197,7 +1211,7 @@ fn render(
         icons,
     } = painter;
     let mask = &mut clip.0;
-    let line_height = text.line_height();
+    let middle = text.middle();
     let (pw, ph) = (pixmap.width(), pixmap.height());
 
     for group in &frame.groups {
@@ -1223,7 +1237,7 @@ fn render(
                     mask,
                     icons,
                     text,
-                    line_height,
+                    middle,
                 },
             );
             continue;
@@ -1240,7 +1254,7 @@ fn render(
                     mask,
                     icons,
                     text,
-                    line_height,
+                    middle,
                 },
             );
             continue;
@@ -1259,7 +1273,7 @@ fn render(
                 mask: layer_mask,
                 icons,
                 text,
-                line_height,
+                middle,
             },
         );
         composite(pixmap, layer.as_ref(), (bx, by, bw, bh), group.opacity);
@@ -1501,8 +1515,9 @@ fn draw_group(
         // something that exactly fills its box must not lose its last pixel to it on the
         // frame before it arrives.
         let wording = module_stop.map_or(wording, |stop| wording.stopped(stop));
-        // Layout already placed the text; only the vertical centring is ours.
-        let ty = module.y + (module.height - tools.line_height) / 2.0;
+        // Layout already placed the text; only the vertical centring is ours, and it
+        // centres the ink rather than the line box it sits in.
+        let ty = module.y + module.height / 2.0 - tools.middle;
         let (tx, ty) = (module.text_x + offset.0, ty + offset.1);
         draw_text(
             pixmap,
@@ -2548,6 +2563,71 @@ format = "$text"
                 ink.alpha()
             );
         }
+    }
+
+    /// A font's line box is not centred on its own ink: the ascent leaves more room above
+    /// the letters than the descent leaves below, so centring the box puts every wording a
+    /// little high. What a module centres is where the ink is.
+    #[test]
+    fn a_wording_is_centred_on_its_ink_rather_than_on_its_line_box() {
+        /// A backend whose ink sits high in its line, the way a real font's does.
+        struct Lopsided {
+            run: Option<TextRun>,
+        }
+
+        const LINE: f32 = 12.0;
+        const INK_TOP: f32 = 2.0;
+        const INK: f32 = 6.0;
+
+        impl DrawText for Lopsided {
+            fn line_height(&self) -> f32 {
+                LINE
+            }
+
+            fn middle(&mut self) -> f32 {
+                INK_TOP + INK / 2.0
+            }
+
+            fn run(&mut self, text: &str) -> Option<&TextRun> {
+                let width = text.chars().count() * INK as usize;
+                self.run = Some(TextRun {
+                    left: 0,
+                    top: INK_TOP as i32,
+                    width,
+                    height: INK as usize,
+                    pixels: RunPixels::Coverage(vec![0xff; width * INK as usize]),
+                });
+                self.run.as_ref()
+            }
+        }
+
+        let frame = Frame {
+            groups: vec![PlacedGroup {
+                modules: vec![module(0.0, 40.0, TILE, "ab", false)],
+                ..island(1.0).groups.remove(0)
+            }],
+            ..Frame::default()
+        };
+        let mut pixmap = Pixmap::new(40, 20).unwrap();
+        render(
+            &mut pixmap.as_mut(),
+            &frame,
+            1.0,
+            &mut Painter::new(Lopsided { run: None }),
+            &mut Clip::default(),
+        );
+
+        let inked =
+            |y: usize| (0..40).any(|x| pixmap.pixels()[y * 40 + x].red() > TILE.r.max(TILE_ALT.r));
+        let rows: Vec<usize> = (0..20).filter(|&y| inked(y)).collect();
+        let module = &frame.groups[0].modules[0];
+        let (top, bottom) = (rows[0] as f32, rows[rows.len() - 1] as f32 + 1.0);
+        assert_eq!(
+            (top - module.y, module.y + module.height - bottom),
+            (7.0, 7.0),
+            "ink in rows {top}..{bottom} of a module {} tall - it is not centred",
+            module.height
+        );
     }
 
     /// And in the same colours: fading is one multiply over the finished island, so every

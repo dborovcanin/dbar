@@ -160,11 +160,15 @@ impl MenuFrame {
 /// The width is the menu's own business rather than the bar's - a menu is a separate
 /// surface and has no column to fit into - so it is measured from what it has to say and
 /// capped where a label would otherwise run off the screen.
+///
+/// `line` sizes a row and `middle` says where the ink sits inside it, which is what a
+/// label is centred on - see `TextRenderer::middle`.
 pub fn menu(
     rows: &[crate::tray::menu::Row],
     style: &crate::config::Menu,
     icon_size: f32,
     line: f32,
+    middle: f32,
     hover: Option<usize>,
     text: &mut dyn Measure,
 ) -> MenuFrame {
@@ -219,7 +223,7 @@ pub fn menu(
             highlight_color: style.highlight,
             text: labels[index].clone(),
             text_x,
-            text_y: y + (height - line) / 2.0,
+            text_y: y + height / 2.0 - middle,
             foreground,
             icon: row.icon.as_ref().map(|art| PlacedIcon {
                 icon: Icon::Raster,
@@ -2818,7 +2822,7 @@ padding = 0
     fn a_menu_label_longer_than_the_menu_is_cut_to_fit() {
         let style = menu_style();
         let rows = vec![menu_row(&"label ".repeat(4096))];
-        let frame = menu(&rows, &style, 16.0, 10.0, None, &mut Fixed);
+        let frame = menu(&rows, &style, 16.0, 10.0, 5.0, None, &mut Fixed);
         assert!(
             frame.width <= style.max_width,
             "the menu is {} wide against a limit of {}",
@@ -2840,7 +2844,7 @@ padding = 0
     #[test]
     fn a_menu_is_sized_by_what_it_has_to_say() {
         let rows = vec![menu_row("Short"), menu_row("A much longer label")];
-        let frame = menu(&rows, &menu_style(), 16.0, 10.0, None, &mut Fixed);
+        let frame = menu(&rows, &menu_style(), 16.0, 10.0, 5.0, None, &mut Fixed);
         // The stub measurer makes every character one unit wide.
         assert!(frame.width > "A much longer label".len() as f32);
         assert_eq!(frame.rows.len(), 2);
@@ -2864,7 +2868,7 @@ padding = 0
             },
             menu_row("Two"),
         ];
-        let frame = menu(&rows, &menu_style(), 16.0, 10.0, None, &mut Fixed);
+        let frame = menu(&rows, &menu_style(), 16.0, 10.0, 5.0, None, &mut Fixed);
         assert!(frame.rows[1].height < frame.rows[0].height);
 
         let middle = |index: usize| frame.rows[index].y + frame.rows[index].height / 2.0;
@@ -2886,12 +2890,12 @@ padding = 0
             },
         ];
         let style = menu_style();
-        let frame = menu(&rows, &style, 16.0, 10.0, Some(0), &mut Fixed);
+        let frame = menu(&rows, &style, 16.0, 10.0, 5.0, Some(0), &mut Fixed);
         assert!(frame.rows[0].highlight);
         assert!(!frame.rows[1].highlight);
 
         // Pointing at the disabled row highlights nothing, and it keeps its quieter ink.
-        let frame = menu(&rows, &style, 16.0, 10.0, Some(1), &mut Fixed);
+        let frame = menu(&rows, &style, 16.0, 10.0, 5.0, Some(1), &mut Fixed);
         assert!(!frame.rows[0].highlight);
         assert!(!frame.rows[1].highlight);
         assert_eq!(frame.rows[1].foreground, style.disabled);
@@ -2924,7 +2928,7 @@ padding = 0
                 ..Default::default()
             },
         ];
-        let frame = menu(&rows, &menu_style(), 16.0, 10.0, None, &mut Fixed);
+        let frame = menu(&rows, &menu_style(), 16.0, 10.0, 5.0, None, &mut Fixed);
         assert!(frame.rows[0].mark.is_some());
         assert!(
             frame.rows[1].mark.is_none(),
