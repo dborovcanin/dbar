@@ -1,6 +1,6 @@
 [package]
 name = "dbar"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # Let-chains and edition 2024 are what dbar's own code needs, which is 1.88.
 # The floor is 1.89 because cosmic-text asks for it, so keep this in step with
@@ -19,7 +19,12 @@ calloop = "0.14.4"
 calloop-wayland-source = "0.4.1"
 cosmic-text = "0.19.0"
 env_logger = "0.11.11"
-jiff = { version = "0.2.35", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo", "perf-inline"] }
+jiff = { version = "0.2.35", default-features = false, features = [
+  "std",
+  "tz-system",
+  "tzdb-zoneinfo",
+  "perf-inline",
+] }
 libc = "0.2.189"
 log = "0.4.34"
 pipewire = "0.10.1"
@@ -29,7 +34,9 @@ pipewire = "0.10.1"
 resvg = { version = "0.45", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-signal-hook = { version = "0.4.4", default-features = false, features = ["iterator"] }
+signal-hook = { version = "0.4.4", default-features = false, features = [
+  "iterator",
+] }
 smithay-client-toolkit = "0.21.1"
 tiny-skia = "0.12.0"
 toml = "1.1.5"
