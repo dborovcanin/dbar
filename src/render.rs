@@ -91,13 +91,27 @@ pub fn edged_rect(x: f32, y: f32, w: f32, h: f32, left: f32, right: f32) -> Opti
 ///
 /// The boundary between the two neighbouring modules is the far edge of this path; the
 /// remaining area of the gap belongs to the module the separator leads into.
-fn separator_path(shape: SeparatorShape, x0: f32, y0: f32, x1: f32, y1: f32) -> Option<Path> {
+fn separator_path(
+    shape: SeparatorShape,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    scale: f32,
+) -> Option<Path> {
     let w = x1 - x0;
     let h = y1 - y0;
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
-    let ymid = (y0 + y1) / 2.0;
+    let ymid = match shape {
+        // A corner is only a point if one row of pixels owns it. Halfway down an even
+        // number of them is a boundary, and the two rows either side of it come out with
+        // the same coverage, so the tip rasterises as a flat two pixels tall. The curved
+        // shapes are meant to be blunt there and keep their true middle.
+        SeparatorShape::Chevron | SeparatorShape::Notch => centre(y0, y1, scale),
+        _ => (y0 + y1) / 2.0,
+    };
     let mut pb = PathBuilder::new();
 
     match shape {
@@ -162,6 +176,20 @@ fn snap(v: f32, scale: f32) -> f32 {
     (v * scale).round() / scale
 }
 
+/// The middle of `y0..y1`, moved onto the middle of the device pixel row holding it.
+///
+/// A vertex on a pixel boundary is shared by the rows above and below it, and both of them
+/// end up with the coverage the tip should have had to itself. Half a device pixel is
+/// nothing on a slope that runs the height of the bar, and it is the whole difference
+/// between a point and a flat.
+fn centre(y0: f32, y1: f32, scale: f32) -> f32 {
+    let mid = (y0 + y1) / 2.0;
+    if scale <= 0.0 {
+        return mid;
+    }
+    ((mid * scale).floor() + 0.5) / scale
+}
+
 fn draw_separator(
     pixmap: &mut PixmapMut<'_>,
     sep: &PlacedSeparator,
@@ -207,14 +235,25 @@ fn draw_separator(
         );
     }
 
-    let Some(path) = separator_path(sep.shape, x0, y0, x1, y1) else {
+    // The ground may bleed past the gap because it is a rectangle and the modules either
+    // side of it are drawn afterwards over the top, which is all the bleed is for. The
+    // shape may not: its ends are boundaries those modules are drawn to, and a shape built
+    // wider than the gap puts them in the wrong place. Its point lands inside the module
+    // beyond it and is painted flat off at that module's edge; its base falls short of the
+    // module behind it, which fills the column the shape's own edge was fading across and
+    // leaves the transition standing straight where it should have started to lean. So the
+    // shape spans the gap itself, snapped to the same grid the fills are, and every edge of
+    // it meets the fill it is continued by. A cap is the same shape drawn where an island
+    // ends rather than between two of its modules, and is placed and cut the same way.
+    let (sx0, sx1) = (snap(sep.x, scale), snap(sep.x + sep.width, scale));
+    let Some(path) = separator_path(sep.shape, sx0, y0, sx1, y1, scale) else {
         return;
     };
     // Outer caps occupy the side of the boundary adjacent to their module. Build
     // a single even-odd path for the complement, preserving transparent bar backgrounds.
     let path = if sep.inverted {
         let mut builder = PathBuilder::new();
-        let Some(rect) = Rect::from_xywh(x0, y0, x1 - x0, y1 - y0) else {
+        let Some(rect) = Rect::from_xywh(sx0, y0, sx1 - sx0, y1 - y0) else {
             return;
         };
         builder.push_rect(rect);
@@ -227,8 +266,8 @@ fn draw_separator(
         path
     };
     let path = if mirrored {
-        // Reflect about the gap's vertical centre line.
-        match path.transform(Transform::from_row(-1.0, 0.0, 0.0, 1.0, x0 + x1, 0.0)) {
+        // Reflect about the shape's vertical centre line.
+        match path.transform(Transform::from_row(-1.0, 0.0, 0.0, 1.0, sx0 + sx1, 0.0)) {
             Some(p) => p,
             None => return,
         }
@@ -788,7 +827,7 @@ fn edge_region(edge: &PlacedSeparator, right: f32, scale: f32) -> Option<(Path, 
     let x0 = snap(right, scale);
     let x1 = snap(edge.x + edge.width, scale);
     let (y0, y1) = (edge.y, edge.y + edge.height);
-    let shape = separator_path(edge.shape, x0, y0, x1, y1)?;
+    let shape = separator_path(edge.shape, x0, y0, x1, y1, scale)?;
     let mirrored = edge.direction == Direction::Left;
     let shape = match mirrored {
         true => shape.transform(Transform::from_row(-1.0, 0.0, 0.0, 1.0, x0 + x1, 0.0))?,
@@ -2135,6 +2174,175 @@ format = "$text"
             .iter()
             .map(|p| (p.red(), p.green(), p.blue(), p.alpha()))
             .collect()
+    }
+
+    /// A chevron comes to a point, and a point is one row of pixels.
+    ///
+    /// Two ways to lose it, and a bar the height of an even number of pixels finds both.
+    /// The tip is built into the bleed the separator lays past its own gap, and the module
+    /// on that side is drawn afterwards and over the top of it: the point is cut off at
+    /// the module's edge and left as flat as the bleed is wide. And halfway down an even
+    /// number of rows is the boundary between two of them, so a tip left sitting there is
+    /// shared out equally between both. Either one reads as a chevron that did not render.
+    #[test]
+    fn a_chevron_comes_to_a_point_rather_than_to_a_flat() {
+        for scale in [1.0, 1.5, 2.0] {
+            for height in [32.0f32, 30.0, 24.0] {
+                for direction in [Direction::Left, Direction::Right] {
+                    let (w, h) = (64.0f32, height);
+                    let mut pixmap = Pixmap::new((w * scale) as u32, (h * scale) as u32).unwrap();
+                    let sep = PlacedSeparator {
+                        x: 24.484_375,
+                        y: 0.0,
+                        width: 14.0,
+                        height: h,
+                        shape: SeparatorShape::Chevron,
+                        direction,
+                        overlap: 1.0,
+                        inverted: false,
+                        cap: false,
+                        fill: TILE,
+                        under: TILE_ALT,
+                    };
+                    draw_separator(
+                        &mut pixmap.as_mut(),
+                        &sep,
+                        scale,
+                        Transform::from_scale(scale, scale),
+                        None,
+                    );
+                    // The modules either side, drawn after the separator the way a group
+                    // draws them, which is what cuts a tip built out past the gap.
+                    let (edge, side) = (snap(sep.x, scale), snap(sep.x + sep.width, scale));
+                    for (x0, x1, color) in [(0.0, edge, TILE), (side, w, TILE_ALT)] {
+                        fill(
+                            &mut pixmap.as_mut(),
+                            (x0, 0.0, x1 - x0, h),
+                            0.0,
+                            color,
+                            Transform::from_scale(scale, scale),
+                            None,
+                        );
+                    }
+
+                    // The wedge points into the module whose colour it is not, so the row
+                    // it reaches furthest along is the row holding the point - and a point
+                    // is one row. Counting the colour it points with says so whichever way
+                    // round the separator is drawn.
+                    let point = match direction {
+                        Direction::Left => TILE_ALT,
+                        Direction::Right => TILE,
+                    };
+                    let point = skia_color(point).to_color_u8();
+                    let reach: Vec<_> = (0..(h * scale) as u32)
+                        .map(|y| {
+                            (0..(w * scale) as u32)
+                                .filter(|&x| {
+                                    pixmap.pixel(x, y).map(|p| p.demultiply()) == Some(point)
+                                })
+                                .count()
+                        })
+                        .collect();
+                    let tip = reach.iter().copied().max().unwrap();
+                    let rows = reach.iter().filter(|&&n| n == tip).count();
+                    assert_eq!(
+                        rows, 1,
+                        "scale {scale}, height {height}, {direction:?}: {rows} rows share \
+                         the point"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A transition leans from the first row it is drawn in.
+    ///
+    /// The modules either side of a separator are drawn after it and over the top, so a
+    /// shape built wider than the gap has its own antialiased edge replaced by a module's
+    /// hard one for as long as the two overlap. On a tall bar that is most of a column's
+    /// worth of rows at each end, and the lean the shape is there to draw starts a step
+    /// late: the transition stands straight out of the top of the bar, then bends.
+    #[test]
+    fn a_transition_leans_from_the_first_row_it_is_drawn_in() {
+        for (direction, cap) in [
+            (Direction::Left, false),
+            (Direction::Right, false),
+            (Direction::Left, true),
+            (Direction::Right, true),
+        ] {
+            let (w, h) = (64.0f32, 320.0f32);
+            let mut pixmap = Pixmap::new(w as u32, h as u32).unwrap();
+            let sep = PlacedSeparator {
+                x: 24.484_375,
+                y: 0.0,
+                width: 14.0,
+                height: h,
+                shape: SeparatorShape::Chevron,
+                direction,
+                overlap: 1.0,
+                inverted: false,
+                cap,
+                fill: TILE,
+                under: TILE_ALT,
+            };
+            draw_separator(&mut pixmap.as_mut(), &sep, 1.0, Transform::identity(), None);
+            // A cap is drawn where the island ends, so only the side its own module is on
+            // is filled in behind it. That side is the one the shape has its base on, which
+            // is the side `direction` does not point at.
+            let (edge, side) = (snap(sep.x, 1.0), snap(sep.x + sep.width, 1.0));
+            let behind = [
+                (0.0, edge, TILE, direction == Direction::Right || !cap),
+                (side, w, TILE_ALT, direction == Direction::Left || !cap),
+            ];
+            for (x0, x1, color, _) in behind.into_iter().filter(|&(.., drawn)| drawn) {
+                fill(
+                    &mut pixmap.as_mut(),
+                    (x0, 0.0, x1 - x0, h),
+                    0.0,
+                    color,
+                    Transform::identity(),
+                    None,
+                );
+            }
+
+            // How many rows in a row read the same. A shape this tall and this narrow moves
+            // its boundary one column every several of them, so the picture is a staircase
+            // and the question is only whether the step it starts on is the size of the
+            // rest.
+            let point = match direction {
+                Direction::Left => TILE_ALT,
+                Direction::Right => TILE,
+            };
+            let point = skia_color(point).to_color_u8();
+            let reach = (0..h as u32).map(|y| {
+                (0..w as u32)
+                    .filter(|&x| pixmap.pixel(x, y).map(|p| p.demultiply()) == Some(point))
+                    .count()
+            });
+            let mut steps = vec![];
+            for n in reach {
+                match steps.last_mut() {
+                    Some((seen, count)) if *seen == n => *count += 1,
+                    _ => steps.push((n, 1usize)),
+                }
+            }
+            // Against the step beside it rather than against the tallest anywhere: a
+            // staircase is even, so an end that is drawn the way the middle is has an end
+            // step no deeper than its neighbour, give or take the row rounding puts there.
+            let ends = [
+                ("first", steps[0].1, steps[1].1),
+                ("last", steps[steps.len() - 1].1, steps[steps.len() - 2].1),
+            ];
+            for (which, end, next) in ends {
+                assert!(
+                    end <= next + 1,
+                    "{direction:?} cap {cap}: the staircase runs {end} rows into its \
+                     {which} step \
+                     against {next} for the one beside it, so the transition stood \
+                     straight before it began to lean"
+                );
+            }
+        }
     }
 
     /// `direction` mirrors the boundary and nothing else: the two colours stay on their
