@@ -394,7 +394,8 @@ overlap = 1
 #              layout, keyed by xkb's name for it
 #   icons      decorations after sway workspace names, keyed by
 #              name; `$icon` is native, other values are text,
-#              and `default` is the fallback
+#              and `default` is the fallback. A workspace named
+#              by none of them gets nothing, `icon` included
 #   scope      how much of the session a sway:workspaces or
 #              sway:window module is about: "output", the
 #              screen its bar is on, or "session"  default: "output"

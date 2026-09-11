@@ -398,51 +398,54 @@ fn slack(out: &mut Vec<IconPath>) {
 }
 
 /// A native version of Nerd Fonts' `󰘦`: square-ended braces around three low dots.
+///
+/// Inset to the same 0.06 the other application marks keep, so a row of workspaces does
+/// not draw this one heavier than the icon beside it.
 fn code(out: &mut Vec<IconPath>) {
     let mut braces = Outline::new();
     // Left brace, traced as a filled band so its ends remain square at small sizes.
-    braces.move_to(0.29, 0.09);
-    braces.line_to(0.20, 0.09);
-    braces.cubic_to(0.12, 0.09, 0.12, 0.16, 0.12, 0.23);
-    braces.line_to(0.12, 0.34);
-    braces.cubic_to(0.12, 0.42, 0.08, 0.46, 0.02, 0.46);
-    braces.line_to(0.02, 0.54);
-    braces.cubic_to(0.08, 0.54, 0.12, 0.58, 0.12, 0.66);
-    braces.line_to(0.12, 0.77);
-    braces.cubic_to(0.12, 0.84, 0.12, 0.91, 0.20, 0.91);
-    braces.line_to(0.29, 0.91);
-    braces.line_to(0.29, 0.83);
-    braces.line_to(0.21, 0.83);
-    braces.line_to(0.21, 0.66);
-    braces.cubic_to(0.21, 0.58, 0.18, 0.53, 0.12, 0.50);
-    braces.cubic_to(0.18, 0.47, 0.21, 0.42, 0.21, 0.34);
-    braces.line_to(0.21, 0.17);
-    braces.line_to(0.29, 0.17);
+    braces.move_to(0.308, 0.09);
+    braces.line_to(0.225, 0.09);
+    braces.cubic_to(0.152, 0.09, 0.152, 0.16, 0.152, 0.23);
+    braces.line_to(0.152, 0.34);
+    braces.cubic_to(0.152, 0.42, 0.115, 0.46, 0.06, 0.46);
+    braces.line_to(0.06, 0.54);
+    braces.cubic_to(0.115, 0.54, 0.152, 0.58, 0.152, 0.66);
+    braces.line_to(0.152, 0.77);
+    braces.cubic_to(0.152, 0.84, 0.152, 0.91, 0.225, 0.91);
+    braces.line_to(0.308, 0.91);
+    braces.line_to(0.308, 0.83);
+    braces.line_to(0.234, 0.83);
+    braces.line_to(0.234, 0.66);
+    braces.cubic_to(0.234, 0.58, 0.207, 0.53, 0.152, 0.50);
+    braces.cubic_to(0.207, 0.47, 0.234, 0.42, 0.234, 0.34);
+    braces.line_to(0.234, 0.17);
+    braces.line_to(0.308, 0.17);
     braces.close();
 
     // The other brace is the same contour reflected horizontally.
-    braces.move_to(0.71, 0.09);
-    braces.line_to(0.80, 0.09);
-    braces.cubic_to(0.88, 0.09, 0.88, 0.16, 0.88, 0.23);
-    braces.line_to(0.88, 0.34);
-    braces.cubic_to(0.88, 0.42, 0.92, 0.46, 0.98, 0.46);
-    braces.line_to(0.98, 0.54);
-    braces.cubic_to(0.92, 0.54, 0.88, 0.58, 0.88, 0.66);
-    braces.line_to(0.88, 0.77);
-    braces.cubic_to(0.88, 0.84, 0.88, 0.91, 0.80, 0.91);
-    braces.line_to(0.71, 0.91);
-    braces.line_to(0.71, 0.83);
-    braces.line_to(0.79, 0.83);
-    braces.line_to(0.79, 0.66);
-    braces.cubic_to(0.79, 0.58, 0.82, 0.53, 0.88, 0.50);
-    braces.cubic_to(0.82, 0.47, 0.79, 0.42, 0.79, 0.34);
-    braces.line_to(0.79, 0.17);
-    braces.line_to(0.71, 0.17);
+    braces.move_to(0.692, 0.09);
+    braces.line_to(0.775, 0.09);
+    braces.cubic_to(0.848, 0.09, 0.848, 0.16, 0.848, 0.23);
+    braces.line_to(0.848, 0.34);
+    braces.cubic_to(0.848, 0.42, 0.885, 0.46, 0.94, 0.46);
+    braces.line_to(0.94, 0.54);
+    braces.cubic_to(0.885, 0.54, 0.848, 0.58, 0.848, 0.66);
+    braces.line_to(0.848, 0.77);
+    braces.cubic_to(0.848, 0.84, 0.848, 0.91, 0.775, 0.91);
+    braces.line_to(0.692, 0.91);
+    braces.line_to(0.692, 0.83);
+    braces.line_to(0.766, 0.83);
+    braces.line_to(0.766, 0.66);
+    braces.cubic_to(0.766, 0.58, 0.793, 0.53, 0.848, 0.50);
+    braces.cubic_to(0.793, 0.47, 0.766, 0.42, 0.766, 0.34);
+    braces.line_to(0.766, 0.17);
+    braces.line_to(0.692, 0.17);
     braces.close();
     finish(braces, Ink::Fill, out);
 
     let mut dots = Outline::new();
-    for x in [0.34, 0.50, 0.66] {
+    for x in [0.353, 0.50, 0.647] {
         dots.push_circle(x, 0.63, 0.043);
     }
     finish(dots, Ink::Fill, out);
@@ -1028,10 +1031,15 @@ mod tests {
     }
 
     #[test]
-    fn code_ink_has_its_inset_and_is_vertically_centred() {
-        let (_, y0, _, y1) = ink_bounds(Icon::Code, 0).expect("code has visible ink");
-        assert!((y0 - 0.09).abs() < 0.001);
-        assert!((y1 - 0.91).abs() < 0.001);
+    fn code_ink_has_its_inset_and_is_centred() {
+        let (x0, y0, x1, y1) = ink_bounds(Icon::Code, 0).expect("code has visible ink");
+        assert!((y0 - 0.09).abs() < 0.001, "{y0}");
+        assert!((y1 - 0.91).abs() < 0.001, "{y1}");
         assert!(((y0 + y1) / 2.0 - 0.5).abs() < 0.001);
+        // The braces reach further than anything else in this icon, so the horizontal
+        // inset is the one that decides whether it sits heavier than the mark beside it.
+        assert!((x0 - 0.06).abs() < 0.001, "{x0}");
+        assert!((x1 - 0.94).abs() < 0.001, "{x1}");
+        assert!(((x0 + x1) / 2.0 - 0.5).abs() < 0.001);
     }
 }

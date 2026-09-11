@@ -943,8 +943,25 @@ struct Candidate<'g> {
     /// An icon the source brought with it, as pixels, for a source whose artwork is not
     /// dbar's to choose.
     art: Option<Arc<crate::icon::Raster>>,
-    /// A native icon selected by the source rather than by the module's style.
-    icon: Option<Icon>,
+    /// What the source put beside this item, for a source that decorates its own items.
+    /// `None` on every source that leaves the icon to the module's style.
+    decoration: Option<Decoration<'g>>,
+}
+
+/// What a source puts beside one of its items, in the place a style's icon would go.
+///
+/// A source that decorates at all decorates every item it publishes, `Nothing` included:
+/// letting the style's icon stand in for the items the config passed over would draw it on
+/// exactly the workspaces `icons` says nothing about, and put it on the other side of the
+/// wording from the ones it does.
+#[derive(Clone, Copy)]
+enum Decoration<'g> {
+    /// Geometry, drawn after the wording in the module's own icon colour.
+    Native(Icon),
+    /// Text, shaped after the wording as part of it, which is what an emoji or an icon
+    /// font's glyph is.
+    Text(&'g str),
+    Nothing,
 }
 
 /// Everything a group shows, in the order the group asks for.
@@ -970,7 +987,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
         action: item.action.clone(),
         pages: 1,
         art: None,
-        icon: None,
+        decoration: None,
     };
 
     if group.wildcard {
@@ -1003,14 +1020,14 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                             action: None,
                             pages: 1,
                             art: None,
-                            icon: None,
+                            decoration: None,
                         });
                     }
                     continue;
                 };
                 out.push(Candidate {
                     art: None,
-                    icon: None,
+                    decoration: None,
                     module,
                     text: wording(module, inputs.alt).render(&reading.fields),
                     flags: StateFlags {
@@ -1051,7 +1068,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     }
                     out.push(Candidate {
                         art: None,
-                        icon: None,
+                        decoration: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
@@ -1086,7 +1103,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     fields.set_primary("index");
                     out.push(Candidate {
                         art: None,
-                        icon: None,
+                        decoration: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
@@ -1109,7 +1126,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     fields.set("mode", Value::Text(mode.clone()));
                     out.push(Candidate {
                         art: None,
-                        icon: None,
+                        decoration: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
@@ -1145,7 +1162,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     fields.set("status", Value::Text(item.status.name().to_string()));
                     out.push(Candidate {
                         art: item.icon.clone(),
-                        icon: None,
+                        decoration: None,
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags {
@@ -1169,21 +1186,23 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     }
                     let mut fields = Fields::default();
                     fields.set("name", Value::Text(workspace.name.clone()));
-                    let mut rendered = wording(module, inputs.alt).render(&fields);
-                    let icon = match view.icon(&workspace.name) {
-                        Some(WorkspaceIcon::Native(icon)) => Some(*icon),
-                        Some(WorkspaceIcon::Text(icon)) if !icon.is_empty() => {
-                            rendered.push(' ');
-                            rendered.push_str(icon);
-                            None
-                        }
-                        _ => None,
-                    };
+                    // Geometry goes in the icon slot and text is shaped with the wording,
+                    // so each kind of workspace icon is placed by the rules for its kind.
+                    // A module that names no icons at all decorates nothing and leaves the
+                    // slot to its style, the way it did before there were any.
+                    let decoration =
+                        (!view.icons.is_empty()).then(|| match view.icon(&workspace.name) {
+                            Some(WorkspaceIcon::Native(icon)) => Decoration::Native(*icon),
+                            Some(WorkspaceIcon::Text(icon)) if !icon.is_empty() => {
+                                Decoration::Text(icon)
+                            }
+                            _ => Decoration::Nothing,
+                        });
                     out.push(Candidate {
                         art: None,
-                        icon,
+                        decoration,
                         module,
-                        text: rendered,
+                        text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags {
                             urgent: workspace.urgent,
                             focused: workspace.focused,
@@ -1297,8 +1316,15 @@ fn size_group(
             action,
             pages,
             art,
-            icon: source_icon,
+            decoration,
         } = candidate;
+        // Geometry stands in the icon's place; text is shaped with the wording. Either way
+        // a source that decorates keeps the slot, so `style.icon` is left for folding.
+        let (source_icon, suffix) = match decoration {
+            Some(Decoration::Native(icon)) => (Some(icon), None),
+            Some(Decoration::Text(text)) => (None, Some(text)),
+            Some(Decoration::Nothing) | None => (None, None),
+        };
         // Whether this module's program is out, which the spinner is drawn for. The check
         // is skipped outright while nothing is waiting, which is nearly always.
         let waiting = !inputs.waiting.is_empty()
@@ -1371,7 +1397,13 @@ fn size_group(
                 style,
                 ..Fitted::default()
             };
-            if raw.is_empty() && !folded && !waiting && art.is_none() && source_icon.is_none() {
+            if raw.is_empty()
+                && !folded
+                && !waiting
+                && art.is_none()
+                && source_icon.is_none()
+                && suffix.is_none()
+            {
                 return hidden;
             }
             let mut content = strip(raw);
@@ -1383,6 +1415,7 @@ fn size_group(
                 && !waiting
                 && art.is_none()
                 && source_icon.is_none()
+                && suffix.is_none()
             {
                 return hidden;
             }
@@ -1405,6 +1438,15 @@ fn size_group(
             if folded {
                 content.clear();
             }
+            // The decoration a source wrote as text lands here rather than in the wording
+            // it follows: a rule reads what the module says, and folding leaves the icon,
+            // which for a decoration written as text is the decoration itself.
+            if let Some(suffix) = suffix {
+                if !content.is_empty() {
+                    content.push(' ');
+                }
+                content.push_str(suffix);
+            }
 
             // A command with a run on its way says so where its icon goes, so the reading
             // that is coming lands in the place the spinner was and nothing else moves. A
@@ -1412,21 +1454,28 @@ fn size_group(
             // A picture the source handed over stands in for whatever icon the style
             // names: an application's own artwork is the thing a tray module exists to
             // show.
-            let (icon, icon_after_text) = match (waiting, art.is_some(), folded, source_icon) {
-                (true, _, _, _) => (Some((Icon::Spinner, inputs.spin)), false),
-                (false, true, _, _) => (Some((Icon::Raster, 0)), false),
-                (false, false, false, Some(icon)) => (Some((icon, 0)), true),
-                (false, false, _, _) => (
-                    style.icon.map(|icon| {
-                        let level = if icon.is_graded() {
-                            value.map(icon::level_of).unwrap_or(0)
-                        } else {
-                            0
-                        };
-                        (icon, level)
-                    }),
-                    false,
-                ),
+            let styled = || {
+                style.icon.map(|icon| {
+                    let level = if icon.is_graded() {
+                        value.map(icon::level_of).unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    (icon, level)
+                })
+            };
+            let (icon, icon_after_text) = match (waiting, art.is_some(), source_icon) {
+                (true, _, _) => (Some((Icon::Spinner, inputs.spin)), false),
+                (false, true, _) => (Some((Icon::Raster, 0)), false),
+                (false, false, Some(icon)) => (Some((icon, 0)), true),
+                (false, false, None) => match (decoration, folded) {
+                    // A source that decorates its own items and gave this one nothing gets
+                    // nothing: the style's icon would land on exactly the workspaces the
+                    // config passed over. Folding is the exception, since it takes the
+                    // wording away and the style's icon is then all there is left to click.
+                    (Some(Decoration::Nothing), true) | (None, _) => (styled(), false),
+                    (Some(_), _) => (None, false),
+                },
             };
             // The icon and the space after it, which is what the text starts behind. An
             // icon is as tall as `icon_size` and as wide as its own shape asks for, which
@@ -2530,6 +2579,41 @@ padding = 0
         assert_eq!(on(None), ["1", "2", "3"]);
     }
 
+    /// One frame of a bar whose only module is `sway:workspaces`, on the two screens the
+    /// other compositor tests use.
+    fn workspaces(
+        config: &str,
+        switching: &std::collections::HashMap<String, Leaving>,
+        collapsed: &std::collections::HashSet<String>,
+    ) -> Frame {
+        let cfg = Config::parse(config).expect("test config parses");
+        let sway = two_screens();
+        let inputs = Inputs {
+            items: &[],
+            native: &Registry::new(&Default::default()),
+            sway: &sway,
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed_groups: &Default::default(),
+            switching,
+            folding: &Default::default(),
+            collapsed,
+            waiting: &Default::default(),
+            spin: 0,
+            tray: &Default::default(),
+            output: None,
+        };
+        compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
+    }
+
+    fn wordings(frame: &Frame) -> Vec<&str> {
+        frame.groups[0]
+            .modules
+            .iter()
+            .map(|module| module.text.as_str())
+            .collect()
+    }
+
     #[test]
     fn workspace_icons_can_be_native_or_text_and_are_optional() {
         let config = r##"
@@ -2545,30 +2629,8 @@ format = "$name"
 icons = { "1" = "$slack", "2" = "󰘦", "3" = "$chrome" }
 padding = 0
 "##;
-        let cfg = Config::parse(config).expect("test config parses");
-        let sway = two_screens();
-        let inputs = Inputs {
-            items: &[],
-            native: &Registry::new(&Default::default()),
-            sway: &sway,
-            alt: &Default::default(),
-            pages: &Default::default(),
-            collapsed_groups: &Default::default(),
-            switching: &Default::default(),
-            folding: &Default::default(),
-            collapsed: &Default::default(),
-            waiting: &Default::default(),
-            spin: 0,
-            tray: &Default::default(),
-            output: None,
-        };
-        let frame = compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None);
-        let texts: Vec<&str> = frame.groups[0]
-            .modules
-            .iter()
-            .map(|module| module.text.as_str())
-            .collect();
-        assert_eq!(texts, ["1", "2 󰘦", "3"]);
+        let frame = workspaces(config, &Default::default(), &Default::default());
+        assert_eq!(wordings(&frame), ["1", "2 󰘦", "3"]);
         let modules = &frame.groups[0].modules;
         assert_eq!(
             modules[0].icon.as_ref().map(|icon| icon.icon),
@@ -2579,6 +2641,119 @@ padding = 0
         assert_eq!(
             modules[2].icon.as_ref().map(|icon| icon.icon),
             Some(Icon::Chrome)
+        );
+    }
+
+    /// A bar showing icons and nothing else is what `icons` with no wording is for, and a
+    /// workspace icon written as text has to start where a native one would.
+    #[test]
+    fn a_workspace_icon_needs_no_wording_in_front_of_it() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["ws"]
+
+[module.ws]
+source = "sway:workspaces"
+format = ""
+icons = { "1" = "X", "2" = "$slack" }
+padding = 0
+"##;
+        let frame = workspaces(config, &Default::default(), &Default::default());
+        assert_eq!(
+            wordings(&frame),
+            ["X", ""],
+            "no wording, so no gap before one"
+        );
+        let modules = &frame.groups[0].modules;
+        assert_eq!(
+            modules.len(),
+            2,
+            "the third workspace is named by no icon and says nothing, so it is not there"
+        );
+        assert_eq!(modules[0].width, 1.0, "one character and no gap");
+        assert_eq!(
+            modules[1].icon.as_ref().map(|icon| icon.icon),
+            Some(Icon::Slack)
+        );
+    }
+
+    /// A click between two wordings measures the one it is leaving, and the icon belongs to
+    /// the workspace rather than to either wording, so both of them have to carry it.
+    #[test]
+    fn a_workspace_icon_is_on_the_wording_a_click_is_leaving_too() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["ws"]
+
+[module.ws]
+source = "sway:workspaces"
+format = "$name"
+format_alt = "w$name"
+icons = { "1" = "XX" }
+padding = 0
+"##;
+        let switching =
+            std::collections::HashMap::from([("ws".to_string(), Leaving { from: 1, at: 0.0 })]);
+        let frame = workspaces(config, &switching, &Default::default());
+        let travelling = &frame.groups[0].modules[0];
+        assert_eq!(travelling.text, "1 XX");
+        assert_eq!(
+            travelling.width, 5.0,
+            "the box it is leaving is `w1 XX`, icon included, so the icon is not cut off"
+        );
+    }
+
+    /// Folding takes the wording and leaves the icon, and a workspace icon is the icon.
+    #[test]
+    fn a_folded_workspace_is_left_with_the_icon_it_was_given() {
+        let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["ws"]
+
+[module.ws]
+source = "sway:workspaces"
+format = "$name"
+icons = { "1" = "$slack", "2" = "XX" }
+icon = "cpu"
+icon_size = 10
+collapsible = true
+padding = 0
+"##;
+        let open = workspaces(config, &Default::default(), &Default::default());
+        assert_eq!(wordings(&open), ["1", "2 XX", "3"]);
+        assert_eq!(
+            open.groups[0].modules[2].icon.as_ref().map(|i| i.icon),
+            None,
+            "a workspace `icons` passes over gets nothing, not the style's icon on the \
+             other side of its name"
+        );
+
+        let folded = workspaces(
+            config,
+            &Default::default(),
+            &std::collections::HashSet::from(["ws".to_string()]),
+        );
+        assert_eq!(wordings(&folded), ["", "XX", ""]);
+        let modules = &folded.groups[0].modules;
+        assert_eq!(
+            modules[0].icon.as_ref().map(|i| i.icon),
+            Some(Icon::Slack),
+            "the workspace's own icon is what is left to click on"
+        );
+        assert!(modules[1].icon.is_none(), "its icon is the text it is now");
+        assert_eq!(
+            modules[2].icon.as_ref().map(|i| i.icon),
+            Some(Icon::Cpu),
+            "folded down, a workspace with no icon of its own falls back on the style's"
         );
     }
 

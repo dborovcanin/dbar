@@ -533,7 +533,6 @@ say where they are from:
 ```toml
 [module.workspaces]
 source = "sway:workspaces"
-format = "$name"
 style = "plain"
 
 [module.workspaces.icons]
@@ -560,9 +559,16 @@ its own state and its own click target - clicking switches to that workspace.
 `focused` and `visible` join `urgent` as state conditions. `icons` maps the
 workspace name to something drawn after it; `default` can supply a fallback.
 A value beginning with `$` names a native dbar icon, while any other value is
-ordinary text, including emoji and icon-font glyphs. An unmapped workspace gets
-no icon or extra gap. This keeps display icons in dbar's config, so Sway
-workspace names can remain plain.
+ordinary text, including emoji and icon-font glyphs. A native icon is drawn like
+any other icon, `gap` away from the name; text is shaped as part of the name,
+one space after it. This keeps display icons in dbar's config, so Sway workspace
+names can remain plain.
+
+A workspace `icons` says nothing about gets nothing: no icon, no extra gap, and
+not the module's own `icon` either, which would otherwise appear on exactly the
+workspaces the config passed over and on the other side of the name from the
+ones it did not. A module that is `collapsible` still needs that `icon`, since
+folding takes every name away and leaves one thing to click on.
 
 The keyboard layout comes from the same place, and is reported again the moment
 it is switched, so it costs no interval:
