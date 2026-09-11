@@ -1,139 +1,297 @@
-# dbar default configuration.
+# Everforest, along the bottom, with the window title in the middle.
 #
-# This is what dbar compiles in and uses when no config file exists. Copy it to
-# ~/.config/dbar/config.toml and edit, or write it out with:
+#   dbar -c examples/everforest.toml
 #
-#   dbar --print-config > ~/.config/dbar/config.toml
+# A bar at the bottom is read differently from one at the top: it is where the
+# eye rests rather than where it starts, so this one puts the thing that
+# changes most - what you are looking at - in the middle where it is found
+# without looking, and keeps the numbers out at the right.
 #
-# Everything here is read by dbar itself, so nothing else has to be installed,
-# configured or running. See examples/showcase.toml for every key dbar
-# understands, including how to bring in an external i3bar provider for the
-# things dbar cannot read yet.
+# The transitions are `round`: two quarter-ellipses meeting at a point, which
+# is the softest of the filled shapes and the one that suits a palette with no
+# hard edges in it.
 
 [bar]
-height = 34
+height = 30
 position = "top"
-margin = 6
+margin = 5
 gap = 6
-# Kept font-agnostic, since this is the built-in default. Icon sizes follow it
-# unless [bar] icon_size says otherwise.
-font = "sans-serif 10"
-
-[bar.background]
-# Fully transparent, so the group below reads as a floating island.
-color = "#00000000"
-radius = 0
+# Everforest is a warm, low-contrast palette, and a humanist face sits in it better
+# than a geometric one: the softer letterforms belong to the same idea as the colours.
+font = "Fira Sans 16"
+icon_size = 17
 
 [colors]
-background = "#1e1e2e"
-surface = "#313244cc"   # alpha cc, so SwayFX blur shows through
-text = "#cdd6f4"
-warning = "#f9e2af"
-critical = "#f38ba8"
+# Everforest dark, medium contrast.
+base = "#2d353b"     # bg0
+surface = "#343f44"  # bg1
+raised = "#3d484d"   # bg2
+line = "#475258"     # bg3
+text = "#d3c6aa"     # fg
+subtext = "#859289"  # grey1
+green = "#a7c080"
+aqua = "#83c092"
+blue = "#7fbbb3"
+warning = "#dbbc7f"  # yellow
+critical = "#e67e80" # red
 
-[style.default]
+[left]
+groups = ["desktop"]
+
+[center]
+groups = ["window"]
+
+[right]
+groups = ["system", "power", "time"]
+
+# ---------------------------------------------------------------------------
+# Styles
+# ---------------------------------------------------------------------------
+
+[style.plain]
+foreground = "$text"
+padding = 5
+icon_gap = 3
+
+[style.tile]
+background = "$surface"
+foreground = "$text"
+padding = 5
+icon_gap = 3
+
+[style.tile_alt]
+background = "$raised"
+foreground = "$text"
+padding = 5
+icon_gap = 3
+
+[style.warning]
+background = "$warning"
+foreground = "$base"
+padding = 5
+icon_gap = 3
+
+[style.critical]
+background = "$critical"
+foreground = "$base"
+padding = 5
+icon_gap = 3
+
+[style.focused]
+background = "$green"
+foreground = "$base"
+padding = 8
+radius = 8
+
+[style.visible]
+background = "$raised"
 foreground = "$text"
 padding = 8
+radius = 8
 
-# `source` is what dbar reads; `interval` is how often, and it needs a unit so
-# that "2s" cannot be misread as two of something else. Both the interval and
-# the wording have sensible defaults, so a module that wants the ordinary thing
-# says only where it comes from.
+[style.dim]
+foreground = "$subtext"
+padding = 8
+
+[style.hovered]
+background = "$line"
+foreground = "$text"
+
+# ---------------------------------------------------------------------------
+# Groups
 #
-# The fields a format may name are the ones its source publishes:
-#
-#   cpu         $utilization
-#   memory      $percent $used $total $available
-#               $swap_percent $swap_used $swap_total
-#   battery     $percent $status $power $time $health $threshold
-#   backlight   $brightness $device
-#   time        $now
+# `opacity` fades each island once it is finished, which is what lets SwayFX
+# blur what is behind it without the fills inside compositing against each
+# other. The colours themselves stay opaque.
+# ---------------------------------------------------------------------------
+
+[group.desktop]
+modules = ["workspaces"]
+background = "$surface"
+opacity = 0.92
+radius = 10
+padding = 3
+spacing = 3
+
+[group.window]
+modules = ["title"]
+background = "$surface"
+opacity = 0.92
+radius = 10
+
+[group.system]
+modules = ["cpu", "memory", "temperature", "network"]
+opacity = 0.92
+radius = 10
+collapsible = true
+collapse_button = "right"
+collapse_animation = "180ms"
+
+[group.system.separator]
+shape = "round"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.system.collapsed]
+style = "tile"
+icon = "arch"
+
+
+[group.power]
+modules = ["volume", "brightness", "battery"]
+opacity = 0.92
+radius = 10
+
+[group.power.separator]
+shape = "round"
+width = 14
+direction = "right"
+color = "previous"
+overlap = 1
+
+[group.time]
+modules = ["clock"]
+background = "$aqua"
+opacity = 0.92
+radius = 10
+
+# ---------------------------------------------------------------------------
+# Modules
+# ---------------------------------------------------------------------------
+
+[module.workspaces]
+source = "sway:workspaces"
+style = "dim"
+min_width = 28
+
+[module.workspaces.states.focused]
+focused = true
+style = "focused"
+
+[module.workspaces.states.visible]
+visible = true
+style = "visible"
+
+[module.workspaces.states.urgent]
+urgent = true
+style = "critical"
+radius = 8
+
+[module.title]
+source = "sway:window"
+style = "plain"
+max_width = 460
+
 [module.cpu]
 source = "cpu"
 interval = "2s"
-# A fixed width stops the module resizing every time the number crosses ten.
-format = " $utilization.n(w:4) "
-style = "default"
+format = "$utilization.n(d:0)"
+style = "tile"
 icon = "cpu"
+min_width = 66
 
 [module.cpu.states.busy]
-above = 80
-foreground = "$warning"
+above = 85
+style = "warning"
 
 [module.memory]
 source = "memory"
 interval = "5s"
-format = " $percent.n(w:4) "
-# A left click swaps to this and back.
-format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
-style = "default"
+format = "$percent.n(d:0)"
+format_alt = "$used.n(d:1) of $total.n(d:0)"
+style = "tile_alt"
 icon = "memory"
+min_width = 66
 
-[module.memory.states.high]
-above = 85
-foreground = "$critical"
+[module.memory.states.full]
+above = 90
+style = "warning"
 
-# A machine with no backlight publishes nothing for it, and a module with
-# nothing to report is not drawn at all.
-#
-# `signal` reads it again on demand: bind a brightness key to
-# `brightnessctl set +10%; pkill -RTMIN+8 dbar` and the bar keeps up.
-[module.backlight]
+[module.temperature]
+source = "temperature"
+interval = "5s"
+format = "$temp.n(d:0)"
+style = "tile"
+icon = "temperature"
+min_width = 68
+
+[module.temperature.states.hot]
+state = "critical"
+style = "critical"
+
+[module.network]
+source = "network"
+interval = "2s"
+format = "$ssid|$device"
+format_alt = "$down{  $up}"
+style = "tile_alt"
+icon = "wifi"
+
+[module.network.states.offline]
+field = "state"
+equals = "down"
+icon = "wifi-off"
+
+[module.volume]
+source = "audio"
+scroll = "5%"
+format = "$volume.n(d:0)"
+style = "tile"
+icon = "volume"
+min_width = 66
+
+[module.volume.states.headphones_muted]
+fields = { muted = "yes", port = "headphones" }
+foreground = "$subtext"
+icon = "headphones-muted"
+
+[module.volume.states.muted]
+field = "muted"
+equals = "yes"
+foreground = "$subtext"
+icon = "volume-muted"
+
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "headphones"
+
+[module.brightness]
 source = "backlight"
-signal = 8
-format = " $brightness.n(w:4) "
-style = "default"
+scroll = "5%"
+format = "$brightness.n(d:0)"
+style = "tile_alt"
 icon = "brightness"
+min_width = 66
 
-# A machine with no battery publishes nothing for it, so this module simply is
-# not drawn on a desktop. Braces hold the parts that only apply sometimes: no
-# time remaining while it sits on mains, and no cap unless something is holding
-# charging back, as TLP does.
 [module.battery]
 source = "battery"
 interval = "30s"
-format = " $percent.n(w:4){  $time.dur(style:short) left}{  cap $threshold} "
-style = "default"
+format = "$percent.n(d:0)"
+format_alt = "$percent.n(d:0){  $time.dur(style:short) left}"
+style = "tile"
 icon = "battery"
+min_width = 66
 
-# `equals` matches a word the source published, rather than the wording a format
-# happened to produce.
-[module.battery.states.charging]
-field = "status"
-equals = "charging"
+[module.battery.states.plugged]
+field = "supply"
+equals = "mains"
 icon = "battery-charging"
 
-# The battery decides for itself when it is worth alarming about, and only does
-# so while actually draining: 10% with the charger in is not a problem.
-[module.battery.states.low]
+[module.battery.states.warning]
 state = "warning"
-foreground = "$warning"
+style = "warning"
 
-[module.battery.states.flat]
+[module.battery.states.critical]
 state = "critical"
-foreground = "$critical"
+style = "critical"
 
 [module.clock]
 source = "time"
-# Read once a minute, and the reading lands on the minute rather than drifting
-# from whenever dbar happened to start.
 interval = "1m"
-format = " $now.time(f:'%a %d %b  %H:%M') "
-style = "default"
+format = "$now.time(f:'%a %d %b  %H:%M')"
+style = "plain"
+foreground = "$base"
 icon = "clock"
-
-[right]
-groups = ["system", "clock"]
-
-[group.system]
-modules = ["cpu", "memory", "backlight", "battery"]
-background = "$surface"
-radius = 10
-padding = 4
-spacing = 0
-
-[group.clock]
-modules = ["clock"]
-background = "$surface"
-radius = 10
-padding = 4
