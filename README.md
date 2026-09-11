@@ -1,4 +1,4 @@
-# dbar
+<h1>dbar <img src="docs/gallery/logo.png" alt="dbar logo" width="144"></h1>
 
 A small, event-driven Wayland status bar for Sway/SwayFX. It renders with
 `tiny-skia` on a `wlr-layer-shell` surface and reads what it shows itself, from
