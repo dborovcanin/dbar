@@ -1064,11 +1064,11 @@ impl App {
                     None => return,
                 }
             }
-            row => match self.menus.iter().position(|m| {
-                m.awaiting == Some((request, row))
-                    && m.key == key
-                    && m.rows.iter().any(|r| r.id == row && r.submenu)
-            }) {
+            row => match self
+                .menus
+                .iter()
+                .position(|m| m.awaiting == Some((request, row)) && m.key == key)
+            {
                 Some(level) => {
                     self.menus[level].awaiting = None;
                     Anchor2::Row { level, id: row }
