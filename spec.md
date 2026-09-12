@@ -234,8 +234,9 @@ The main configuration tables are:
 
 An icon is written the same way in every slot that takes one, a workspace's and
 a fold's included: `$name` is one of the built-in vector icons, sized by
-`icon_size`, and any other string is text shaped with the font. A misspelled
-`$name` is a configuration error; a glyph makes no claim that can be checked.
+`icon_size`; `none` removes the icon; and any other string is text shaped with
+the font. A misspelled `$name` is a configuration error; a glyph makes no claim
+that can be checked.
 
 Unknown keys, invalid field references, incompatible options, conflicting
 button assignments, and impossible geometry are configuration errors. A key

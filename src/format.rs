@@ -407,6 +407,9 @@ impl<'a> Parser<'a> {
             };
             args.push((key, value));
             if self.eat(',') {
+                if self.peek() == Some(')') {
+                    bail!("trailing comma in .{name}() arguments");
+                }
                 continue;
             }
             if !self.eat(')') {
@@ -1283,6 +1286,18 @@ mod tests {
                 error.contains("with its parentheses"),
                 "{written} gave {error}"
             );
+        }
+    }
+
+    /// The parser and the published grammar have one spelling for an argument list.
+    #[test]
+    fn a_function_argument_list_has_no_trailing_comma() {
+        for written in ["$a.n(d:1,)", "$a.n(d:1,w:4,)"] {
+            let refused = Format::parse(written)
+                .err()
+                .unwrap_or_else(|| panic!("{written} should be refused"));
+            let error = format!("{refused:#}");
+            assert!(error.contains("trailing comma"), "{written} gave {error}");
         }
     }
 

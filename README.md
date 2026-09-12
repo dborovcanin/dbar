@@ -135,10 +135,10 @@ root at all.
   wheel moves between tracks, over MPRIS on the session bus
 - `collapsible = true`: a click folds a module down to its icon, and the next one
   unfolds it; `collapse_button` says which, and defaults to the right
-- `collapse_animation` on a group and `alt_animation` on a module: the change of
-  width a click asks for is travelled rather than jumped. The timer exists only
-  while something is moving and drops itself on the frame it arrives, so a bar
-  nobody is clicking on still costs nothing
+- `collapse_animation` on a group or module, and `alt_animation` on a module:
+  the change of width a click asks for is travelled rather than jumped. The
+  timer exists only while something is moving and drops itself on the frame it
+  arrives, so a bar nobody is clicking on still costs nothing
 - `refresh_button = "left"`: a click reads the source again — what a reading
   fetched over the network wants instead of an interval
 - `pages = true` on a command module: every line of a run is a reading of its
@@ -631,9 +631,12 @@ max_width = 320         # logical pixels; 0, the default, is unbounded
 ```
 
 What does not fit is cut at a character boundary and marked with an ellipsis.
-`max_width` bounds the whole module, so padding and any icon come out of the
-same budget; if nothing is left for text, a module with an icon draws that
-alone.
+While expanded, `max_width` bounds the whole module, so padding and any icon
+come out of the same budget; if nothing is left for text, a module with an icon
+draws that alone. A folded module keeps its icon even when the cap is narrower:
+that icon is the only click target that can unfold it. A native folded icon that
+cannot fit is rejected when the config is read; a glyph is measured only once
+fonts are available and is therefore preserved at layout time.
 
 ### Module states
 
@@ -1110,7 +1113,7 @@ source = "command"
 command = ["uname", "-r"]
 interval = "once"
 format = "$text"
-icon = "$cpu"           # any module key works here; state rules can swap it
+icon = "$cpu"           # any built-in icon name works here; state rules can swap it
 ```
 
 When a command is run to completion, its answer is **the last line with

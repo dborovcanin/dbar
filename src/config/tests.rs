@@ -1907,4 +1907,28 @@ fn a_fold_needs_an_icon_in_every_appearance_it_can_wear() {
         collapse.icon.is_none(),
         "nothing was named, so the fold follows what is worn"
     );
+
+    // A collapsed table can change the geometry without naming an icon. The fold still
+    // follows the module or state's icon, but it draws that icon with this one shared
+    // collapsed style; accepting zero-sized native geometry here would leave no way back.
+    for (case, body) in [
+        (
+            "the base icon in collapsed geometry",
+            "icon = \"$cpu\"\npadding = 0\ncollapsed = { icon_size = 0 }",
+        ),
+        (
+            "a state icon in collapsed geometry",
+            "icon = \"x\"\ncollapsed = { icon_size = 0 }\n\
+             [module.m.states.hot]\nabove = 90\nicon = \"$media\"\nicon_size = 12",
+        ),
+    ] {
+        let error = format!(
+            "{:#}",
+            Config::parse(&one_module(&module(body))).expect_err(case)
+        );
+        assert!(
+            error.contains("positive finite icon_size"),
+            "{case}: {error}"
+        );
+    }
 }

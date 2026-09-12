@@ -161,35 +161,60 @@ pub enum Icon {
     Spinner,
 }
 
+/// Declare the written vocabulary once while retaining a direct match for config parsing.
+/// Tests use the generated table for documentation coverage and drawable reachability.
+macro_rules! written_icons {
+    ($(($name:literal, $icon:path)),+ $(,)?) => {
+        #[cfg(test)]
+        const WRITTEN_ICONS: &[(&str, Icon)] = &[$(($name, $icon)),+];
+
+        fn parse_written_icon(name: &str) -> Option<Icon> {
+            match name {
+                $($name => Some($icon),)+
+                _ => None,
+            }
+        }
+    };
+}
+
+written_icons![
+    ("cpu", Icon::Cpu),
+    ("tux", Icon::Tux),
+    ("arch", Icon::Arch),
+    ("arch-linux", Icon::Arch),
+    ("slack", Icon::Slack),
+    ("code", Icon::Code),
+    ("chrome", Icon::Chrome),
+    ("chromium", Icon::Chrome),
+    ("memory", Icon::Memory),
+    ("ram", Icon::Memory),
+    ("disk", Icon::Disk),
+    ("clock", Icon::Clock),
+    ("time", Icon::Clock),
+    ("ethernet", Icon::Ethernet),
+    ("battery", Icon::Battery),
+    ("battery-charging", Icon::BatteryCharging),
+    ("wifi", Icon::Wifi),
+    ("network", Icon::Wifi),
+    ("volume", Icon::Volume),
+    ("brightness", Icon::Brightness),
+    ("temperature", Icon::Temperature),
+    ("temp", Icon::Temperature),
+    ("volume-muted", Icon::VolumeMuted),
+    ("wifi-off", Icon::WifiOff),
+    ("headphones", Icon::Headphones),
+    ("headphones-muted", Icon::HeadphonesMuted),
+    ("play", Icon::Play),
+    ("pause", Icon::Pause),
+    ("media", Icon::Media),
+    ("music", Icon::Media),
+    ("keyboard", Icon::Keyboard),
+    ("language", Icon::Keyboard),
+];
+
 impl Icon {
     pub fn parse(name: &str) -> Option<Icon> {
-        Some(match name {
-            "cpu" => Icon::Cpu,
-            "tux" => Icon::Tux,
-            "arch" | "arch-linux" => Icon::Arch,
-            "slack" => Icon::Slack,
-            "code" => Icon::Code,
-            "chrome" | "chromium" => Icon::Chrome,
-            "memory" | "ram" => Icon::Memory,
-            "disk" => Icon::Disk,
-            "clock" | "time" => Icon::Clock,
-            "ethernet" => Icon::Ethernet,
-            "battery" => Icon::Battery,
-            "battery-charging" => Icon::BatteryCharging,
-            "wifi" | "network" => Icon::Wifi,
-            "volume" => Icon::Volume,
-            "brightness" => Icon::Brightness,
-            "temperature" | "temp" => Icon::Temperature,
-            "volume-muted" => Icon::VolumeMuted,
-            "wifi-off" => Icon::WifiOff,
-            "headphones" => Icon::Headphones,
-            "headphones-muted" => Icon::HeadphonesMuted,
-            "play" => Icon::Play,
-            "pause" => Icon::Pause,
-            "media" | "music" => Icon::Media,
-            "keyboard" | "language" => Icon::Keyboard,
-            _ => return None,
-        })
+        parse_written_icon(name)
     }
 
     /// How many steps this icon has, which is the animation's length for a spinner and
@@ -1001,43 +1026,7 @@ mod tests {
         Icon::Raster,
     ];
 
-    /// Every name `Icon::parse` accepts, which is the whole written vocabulary.
-    const NAMES: &[&str] = &[
-        "cpu",
-        "tux",
-        "arch",
-        "arch-linux",
-        "slack",
-        "code",
-        "chrome",
-        "chromium",
-        "memory",
-        "ram",
-        "disk",
-        "clock",
-        "time",
-        "ethernet",
-        "battery",
-        "battery-charging",
-        "wifi",
-        "network",
-        "volume",
-        "brightness",
-        "temperature",
-        "temp",
-        "volume-muted",
-        "wifi-off",
-        "headphones",
-        "headphones-muted",
-        "play",
-        "pause",
-        "media",
-        "music",
-        "keyboard",
-        "language",
-    ];
-
-    /// The README names every icon a config can ask for, and names nothing else.
+    /// The README names every icon a config can ask for, and every drawable is writable.
     ///
     /// It drifted once already, in both directions at once: icons were added and the list
     /// kept the old set, and the change that made `$name` the way to write one left every
@@ -1048,7 +1037,7 @@ mod tests {
         const README: &str = include_str!("../README.md");
         // Spelled with the sigil, so this cannot pass on a bare word the config would now
         // read as text, and in backticks, so prose about a module never stands in for it.
-        for name in NAMES {
+        for (name, _) in WRITTEN_ICONS {
             assert!(
                 Icon::parse(name).is_some(),
                 "the README vocabulary has {name:?}, which no longer parses"
@@ -1065,9 +1054,50 @@ mod tests {
                 continue;
             }
             assert!(
-                NAMES.iter().any(|name| Icon::parse(name) == Some(icon)),
+                WRITTEN_ICONS
+                    .iter()
+                    .any(|(_, written_icon)| *written_icon == icon),
                 "{icon:?} can be drawn but not written, so the README cannot name it"
             );
+        }
+    }
+
+    /// A known native name without `$` is valid text, but in project documentation and
+    /// examples it has always meant a native icon whose syntax went stale. Keep those
+    /// executable-looking snippets aligned with the one written icon language.
+    #[test]
+    fn documented_native_icon_assignments_keep_their_sigil() {
+        fn check(label: &str, text: &str) {
+            for (line_index, line) in text.lines().enumerate() {
+                let Some((_, after)) = line.split_once("icon =") else {
+                    continue;
+                };
+                let after = after.trim_start();
+                let Some(quote @ ('\'' | '"')) = after.chars().next() else {
+                    continue;
+                };
+                let value = &after[quote.len_utf8()..];
+                let Some(end) = value.find(quote) else {
+                    continue;
+                };
+                let value = &value[..end];
+                assert!(
+                    !WRITTEN_ICONS.iter().any(|(name, _)| *name == value),
+                    "{label}:{} writes native icon {value:?} without `$`",
+                    line_index + 1
+                );
+            }
+        }
+
+        check("README.md", include_str!("../README.md"));
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
+        for entry in std::fs::read_dir(dir).expect("examples/ is readable") {
+            let path = entry.expect("a readable directory entry").path();
+            if path.extension().is_none_or(|extension| extension != "toml") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("a readable example");
+            check(&path.display().to_string(), &text);
         }
     }
 

@@ -2433,31 +2433,33 @@ fn resolve_group(
             .with_context(|| format!("in [module.{module_name}]: collapse_animation"))?;
         // Whether the `collapsed` table named an icon of its own, which is not the same
         // question as what its resolved style ended up holding: the table starts from the
-        // module's style, so it inherits an icon it never mentioned.
-        let written_icon = raw_module
+        // module's style, so it inherits an icon it never mentioned. The resolved style
+        // already parsed that written icon; keep only its intent here rather than parsing
+        // the same value a second time.
+        let wrote_collapsed_icon = raw_module
             .and_then(|m| m.collapsed.as_ref())
             .and_then(|c| c.overrides.icon.as_deref())
-            .map(IconSpec::parse)
-            .transpose()
-            .with_context(|| format!("in [module.{module_name}.collapsed]"))?;
+            .is_some();
         let collapse = if collapsible {
             let worn = collapsed_style.as_ref().unwrap_or(&style);
-            let collapsed_icon = match written_icon {
+            let collapsed_icon = match (wrote_collapsed_icon, &worn.icon) {
                 // Folding to nothing is the one thing a fold may not do: the icon it
                 // leaves is the only way back, so asking for none is asking for a module
                 // that disappears on a click and stays gone.
-                Some(None) => bail!(
+                (true, None) => bail!(
                     "[module.{module_name}.collapsed]: icon is \"none\", so folding would \
                      leave nothing to see or click"
                 ),
-                Some(Some(icon)) => {
-                    check_collapsed_icon(&icon, worn, &format!("module {module_name:?}"))?;
-                    Some(icon)
+                (true, Some(icon)) => {
+                    check_collapsed_icon(icon, worn, &format!("module {module_name:?}"))?;
+                    Some(icon.clone())
                 }
                 // Nothing named, so the fold wears the module's own icon - which means
                 // every appearance it can wear has to have one. The module's is reachable
-                // whenever no rule is firing, and each state's whenever its own is.
-                None => {
+                // whenever no rule is firing, and each state's whenever its own is. A
+                // collapsed table can still change their geometry, so validate all of
+                // those icons against the collapsed style they will actually wear.
+                (false, _) => {
                     let Some(icon) = &style.icon else {
                         bail!(
                             "module {module_name:?} is collapsible but has no icon, and no \
@@ -2465,7 +2467,7 @@ fn resolve_group(
                              it would leave nothing to see or click"
                         );
                     };
-                    check_collapsed_icon(icon, &style, &format!("module {module_name:?}"))?;
+                    check_collapsed_icon(icon, worn, &format!("module {module_name:?}"))?;
                     for (name, rule) in state_names.iter().zip(&states) {
                         let Some(icon) = &rule.style.icon else {
                             bail!(
@@ -2477,7 +2479,7 @@ fn resolve_group(
                         };
                         check_collapsed_icon(
                             icon,
-                            &rule.style,
+                            collapsed_style.as_ref().unwrap_or(&rule.style),
                             &format!("[module.{module_name}.states.{name}]"),
                         )?;
                     }
