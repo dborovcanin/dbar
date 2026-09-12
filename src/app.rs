@@ -348,12 +348,15 @@ struct OpenMenu {
     hover: Option<usize>,
     /// Whether the pointer is currently on this popup's surface.
     inside: bool,
-    /// The submenu asked for while the pointer sits on a row, until it arrives.
+    /// The row of its parent menu that opened this one; absent for the root menu.
+    opened_from: Option<i32>,
+    /// The submenu asked for while the pointer sits on a row, until it arrives: the
+    /// request which identifies its answer and the row the answer belongs to.
     ///
     /// An application answers when it answers, and the pointer has usually moved on by
     /// then. Without this, a slow reply would open a menu under a row nobody is pointing
     /// at any more.
-    awaiting: Option<u64>,
+    awaiting: Option<(u64, i32)>,
     width: u32,
     height: u32,
     scale: i32,
@@ -362,12 +365,12 @@ struct OpenMenu {
 }
 
 /// What the submenu hover timer will do if the pointer does not change its mind first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 enum MenuIntent {
     /// Open `row` below the menu at `level`.
     Open { level: usize, row: i32 },
-    /// Keep this many outer menus and close the rest.
-    Close { keep: usize },
+    /// Close every submenu, leaving the root menu and its grab in place.
+    Close,
 }
 
 /// One delayed submenu action.
@@ -397,6 +400,16 @@ fn pointed_submenu(rows: &[crate::tray::menu::Row], hover: Option<usize>) -> Opt
         .and_then(|row| rows.get(row))
         .filter(|row| row.selectable() && row.submenu)
         .map(|row| row.id)
+}
+
+/// Whether opening `row` would only replace the same mapped or in-flight submenu.
+fn submenu_is_current(opened_from: Option<i32>, awaiting: Option<(u64, i32)>, row: i32) -> bool {
+    opened_from == Some(row) || awaiting.is_some_and(|(_, parent)| parent == row)
+}
+
+/// Whether a pointer leave may be the crossing from one popup into another.
+fn submenu_leave_needs_grace(level: usize, has_child: bool, awaiting: bool) -> bool {
+    level > 0 || has_child || awaiting
 }
 
 /// Close every menu deeper than `level`, innermost first.
@@ -1052,7 +1065,7 @@ impl App {
                 }
             }
             row => match self.menus.iter().position(|m| {
-                m.awaiting == Some(request)
+                m.awaiting == Some((request, row))
                     && m.key == key
                     && m.rows.iter().any(|r| r.id == row && r.submenu)
             }) {
@@ -1198,6 +1211,10 @@ impl App {
             Anchor2::Bar { bar, .. } => self.bars[*bar].output.clone(),
             Anchor2::Row { level, .. } => self.menus[*level].output.clone(),
         };
+        let opened_from = match anchor {
+            Anchor2::Bar { .. } => None,
+            Anchor2::Row { id, .. } => Some(id),
+        };
         self.menus.push(OpenMenu {
             key: key.to_string(),
             output,
@@ -1207,6 +1224,7 @@ impl App {
             frame,
             hover: None,
             inside: false,
+            opened_from,
             awaiting: None,
             width,
             height,
@@ -1322,7 +1340,7 @@ impl App {
         if entering
             && matches!(
                 self.menu_intent.map(|intent| intent.action),
-                Some(MenuIntent::Close { .. })
+                Some(MenuIntent::Close)
             )
         {
             // A leave from one popup precedes the enter into another. Reaching any menu
@@ -1332,17 +1350,13 @@ impl App {
 
         if at.is_none() {
             let has_child = self.menus.len() > index + 1;
-            // A request which has not answered cannot be allowed to open after the pointer
-            // has gone. There is no surface to cross into yet, so no grace is needed.
-            self.menus[index].awaiting = None;
-            if has_child || index > 0 {
+            let awaiting = self.menus[index].awaiting.is_some();
+            if submenu_leave_needs_grace(index, has_child, awaiting) {
                 self.menu_intent = Some(PendingMenuIntent {
-                    action: MenuIntent::Close {
-                        // The root stays because its grab owns the whole interaction. An
-                        // enter on an ancestor or descendant cancels this before it runs;
-                        // without one, the pointer has left the whole nested branch.
-                        keep: 1,
-                    },
+                    // The root stays because its grab owns the whole interaction. An
+                    // enter on an ancestor or descendant cancels this before it runs;
+                    // without one, the pointer has left the whole nested branch.
+                    action: MenuIntent::Close,
                     due: std::time::Instant::now() + SUBMENU_LEAVE_AFTER,
                 });
                 return;
@@ -1381,13 +1395,18 @@ impl App {
             return;
         }
 
+        let opened_from = self.menus.get(level + 1).and_then(|menu| menu.opened_from);
+        if submenu_is_current(opened_from, self.menus[level].awaiting, row) {
+            return;
+        }
+
         let key = self.menus[level].key.clone();
         close_below(&mut self.menus, level + 1);
         self.menus[level].awaiting = None;
         if let Some(commands) = &self.tray_commands {
             let request = self.menu_request.wrapping_add(1);
             self.menu_request = request;
-            self.menus[level].awaiting = Some(request);
+            self.menus[level].awaiting = Some((request, row));
             commands.send(crate::tray::Command::Menu {
                 key,
                 parent: row,
@@ -1410,11 +1429,14 @@ impl App {
         self.menu_intent = None;
         match intent.action {
             MenuIntent::Open { level, row } => self.open_submenu(level, row),
-            MenuIntent::Close { keep } => {
-                close_below(&mut self.menus, keep);
+            MenuIntent::Close => {
+                close_below(&mut self.menus, 1);
                 for menu in &mut self.menus {
-                    if !menu.inside && menu.hover.take().is_some() {
-                        menu.dirty = true;
+                    if !menu.inside {
+                        menu.awaiting = None;
+                        if menu.hover.take().is_some() {
+                            menu.dirty = true;
+                        }
                     }
                 }
                 self.draw_menus();

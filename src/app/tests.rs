@@ -30,6 +30,22 @@ fn only_an_enabled_submenu_is_opened_by_hover() {
     assert_eq!(pointed_submenu(&rows, None), None);
 }
 
+#[test]
+fn an_open_or_in_flight_submenu_is_not_opened_again() {
+    assert!(submenu_is_current(Some(7), None, 7));
+    assert!(submenu_is_current(None, Some((42, 7)), 7));
+    assert!(!submenu_is_current(Some(6), None, 7));
+    assert!(!submenu_is_current(None, Some((42, 6)), 7));
+}
+
+#[test]
+fn an_in_flight_submenu_gets_the_same_leave_grace_as_a_mapped_one() {
+    assert!(submenu_leave_needs_grace(0, false, true));
+    assert!(submenu_leave_needs_grace(0, true, false));
+    assert!(submenu_leave_needs_grace(1, false, false));
+    assert!(!submenu_leave_needs_grace(0, false, false));
+}
+
 /// A placed module with nothing on it, for saying what one gesture key does without
 /// describing a whole bar.
 fn placed() -> PlacedModule {
