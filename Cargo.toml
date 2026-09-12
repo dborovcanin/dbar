@@ -1,6 +1,6 @@
 [package]
 name = "dbar"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 # Let-chains and edition 2024 are what dbar's own code needs, which is 1.88.
 # The floor is 1.89 because cosmic-text asks for it, so keep this in step with
