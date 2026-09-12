@@ -1001,6 +1001,76 @@ mod tests {
         Icon::Raster,
     ];
 
+    /// Every name `Icon::parse` accepts, which is the whole written vocabulary.
+    const NAMES: &[&str] = &[
+        "cpu",
+        "tux",
+        "arch",
+        "arch-linux",
+        "slack",
+        "code",
+        "chrome",
+        "chromium",
+        "memory",
+        "ram",
+        "disk",
+        "clock",
+        "time",
+        "ethernet",
+        "battery",
+        "battery-charging",
+        "wifi",
+        "network",
+        "volume",
+        "brightness",
+        "temperature",
+        "temp",
+        "volume-muted",
+        "wifi-off",
+        "headphones",
+        "headphones-muted",
+        "play",
+        "pause",
+        "media",
+        "music",
+        "keyboard",
+        "language",
+    ];
+
+    /// The README names every icon a config can ask for, and names nothing else.
+    ///
+    /// It drifted once already, in both directions at once: icons were added and the list
+    /// kept the old set, and the change that made `$name` the way to write one left every
+    /// bare example meaning a glyph instead. A test is the only thing that notices, since
+    /// nothing else reads the README.
+    #[test]
+    fn the_readme_names_every_icon_a_config_can_ask_for() {
+        const README: &str = include_str!("../README.md");
+        // Spelled with the sigil, so this cannot pass on a bare word the config would now
+        // read as text, and in backticks, so prose about a module never stands in for it.
+        for name in NAMES {
+            assert!(
+                Icon::parse(name).is_some(),
+                "the README vocabulary has {name:?}, which no longer parses"
+            );
+            assert!(
+                README.contains(&format!("`${name}`")),
+                "the README does not name `${name}`"
+            );
+        }
+        // Everything drawable is reachable by one of those names. Raster is a tray item's
+        // own artwork and Spinner is drawn while a command is out; neither is written.
+        for icon in ALL {
+            if matches!(icon, Icon::Raster | Icon::Spinner) {
+                continue;
+            }
+            assert!(
+                NAMES.iter().any(|name| Icon::parse(name) == Some(icon)),
+                "{icon:?} can be drawn but not written, so the README cannot name it"
+            );
+        }
+    }
+
     /// Extent of one icon's ink, stroke width included.
     fn ink_bounds(icon: Icon, level: usize) -> Option<(f32, f32, f32, f32)> {
         let IconArt::Paths(paths) = art(icon, level) else {

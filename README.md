@@ -443,8 +443,16 @@ picks, then that module's own keys.
 
 ### Icons
 
-dbar draws its own icons as vector geometry, so they scale with `icon_size`
-rather than riding on a font:
+An icon is written the same way everywhere one can be written - a style, a
+state, a collapsed table and a workspace mapping alike. `$name` is one of dbar's
+own vector icons, drawn as geometry that scales with `icon_size` rather than
+riding on a font. Any other value is text, shaped with the font in front of the
+wording, which is how an icon font's glyph or an emoji gets onto the bar. `none`
+is no icon at all.
+
+A misspelled `$name` is a startup error. A glyph makes no claim that can be
+checked, so nothing is claimed about it: if the font has no such character, the
+font decides what to draw.
 
 ```toml
 [bar]
@@ -454,7 +462,7 @@ icon_size = 15          # base for every icon
 icon_size = 12          # overrides the bar
 
 [module.clock]
-icon = "clock"
+icon = "$clock"
 icon_size = 18          # overrides both
 ```
 
@@ -470,11 +478,17 @@ bar.
 out, it is a quarter of the icon size, so a bigger icon keeps its breathing room
 without being told; set it to tighten a busy bar.
 
-Fixed: `tux` (penguin), `arch` (the Arch Linux mark), `cpu`, `memory`, `disk`, `clock`,
-`ethernet`, `headphones`, `wifi-off`, `volume-muted`, `play`, `pause`.
+`icon_size` and `icon_gap` place geometry and mean nothing to a glyph, which is
+as big as the font makes it and is separated from the wording by a space.
 
-Graded: `battery`, `battery-charging`, `wifi`, `volume`, `brightness`,
-`temperature`. These have five steps and pick one from the value the source
+Fixed: `$tux` (penguin), `$arch` (the Arch Linux mark, also `$arch-linux`),
+`$slack`, `$code`, `$chrome` (also `$chromium`), `$cpu`, `$memory` (also `$ram`),
+`$disk`, `$clock` (also `$time`), `$ethernet`, `$headphones`,
+`$headphones-muted`, `$wifi-off`, `$volume-muted`, `$play`, `$pause`, `$media`
+(two beamed notes, also `$music`), `$keyboard` (also `$language`).
+
+Graded: `$battery`, `$battery-charging`, `$wifi` (also `$network`), `$volume`,
+`$brightness`, `$temperature` (also `$temp`). These have five steps and pick one from the value the source
 published — a battery at 58% draws a little over half full, and a thermometer
 reads its degrees as a share of a hundred, which is the range a processor lives
 in. A native source publishes what it measured;
@@ -628,7 +642,7 @@ A module can restyle itself conditionally:
 ```toml
 [module.battery]
 style = "stone"
-icon = "battery"
+icon = "$battery"
 
 [module.battery.states.warning]
 below = 30
@@ -648,17 +662,17 @@ style = "hovered"
 
 [module.volume.states.muted]
 contains = "MUTED"      # a substring of the module's own text
-icon = "volume-muted"
+icon = "$volume-muted"
 
 [module.volume.states.port]
 field = "port"          # headphones | speaker | hdmi | bluetooth | line-out
 equals = "headphones"
-icon = "headphones"
+icon = "$headphones"
 
 [module.battery.states.charging]
 contains = "CHARGING"
 strip = true            # drop the wording once it has been matched
-icon = "battery-charging"
+icon = "$battery-charging"
 ```
 
 A rule matches when every condition it states holds: `below` and `above`
@@ -680,7 +694,7 @@ name either half:
 ```toml
 [module.volume.states.headphones_muted]
 fields = { muted = "yes", port = "headphones" }
-icon = "headphones-muted"
+icon = "$headphones-muted"
 ```
 
 ```toml
@@ -692,7 +706,7 @@ style = "warning"
 [module.battery.states.charging]
 field = "status"        # or any word it publishes
 equals = "charging"
-icon = "battery-charging"
+icon = "$battery-charging"
 
 [module.cpu.states.unreadable]
 state = "error"         # idle, info, good, warning, critical, error
@@ -756,7 +770,7 @@ collapse_button = "right"
 
 [group.system.collapsed]
 style = "tile"        # optional named style
-icon = "cpu"
+icon = "$cpu"
 ```
 
 Groups default to collapse disabled and start expanded when enabled. Enabling it
@@ -881,9 +895,10 @@ style = "default"
 
 ### Animation
 
-Two clicks change how wide something is: folding a group down to its icon, and
-moving a module on to its next wording. Both jump by default, in one redraw, and
-both can travel instead:
+Three clicks change how wide something is: folding a group down to its icon,
+folding a single module down to its own, and moving a module on to its next
+wording. All three jump by default, in one redraw, and all three can travel
+instead:
 
 ```toml
 [group.system]
@@ -891,23 +906,39 @@ collapsible = true
 collapse_button = "right"
 collapse_animation = "250ms"   # the island between its two widths
 
+[module.media]
+collapsible = true
+collapse_animation = "150ms"   # the module between its wording and its icon
+
+[module.media.collapsed]       # what it wears folded; optional
+icon = "$media"
+
 [module.network]
 format = "$ssid|$device"
 format_alt = ["$down{  $up}", "$signal.n(d:0){  $dbm.n(d:0) dBm}"]
 alt_animation = "120ms"        # the module between two of its wordings
 ```
 
-Both take a duration with a unit — `"150ms"`, `"1s"` — and both are refused when
+Each takes a duration with a unit — `"150ms"`, `"1s"` — and each is refused when
 there is nothing to travel: `collapse_animation` without `collapsible`, or
 `alt_animation` without `format_alt`, is a startup error rather than a key that
-is spelled correctly and does nothing. Neither may be longer than ten seconds.
+is spelled correctly and does nothing. None may be longer than ten seconds.
+
+`[module.*.collapsed]` is what a folded module wears, when that should differ
+from what it wears open. It starts from the module's own style, so it says only
+what changes — usually the icon, so the thing left on the bar says what a click
+will bring back rather than what the open module's icon promised. Left out, a
+folded module keeps whatever it would have worn, state rules included. Written,
+it stands in place of those rules, hover among them.
 
 While something is travelling the bar redraws at about the rate the screen
 refreshes, eased so it leaves and arrives slowly. Everything else about the click
-is settled the moment it lands, so a group caught half shut still knows it is
-shut, and a wording clicked again half way is already showing the new one.
+is settled the moment it lands, so a fold caught half shut still knows it is
+shut, and a wording clicked again half way is already showing the new one. What
+travels is the edge: a fold draws what it is folding for the whole of the
+journey and cuts it at the box, rather than swapping the contents at one end.
 
-The two share a single 16 ms timer that exists only while something is actually
+The three share a single 16 ms timer that exists only while something is actually
 moving and drops itself on the frame the last one arrives. Nothing is
 interpolated at rest, and a bar nobody is clicking on wakes for none of it — the
 same bargain the spinner makes, which draws nothing until a command has been out
@@ -1068,7 +1099,7 @@ source = "command"
 command = ["uname", "-r"]
 interval = "once"
 format = "$text"
-icon = "cpu"           # any module key works here; state rules can swap it
+icon = "$cpu"           # any module key works here; state rules can swap it
 ```
 
 When a command is run to completion, its answer is **the last line with
