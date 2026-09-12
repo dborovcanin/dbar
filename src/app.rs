@@ -353,6 +353,7 @@ fn close_below(menus: &mut Vec<OpenMenu>, level: usize) {
 }
 
 /// The bound `xdg_wm_base`, which is all of the xdg shell a menu needs.
+#[derive(Clone)]
 struct WmBase(xdg_wm_base::XdgWmBase);
 
 // The positioner asks for one version of the global and the popup for another, and both
@@ -494,12 +495,13 @@ pub struct App {
     pixels: render::Pixels,
     compositor: CompositorState,
     layer_shell: LayerShell,
-    /// The shell a menu's surface comes from.
+    /// The shell a menu's surface comes from, bound only when a tray is configured.
     ///
     /// Only the popup half of it is used, and it is bound by hand rather than through
     /// `XdgShell` so that dbar does not have to answer for window decorations it will
-    /// never ask for.
-    wm_base: WmBase,
+    /// never ask for. `None` where there is nothing to open a menu, which is every bar
+    /// without a tray and every compositor that does not have the protocol.
+    wm_base: Option<WmBase>,
     /// One per screen the config asks for, in the order the compositor announced them.
     bars: Vec<Bar>,
     conn: Connection,
@@ -603,12 +605,18 @@ impl App {
             CompositorState::bind(globals, qh).context("wl_compositor is not available")?;
         let layer_shell = LayerShell::bind(globals, qh)
             .context("zwlr_layer_shell_v1 is not available; is this a wlroots compositor?")?;
-        // Only a tray needs this, and a compositor without it simply gets no menus.
-        let wm_base = WmBase(
-            globals
-                .bind(qh, 1..=XdgShell::API_VERSION_MAX, GlobalData)
-                .context("xdg_wm_base is not available, so tray menus cannot be opened")?,
-        );
+        // Only a tray needs this, so a bar without one never asks for it, and a
+        // compositor without it simply gets no menus rather than no bar.
+        let wm_base = match config.needs_tray() {
+            false => None,
+            true => match globals.bind(qh, 1..=XdgShell::API_VERSION_MAX, GlobalData) {
+                Ok(base) => Some(WmBase(base)),
+                Err(e) => {
+                    log::warn!("xdg_wm_base is not available, so tray menus cannot be opened: {e}");
+                    None
+                }
+            },
+        };
         let shm = Shm::bind(globals, qh).context("wl_shm is not available")?;
 
         let config_collectors = config.collectors();
@@ -1018,7 +1026,13 @@ impl App {
         );
         let (width, height) = (frame.width.ceil() as u32, frame.height.ceil() as u32);
 
-        let positioner = match XdgPositioner::new(&self.wm_base) {
+        // Cloned so that the borrow ends here: what follows needs `self` mutably.
+        let Some(wm_base) = self.wm_base.clone() else {
+            log::debug!("no xdg_wm_base was bound, so {key} cannot open a menu");
+            return;
+        };
+
+        let positioner = match XdgPositioner::new(&wm_base) {
             Ok(positioner) => positioner,
             Err(e) => {
                 log::warn!("a menu could not be positioned: {e}");
@@ -1081,7 +1095,7 @@ impl App {
             &positioner,
             &self.qh,
             surface,
-            &self.wm_base,
+            &wm_base,
         ) {
             Ok(popup) => popup,
             Err(e) => {
