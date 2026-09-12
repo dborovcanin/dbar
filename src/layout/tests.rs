@@ -3610,3 +3610,63 @@ foreground = "#ff0000"
         Color::parse("#ff0000").unwrap()
     );
 }
+
+/// Hovering a module that wears a written collapsed style leaves it wearing it.
+///
+/// The collapsed table stands in place of the state rules, and hover is a state rule, so
+/// there is nothing for the pointer to resolve. Before this was so, hover was compared
+/// against a cascade the module was not wearing, matched on nearly every key, and handed
+/// back the open colours - which took the collapsed ones away for as long as the pointer
+/// was over the one thing left to click.
+#[test]
+fn hovering_a_folded_module_keeps_the_collapsed_colours() {
+    let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+padding = 0
+spacing = 0
+
+[module.cpu]
+padding = 0
+collapsible = true
+icon = "$cpu"
+icon_size = 10
+icon_gap = 0
+foreground = "#ffffff"
+
+[module.cpu.collapsed]
+icon = "$memory"
+foreground = "#ff0000"
+"##;
+    let cfg = Config::parse(config).unwrap();
+    let items = [item("cpu", "abc")];
+    let native = Registry::new(&Default::default());
+    let no_groups: std::collections::HashSet<String> = Default::default();
+    let folded: std::collections::HashSet<String> = ["cpu".to_string()].into();
+    let mut inputs = group_inputs(&items, &native, &no_groups);
+    inputs.collapsed = &folded;
+
+    let away = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+    let module = &away.groups[0].modules[0];
+    assert_eq!(module.foreground, Color::parse("#ff0000").unwrap());
+
+    // The very middle of the module, so the pointer is unambiguously on it.
+    let at = (
+        module.x + module.width / 2.0,
+        module.y + module.height / 2.0,
+    );
+    let over = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, Some(at));
+    assert_eq!(
+        over.groups[0].modules[0].foreground,
+        Color::parse("#ff0000").unwrap(),
+        "the pointer took the collapsed colours away"
+    );
+    assert_eq!(
+        over.groups[0].modules[0].icon.as_ref().unwrap().icon,
+        crate::icon::Icon::parse("memory").unwrap(),
+        "the pointer took the collapsed icon away"
+    );
+}
