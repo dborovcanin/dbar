@@ -1933,6 +1933,73 @@ fn a_fold_needs_an_icon_in_every_appearance_it_can_wear() {
     }
 }
 
+/// No shipped example writes a native icon as bare text.
+///
+/// Checked by what the config parses to rather than by how it is spelled, so it sees every
+/// slot an icon can occupy - a style's, a state's, a collapsed table's and the entries of a
+/// workspace `icons = { ... }` map, which no amount of scanning the line would reach.
+///
+/// A bare `arch` is valid text and dbar will happily shape the word. It is also what every
+/// one of these files used to mean by the icon, so it is exactly the shape a stale example
+/// takes, and worth failing the build over.
+#[test]
+fn no_shipped_example_writes_a_native_icon_as_text() {
+    let suspect = |icon: &Option<IconSpec>| -> Option<String> {
+        let IconSpec::Text(written) = icon.as_ref()? else {
+            return None;
+        };
+        crate::icon::WRITTEN_ICONS
+            .iter()
+            .any(|(name, _)| *name == written.as_ref())
+            .then(|| written.to_string())
+    };
+
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
+    for entry in std::fs::read_dir(dir).expect("examples/ is readable") {
+        let path = entry.expect("a readable directory entry").path();
+        if path.extension().is_none_or(|extension| extension != "toml") {
+            continue;
+        }
+        let name = path.display().to_string();
+        let text = std::fs::read_to_string(&path).expect("a readable example");
+        let cfg = Config::parse(&text).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+
+        let found = |where_: &str, written: Option<String>| {
+            if let Some(written) = written {
+                panic!("{name}: {where_} writes native icon {written:?} without `$`");
+            }
+        };
+        for position in &cfg.positions {
+            for group in &position.groups {
+                if let Some(collapse) = &group.collapse {
+                    found(
+                        &format!("[group.{}.collapsed]", group.name),
+                        suspect(&collapse.style.icon),
+                    );
+                }
+                for module in &group.modules {
+                    let at = format!("[module.{}]", module.name);
+                    found(&at, suspect(&module.style.icon));
+                    for rule in &module.states {
+                        found(&format!("{at} state"), suspect(&rule.style.icon));
+                    }
+                    if let Some(collapse) = &module.collapse {
+                        found(&format!("{at}.collapsed"), suspect(&collapse.icon));
+                        if let Some(style) = &collapse.style {
+                            found(&format!("{at}.collapsed"), suspect(&style.icon));
+                        }
+                    }
+                    if let Source::SwayWorkspaces(view) = &module.source {
+                        for (workspace, icon) in &view.icons {
+                            found(&format!("{at} workspace {workspace:?}"), suspect(icon));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// A state table rejects a key it does not know, the way every other table does.
 ///
 /// `[module.*.states.*]` was the one raw table without `deny_unknown_fields`, so a

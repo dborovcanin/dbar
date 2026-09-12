@@ -166,7 +166,7 @@ pub enum Icon {
 macro_rules! written_icons {
     ($(($name:literal, $icon:path)),+ $(,)?) => {
         #[cfg(test)]
-        const WRITTEN_ICONS: &[(&str, Icon)] = &[$(($name, $icon)),+];
+        pub(crate) const WRITTEN_ICONS: &[(&str, Icon)] = &[$(($name, $icon)),+];
 
         fn parse_written_icon(name: &str) -> Option<Icon> {
             match name {
@@ -1089,16 +1089,10 @@ mod tests {
             }
         }
 
+        // Only the README: it is prose with snippets in it and cannot be parsed. The
+        // shipped examples are real configs and are checked by what they parse to, in
+        // `config::tests`, which is the only way to see inside `icons = { ... }`.
         check("README.md", include_str!("../README.md"));
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/examples");
-        for entry in std::fs::read_dir(dir).expect("examples/ is readable") {
-            let path = entry.expect("a readable directory entry").path();
-            if path.extension().is_none_or(|extension| extension != "toml") {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).expect("a readable example");
-            check(&path.display().to_string(), &text);
-        }
     }
 
     /// Extent of one icon's ink, stroke width included.

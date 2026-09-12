@@ -210,14 +210,14 @@ And what each one is before it starts:
 
 |                       | binary        | shared libraries |
 | --------------------- | ------------- | ---------------- |
-| **dbar**              | **6.9 MB**    | **5**            |
+| **dbar**              | **7.1 MB**    | **4**            |
 | swaybar + i3status-rs | 0.1 + 17.4 MB | 46 / 29          |
 | Waybar                | 2.1 MB        | 116              |
 
 Waybar's binary is the smallest of the three and its dependency list is the
 longest, which is the same fact twice: it is a GTK application, so most of it is
-libraries the binary does not carry. dbar links five - libc, libm, libgcc,
-xkbcommon and PipeWire - and carries the rest.
+libraries the binary does not carry. dbar links four - libc, libm, libgcc and
+PipeWire - and carries the rest.
 
 ### How this was measured
 
@@ -361,28 +361,28 @@ centre where the eye finds it without looking.
 
 ### Also in `examples/`
 
-|                                             |                                                        |
-| ------------------------------------------- | ------------------------------------------------------ |
-| [daily.toml](examples/daily.toml)           | an everyday bar, every module read by dbar itself      |
-| [islands.toml](examples/islands.toml)       | translucent rounded panels floating over the wallpaper |
-| [minimal.toml](examples/minimal.toml)       | text and hairlines, along the bottom of the screen     |
-| [states.toml](examples/states.toml)         | modules that restyle themselves as values move         |
-| [separators.toml](examples/separators.toml) | all seven separator shapes, side by side               |
-| [showcase.toml](examples/showcase.toml)     | every key dbar understands, as a reference             |
-| [weather.sh](examples/weather.sh)           | a `command` module's program, a page per city          |
+|                                               |                                                          |
+| --------------------------------------------- | -------------------------------------------------------- |
+| [daily.toml](examples/daily.toml)             | an everyday bar, every module read by dbar itself        |
+| [islands.toml](examples/islands.toml)         | translucent rounded panels floating over the wallpaper   |
+| [minimal.toml](examples/minimal.toml)         | text and hairlines, along the bottom of the screen       |
+| [states.toml](examples/states.toml)           | modules that restyle themselves as values move           |
+| [separators.toml](examples/separators.toml)   | all seven separator shapes, side by side                 |
+| [showcase.toml](examples/showcase.toml)       | every key dbar understands, as a reference               |
+| [weather.sh](examples/weather.sh)             | a `command` module's program, a page per city            |
 | [sway_calendar.sh](examples/sway_calendar.sh) | three months in a floating window, for the clock's click |
 
 The same fifteen modules arranged six other ways - same readings, same
 intervals, same clicks, a different bar:
 
-|                                                             |                                                       |
-| ----------------------------------------------------------- | ----------------------------------------------------- |
-| [mocha-floating.toml](examples/mocha-floating.toml)         | Catppuccin Mocha, floating, soft pills and no fills   |
-| [nord-rail.toml](examples/nord-rail.toml)                   | Nord along the bottom, one rail with thin dividers    |
-| [gruvbox-ribbon.toml](examples/gruvbox-ribbon.toml)         | groups joined into two ribbons, colours blending      |
-| [latte-panel.toml](examples/latte-panel.toml)               | Catppuccin Latte, opaque and light, square with notches |
-| [tokyonight-capsules.toml](examples/tokyonight-capsules.toml) | Tokyo Night, a capsule per reading                    |
-| [rosepine-curves.toml](examples/rosepine-curves.toml)       | Rosé Pine, asymmetric islands, left-facing curves     |
+|                                                               |                                                         |
+| ------------------------------------------------------------- | ------------------------------------------------------- |
+| [mocha-floating.toml](examples/mocha-floating.toml)           | Catppuccin Mocha, floating, soft pills and no fills     |
+| [nord-rail.toml](examples/nord-rail.toml)                     | Nord along the bottom, one rail with thin dividers      |
+| [gruvbox-ribbon.toml](examples/gruvbox-ribbon.toml)           | groups joined into two ribbons, colours blending        |
+| [latte-panel.toml](examples/latte-panel.toml)                 | Catppuccin Latte, opaque and light, square with notches |
+| [tokyonight-capsules.toml](examples/tokyonight-capsules.toml) | Tokyo Night, a capsule per reading                      |
+| [rosepine-curves.toml](examples/rosepine-curves.toml)         | Rosé Pine, asymmetric islands, left-facing curves       |
 
 ```sh
 dbar -c examples/islands.toml
