@@ -425,6 +425,13 @@ impl<'a> Parser<'a> {
                 }
                 self.input[start..self.pos].trim().to_string()
             };
+            // Written twice, the second used to win and the first was read, accepted and
+            // dropped. A format has one spelling for everything else it can say; a key
+            // that quietly loses to a later one is the kind of mistake a config should
+            // hear about when it is read.
+            if args.iter().any(|(seen, _)| *seen == key) {
+                bail!("argument {key:?} is given twice in .{name}()");
+            }
             args.push((key, value));
             self.skip_space();
             if self.eat(',') {
@@ -1327,6 +1334,25 @@ mod tests {
         ] {
             Format::parse(written).unwrap_or_else(|e| panic!("{written} should parse: {e:#}"));
         }
+    }
+
+    /// An argument given twice is refused rather than quietly won by the last one.
+    #[test]
+    fn an_argument_may_not_be_given_twice() {
+        for written in [
+            "$a.n(d:1, d:2)",
+            "$a.str(max:4, max:8)",
+            "$a.time(f:'%R', f:'%T')",
+            "$a.n(d:1, w:4, d:2)",
+        ] {
+            let refused = Format::parse(written)
+                .err()
+                .unwrap_or_else(|| panic!("{written} should be refused"));
+            let error = format!("{refused:#}");
+            assert!(error.contains("given twice"), "{written} gave {error}");
+        }
+        // Two different keys are still two keys.
+        Format::parse("$a.n(d:1, w:4)").expect("different arguments are fine");
     }
 
     /// The parser and the published grammar have one spelling for an argument list.
