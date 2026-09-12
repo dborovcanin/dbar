@@ -154,6 +154,7 @@ pub enum Icon {
     HeadphonesMuted,
     Play,
     Pause,
+    Media,
     Keyboard,
     /// A module is waiting on something. Graded by the animation frame rather than by a
     /// reading, which is why it has more steps than the rest and no name in the config.
@@ -185,6 +186,7 @@ impl Icon {
             "headphones-muted" => Icon::HeadphonesMuted,
             "play" => Icon::Play,
             "pause" => Icon::Pause,
+            "media" | "music" => Icon::Media,
             "keyboard" | "language" => Icon::Keyboard,
             _ => return None,
         })
@@ -345,6 +347,7 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
         }
         Icon::Play => play(&mut out),
         Icon::Pause => pause(&mut out),
+        Icon::Media => media(&mut out),
         Icon::Keyboard => keyboard(&mut out),
     }
     IconArt::Paths(out)
@@ -809,6 +812,81 @@ fn pause(out: &mut Vec<IconPath>) {
     finish(pb, Ink::Fill, out);
 }
 
+/// Octicons' media file: a frame with a picture in it, a disc and a slope.
+///
+/// Traced from the outline rather than redrawn, so it sits beside the same mark from an
+/// icon font without the two disagreeing. One even-odd contour set: the frame is a filled
+/// band because its inside is a second contour cutting the hole, and the disc is a ring
+/// for the same reason. Nothing here is stroked - a single width could describe neither
+/// the frame and the disc at once nor the slope that runs under both.
+///
+/// The coordinates are traced, so a couple of them land near a mathematical constant by
+/// coincidence; they mean nothing of the sort and must not be replaced by one.
+#[allow(clippy::approx_constant)]
+fn media(out: &mut Vec<IconPath>) {
+    let mut pb = Outline::new();
+    pb.move_to(0.9241, 0.9134);
+    pb.line_to(0.0759, 0.9134);
+    pb.cubic_to(0.0552, 0.9134, 0.0374, 0.9059, 0.0224, 0.8909);
+    pb.cubic_to(0.0075, 0.8760, 0.0000, 0.8580, 0.0000, 0.8369);
+    pb.line_to(0.0000, 0.1631);
+    pb.cubic_to(0.0000, 0.1420, 0.0075, 0.1240, 0.0224, 0.1091);
+    pb.cubic_to(0.0374, 0.0941, 0.0552, 0.0866, 0.0759, 0.0866);
+    pb.line_to(0.9241, 0.0866);
+    pb.cubic_to(0.9448, 0.0866, 0.9626, 0.0941, 0.9776, 0.1091);
+    pb.cubic_to(0.9925, 0.1240, 1.0000, 0.1420, 1.0000, 0.1631);
+    pb.line_to(1.0000, 0.8369);
+    pb.cubic_to(1.0000, 0.8580, 0.9925, 0.8760, 0.9776, 0.8909);
+    pb.cubic_to(0.9626, 0.9059, 0.9448, 0.9134, 0.9241, 0.9134);
+    pb.close();
+    pb.move_to(0.0759, 0.1519);
+    pb.cubic_to(0.0729, 0.1519, 0.0703, 0.1530, 0.0683, 0.1552);
+    pb.cubic_to(0.0663, 0.1574, 0.0652, 0.1600, 0.0652, 0.1631);
+    pb.line_to(0.0652, 0.8369);
+    pb.cubic_to(0.0652, 0.8400, 0.0663, 0.8426, 0.0683, 0.8448);
+    pb.cubic_to(0.0703, 0.8470, 0.0729, 0.8481, 0.0759, 0.8481);
+    pb.line_to(0.2141, 0.8481);
+    pb.line_to(0.5872, 0.4557);
+    pb.cubic_to(0.6021, 0.4397, 0.6205, 0.4317, 0.6422, 0.4317);
+    pb.cubic_to(0.6633, 0.4317, 0.6813, 0.4392, 0.6962, 0.4541);
+    pb.line_to(0.9348, 0.6932);
+    pb.line_to(0.9348, 0.1631);
+    pb.cubic_to(0.9348, 0.1600, 0.9337, 0.1574, 0.9317, 0.1552);
+    pb.cubic_to(0.9297, 0.1530, 0.9271, 0.1519, 0.9241, 0.1519);
+    pb.close();
+    pb.move_to(0.9348, 0.8369);
+    pb.line_to(0.9348, 0.7854);
+    pb.line_to(0.6498, 0.5005);
+    pb.cubic_to(0.6475, 0.4981, 0.6449, 0.4969, 0.6422, 0.4969);
+    pb.cubic_to(0.6391, 0.4969, 0.6364, 0.4981, 0.6340, 0.5005);
+    pb.line_to(0.3043, 0.8481);
+    pb.line_to(0.9241, 0.8481);
+    pb.cubic_to(0.9271, 0.8481, 0.9297, 0.8470, 0.9317, 0.8448);
+    pb.cubic_to(0.9337, 0.8426, 0.9348, 0.8400, 0.9348, 0.8369);
+    pb.close();
+    pb.move_to(0.3935, 0.2803);
+    pb.cubic_to(0.4210, 0.3078, 0.4348, 0.3411, 0.4348, 0.3802);
+    pb.cubic_to(0.4348, 0.4193, 0.4210, 0.4527, 0.3935, 0.4804);
+    pb.cubic_to(0.3660, 0.5081, 0.3327, 0.5219, 0.2936, 0.5219);
+    pb.cubic_to(0.2545, 0.5219, 0.2211, 0.5081, 0.1934, 0.4804);
+    pb.cubic_to(0.1657, 0.4527, 0.1519, 0.4193, 0.1519, 0.3802);
+    pb.cubic_to(0.1519, 0.3411, 0.1657, 0.3078, 0.1934, 0.2803);
+    pb.cubic_to(0.2211, 0.2528, 0.2545, 0.2390, 0.2936, 0.2390);
+    pb.cubic_to(0.3327, 0.2390, 0.3660, 0.2528, 0.3935, 0.2803);
+    pb.close();
+    pb.move_to(0.3695, 0.3802);
+    pb.cubic_to(0.3695, 0.3595, 0.3621, 0.3417, 0.3473, 0.3267);
+    pb.cubic_to(0.3326, 0.3118, 0.3146, 0.3043, 0.2936, 0.3043);
+    pb.cubic_to(0.2725, 0.3043, 0.2545, 0.3118, 0.2396, 0.3267);
+    pb.cubic_to(0.2246, 0.3417, 0.2171, 0.3595, 0.2171, 0.3802);
+    pb.cubic_to(0.2171, 0.4010, 0.2246, 0.4189, 0.2396, 0.4340);
+    pb.cubic_to(0.2545, 0.4491, 0.2725, 0.4567, 0.2936, 0.4567);
+    pb.cubic_to(0.3143, 0.4567, 0.3321, 0.4492, 0.3471, 0.4343);
+    pb.cubic_to(0.3620, 0.4193, 0.3695, 0.4013, 0.3695, 0.3802);
+    pb.close();
+    finish(pb, Ink::FillEvenOdd, out);
+}
+
 /// A thermometer whose column rises with the level.
 ///
 /// The bulb is always full, because a thermometer with an empty bulb reads as broken
@@ -930,7 +1008,7 @@ fn spinner(out: &mut Vec<IconPath>, frame: usize) {
 mod tests {
     use super::*;
 
-    const ALL: [Icon; 25] = [
+    const ALL: [Icon; 26] = [
         Icon::Cpu,
         Icon::Tux,
         Icon::Arch,
@@ -953,6 +1031,7 @@ mod tests {
         Icon::HeadphonesMuted,
         Icon::Play,
         Icon::Pause,
+        Icon::Media,
         Icon::Keyboard,
         Icon::Spinner,
         Icon::Raster,

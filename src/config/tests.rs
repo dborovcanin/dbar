@@ -1811,3 +1811,26 @@ fn a_module_can_fold_to_a_written_icon_without_an_icon_size() {
     let collapse = cfg.modules().next().unwrap().collapse.as_ref().unwrap();
     assert_eq!(collapse.button, Button::Right);
 }
+
+/// Both spellings of the media icon reach the same drawing, and it is geometry rather
+/// than a glyph - the `$` is what says so.
+#[test]
+fn the_media_icon_answers_to_both_its_names() {
+    for name in ["media", "music"] {
+        let cfg = Config::parse(&one_module(&format!(
+            "source = \"media\"\nicon = \"${name}\""
+        )))
+        .expect("a module with the media icon");
+        assert_eq!(
+            cfg.modules().next().unwrap().style.icon,
+            Some(IconSpec::Native(Icon::Media)),
+            "${name}"
+        );
+    }
+    // Without the sigil it is the word, not the drawing.
+    let text = Config::parse(&one_module("source = \"media\"\nicon = \"media\"")).unwrap();
+    assert!(matches!(
+        text.modules().next().unwrap().style.icon,
+        Some(IconSpec::Text(_))
+    ));
+}

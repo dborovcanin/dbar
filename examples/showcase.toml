@@ -841,7 +841,7 @@ icon = "$play"
 # the folded module unfolds it instead - so the icon has to say that and not
 # "pause". Everything else is inherited from the module itself.
 [module.media.collapsed]
-icon = "$play"
+icon = "$media"
 foreground = "$subtext"
 
 # A disk module is pointed at a filesystem; without `path` it is the root. The
