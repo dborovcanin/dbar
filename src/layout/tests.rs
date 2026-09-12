@@ -3860,3 +3860,69 @@ icon = "$pause"
         "a named collapsed icon should win"
     );
 }
+
+/// A folding module arrives already wearing the collapsed look, rather than putting it on
+/// in one step at the end.
+///
+/// A group fold carries its island's colours across the travel so the last frame swaps
+/// nothing but the icon, which has no in-between to be drawn at. A module fold eased its
+/// width and left everything else to the settled frame, so a collapsed table that changed
+/// colours popped on arrival.
+#[test]
+fn a_folding_module_carries_the_collapsed_colours_across_the_travel() {
+    let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["m"]
+padding = 0
+spacing = 0
+
+[module.m]
+padding = 0
+collapsible = true
+collapse_animation = "150ms"
+icon = "$play"
+icon_size = 10
+icon_gap = 0
+foreground = "#000000"
+
+[module.m.collapsed]
+icon = "$media"
+foreground = "#ffffff"
+"##;
+    let cfg = Config::parse(config).unwrap();
+    let items = [item("m", "abc")];
+    let native = Registry::new(&Default::default());
+    let no_groups: std::collections::HashSet<String> = Default::default();
+    let shut: std::collections::HashSet<String> = ["m".to_string()].into();
+
+    let grey = |at: f32| {
+        let folding: std::collections::HashMap<String, f32> = [("m".to_string(), at)].into();
+        let mut inputs = group_inputs(&items, &native, &no_groups);
+        inputs.collapsed = &shut;
+        inputs.module_folding = &folding;
+        let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        frame.groups[0].modules[0].foreground.r
+    };
+
+    // Open at either end of the travel, and part way between at every point inside it.
+    assert_eq!(grey(0.0), 0, "the open end is the open colour");
+    assert_eq!(grey(1.0), 255, "the shut end is the collapsed colour");
+    let half = grey(0.5);
+    assert!(
+        (100..=155).contains(&half),
+        "half way should be half way, not {half}"
+    );
+    assert!(
+        grey(0.25) < half && half < grey(0.75),
+        "it should ease across"
+    );
+
+    // And the settled frame is the same picture the travel arrived at, so nothing pops.
+    let mut inputs = group_inputs(&items, &native, &no_groups);
+    inputs.collapsed = &shut;
+    let settled = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+    assert_eq!(settled.groups[0].modules[0].foreground.r, grey(1.0));
+}

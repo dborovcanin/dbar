@@ -1654,8 +1654,8 @@ fn size_group(
         };
         let was = leaving.map(|leaving| leaving.width);
         let Fitted {
-            style,
-            hover_style,
+            mut style,
+            mut hover_style,
             icon,
             icon_after_text,
             content,
@@ -1674,6 +1674,38 @@ fn size_group(
         // over whatever the run was making room for.
         if width > available {
             continue;
+        }
+        // The collapsed look is carried across the travel rather than swapped in on the
+        // frame it arrives, which is what a group fold already does for its own island.
+        // Both ends of the hand-off are then the same picture and the last frame changes
+        // nothing but the icon, which has no in-between to be drawn at.
+        //
+        // Keyed on the fold's own number rather than on `at`, which was turned around for
+        // the width: this one counts how shut the module is, which is the direction the
+        // collapsed look arrives from.
+        let mut foreground = foreground;
+        let mut background = background;
+        if let Some(shut) = folding
+            && let Some(worn) = module.collapse.as_ref().and_then(|c| c.style.as_ref())
+        {
+            foreground = Some(
+                foreground
+                    .unwrap_or(style.foreground)
+                    .mix(worn.foreground, shut),
+            );
+            background = Some(
+                background
+                    .unwrap_or(style.background)
+                    .mix(worn.background, shut),
+            );
+            style.radius += (worn.radius - style.radius) * shut;
+            // A pointer resting on the module it just folded would otherwise hold it at
+            // its hover colours for the whole travel and land on the collapsed ones.
+            if let Some(hover) = hover_style.as_mut() {
+                hover.foreground = hover.foreground.mix(worn.foreground, shut);
+                hover.background = hover.background.mix(worn.background, shut);
+                hover.radius += (worn.radius - hover.radius) * shut;
+            }
         }
         // Charging the wider of the two wordings is what keeps a travel from re-truncating
         // the modules behind it: they would otherwise be measured against a budget that
