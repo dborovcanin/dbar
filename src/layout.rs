@@ -1282,7 +1282,11 @@ fn size_group(
             false => 0.0,
         };
         let width = shut_width(&style, advance);
-        if width > left || (style.max_width > 0.0 && width > style.max_width) {
+        // Only whether the run has room for it. `max_width` is not asked: a native
+        // collapsed icon that could not fit inside it is refused when the config is read,
+        // and a glyph is not measurable until then - so the only thing checking here could
+        // do is take away the icon that opens the island again.
+        if width > left {
             return None;
         }
         modules.push(SizedModule {
@@ -1554,10 +1558,15 @@ fn size_group(
                 true => style.max_width.min(available),
                 false => available,
             };
-            let content = if cap.is_finite() {
-                truncate(&content, cap - fixed, text)
-            } else {
-                content
+            // A folded module is its icon and nothing besides, and that icon is the only
+            // thing left to click to open it again. Cutting it away would take the module
+            // and its own way back off the bar together, so a fold keeps what it has
+            // whatever `max_width` says: a native icon is measured against `max_width`
+            // when the config is read, and a glyph cannot be measured until there are
+            // fonts to measure it with.
+            let content = match cap.is_finite() && !folded {
+                true => truncate(&content, cap - fixed, text),
+                false => content,
             };
             // Truncating to nothing takes the gap with it, the same as folding does.
             // Measured again rather than kept, because only the text that survived says
@@ -1589,12 +1598,15 @@ fn size_group(
         // in.
         //
         // A fold is the same two ends, reached by fitting one wording twice rather than
-        // two wordings once. `at` is how shut it is whichever way it is heading, so the
-        // shape it is measured from is always the open one.
+        // two wordings once. What travels is the module's edge and not what is written
+        // inside it, so the open shape is the one drawn and cut for the whole of it - the
+        // rule a group fold already follows. Drawing the folded shape instead held the
+        // collapsed icon all the way through an opening and jumped to the wording on the
+        // last frame.
         let (arriving, leaving) = match folding {
             Some(_) => (
-                fitted(content.clone(), true, text),
-                Some(fitted(content, false, text)),
+                fitted(content.clone(), false, text),
+                Some(fitted(content, true, text)),
             ),
             None => (
                 fitted(content, folded, text),
@@ -1608,7 +1620,11 @@ fn size_group(
             ),
         };
         // One number for both kinds of travel, since a module is never on two at once.
-        let at = folding.or(travelling.map(|leaving| leaving.at));
+        // A fold's is turned around: it counts how shut the module is, and the width below
+        // eases towards whatever `arriving` holds, which for a fold is the open end.
+        let at = folding
+            .map(|at| 1.0 - at)
+            .or(travelling.map(|leaving| leaving.at));
         if !arriving.drawn && leaving.as_ref().is_none_or(|leaving| !leaving.drawn) {
             continue;
         }

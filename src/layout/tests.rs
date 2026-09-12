@@ -3670,3 +3670,98 @@ foreground = "#ff0000"
         "the pointer took the collapsed icon away"
     );
 }
+
+/// A fold shows the module's own contents all the way through, whichever way it is going.
+///
+/// What a fold moves is the module's edge, not what is written inside it - the same rule a
+/// group fold already follows. Drawing the folded shape while opening held the collapsed
+/// icon until the last frame and then jumped to the wording.
+#[test]
+fn a_folding_module_draws_its_open_contents_until_it_arrives() {
+    let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+padding = 0
+spacing = 0
+
+[module.cpu]
+padding = 0
+collapsible = true
+collapse_animation = "150ms"
+icon = "$cpu"
+icon_size = 10
+icon_gap = 0
+
+[module.cpu.collapsed]
+icon = "$memory"
+"##;
+    let cfg = Config::parse(config).unwrap();
+    let items = [item("cpu", "abc")];
+    let native = Registry::new(&Default::default());
+    let no_groups: std::collections::HashSet<String> = Default::default();
+
+    // Half way, heading each way: shutting is settled shut already, opening is not.
+    for (shutting, at) in [(true, 0.5f32), (false, 0.5f32)] {
+        let settled: std::collections::HashSet<String> = match shutting {
+            true => ["cpu".to_string()].into(),
+            false => Default::default(),
+        };
+        let folding: std::collections::HashMap<String, f32> = [("cpu".to_string(), at)].into();
+        let mut inputs = group_inputs(&items, &native, &no_groups);
+        inputs.collapsed = &settled;
+        inputs.module_folding = &folding;
+        let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        let module = &frame.groups[0].modules[0];
+        assert_eq!(
+            module.icon.as_ref().unwrap().icon,
+            crate::icon::Icon::parse("cpu").unwrap(),
+            "shutting = {shutting}: the collapsed icon was drawn mid-travel"
+        );
+        assert_eq!(
+            module.text, "abc",
+            "shutting = {shutting}: the wording was taken away mid-travel"
+        );
+    }
+}
+
+/// A folded module is the one thing left to click, so it is never fitted away.
+///
+/// A glyph cannot be measured when the config is read - there are no fonts yet - so a
+/// `max_width` too small for it gets past validation. Truncating it to nothing then hid
+/// the module and took its own expand target with it.
+#[test]
+fn a_folded_module_survives_a_max_width_too_small_for_its_icon() {
+    let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+padding = 0
+spacing = 0
+
+[module.cpu]
+padding = 0
+collapsible = true
+icon = "µ"
+max_width = 0.5
+"##;
+    let items = [item("cpu", "abc")];
+    let folded: std::collections::HashSet<String> = ["cpu".to_string()].into();
+    let frame = frame_folded(
+        config,
+        &items,
+        Registry::new(&Default::default()),
+        &Default::default(),
+        &folded,
+    );
+    let module = frame.groups[0]
+        .modules
+        .first()
+        .expect("a folded module keeps something to click on");
+    assert!(module.width > 0.0, "nothing left to click");
+    assert_eq!(module.text, "\u{b5}");
+}
