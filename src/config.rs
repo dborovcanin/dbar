@@ -684,6 +684,7 @@ impl RawAlt {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawState {
     /// Name of a `[style.*]` table whose keys are applied over the module's own.
     style: Option<String>,
@@ -2245,11 +2246,12 @@ fn resolve_group(
 
         // A state applies the named style's own keys over the module's, rather than
         // replacing it wholesale, so per-module settings such as the icon survive.
-        let mut states = Vec::new();
-        let mut state_names: Vec<String> = Vec::new();
+        // Carried in pairs until the rules are handed over: they are sorted below, and a
+        // name kept in a vector of its own would stay where it was and be read against
+        // somebody else's rule by anything that names one in a message.
+        let mut states: Vec<(String, StateRule)> = Vec::new();
         if let Some(raw_module) = raw.modules.get(module_name) {
             for (state_name, raw_state) in &raw_module.states {
-                state_names.push(state_name.clone());
                 let mut state_style = style.clone();
                 if let Some(style_name) = &raw_state.style {
                     let named = raw.styles.get(style_name).ok_or_else(|| {
@@ -2336,25 +2338,28 @@ fn resolve_group(
                     );
                 }
 
-                states.push(StateRule {
-                    urgent: raw_state.urgent,
-                    hover: raw_state.hover,
-                    focused: raw_state.focused,
-                    visible: raw_state.visible,
-                    state: rule_state,
-                    field: raw_state.field.clone(),
-                    equals: raw_state.equals.clone(),
-                    fields: raw_state.fields.clone().unwrap_or_default(),
-                    contains: raw_state.contains.clone(),
-                    strip: raw_state.strip,
-                    below: raw_state.below,
-                    above: raw_state.above,
-                    style: state_style,
-                });
+                states.push((
+                    state_name.clone(),
+                    StateRule {
+                        urgent: raw_state.urgent,
+                        hover: raw_state.hover,
+                        focused: raw_state.focused,
+                        visible: raw_state.visible,
+                        state: rule_state,
+                        field: raw_state.field.clone(),
+                        equals: raw_state.equals.clone(),
+                        fields: raw_state.fields.clone().unwrap_or_default(),
+                        contains: raw_state.contains.clone(),
+                        strip: raw_state.strip,
+                        below: raw_state.below,
+                        above: raw_state.above,
+                        style: state_style,
+                    },
+                ));
             }
         }
         // Tightest bound first, so "below 15" wins over "below 30".
-        states.sort_by(|a, b| {
+        states.sort_by(|(_, a), (_, b)| {
             a.specificity()
                 .partial_cmp(&b.specificity())
                 .unwrap_or(std::cmp::Ordering::Equal)
@@ -2468,7 +2473,7 @@ fn resolve_group(
                         );
                     };
                     check_collapsed_icon(icon, worn, &format!("module {module_name:?}"))?;
-                    for (name, rule) in state_names.iter().zip(&states) {
+                    for (name, rule) in &states {
                         let Some(icon) = &rule.style.icon else {
                             bail!(
                                 "[module.{module_name}.states.{name}]: no icon, and module \
@@ -2639,7 +2644,9 @@ fn resolve_group(
             format_alt,
             alt_animation,
             style,
-            states,
+            // The names have done their job in the checks above; the runtime rule set
+            // is the rules alone, in the order they were sorted into.
+            states: states.into_iter().map(|(_, rule)| rule).collect(),
         });
     }
 

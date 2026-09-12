@@ -1932,3 +1932,50 @@ fn a_fold_needs_an_icon_in_every_appearance_it_can_wear() {
         );
     }
 }
+
+/// A state table rejects a key it does not know, the way every other table does.
+///
+/// `[module.*.states.*]` was the one raw table without `deny_unknown_fields`, so a
+/// misspelled threshold parsed, never fired, and left a rule that looked configured.
+#[test]
+fn a_state_refuses_a_key_it_does_not_know() {
+    let error = format!(
+        "{:#}",
+        Config::parse(&one_module(
+            "source = \"cpu\"\n[module.m.states.hot]\nabvoe = 90",
+        ))
+        .expect_err("a misspelled threshold")
+    );
+    assert!(error.contains("unknown field"), "{error}");
+    assert!(error.contains("abvoe"), "{error}");
+
+    // The spelling it was reaching for still works.
+    Config::parse(&one_module(
+        "source = \"cpu\"\n[module.m.states.hot]\nabove = 90",
+    ))
+    .expect("the key it meant");
+}
+
+/// A fold's diagnostics name the state they are about.
+///
+/// Names and rules were kept in vectors of their own and the rules were then sorted by
+/// specificity, so a message naming a state read whichever name happened to sit at the
+/// same index - which for two rules in the wrong order is the other one.
+#[test]
+fn a_state_error_names_the_state_it_is_about() {
+    // `tight` carries the narrower bound, so sorting moves it in front of `broad`, and
+    // the one without an icon is the one that has to be named.
+    let error = format!(
+        "{:#}",
+        Config::parse(&one_module(
+            "source = \"cpu\"\nicon = \"$cpu\"\ncollapsible = true\n\
+             [module.m.states.tight]\nabove = 90\n\
+             [module.m.states.broad]\nabove = 10\nicon = \"none\"",
+        ))
+        .expect_err("a state with no icon to fold to")
+    );
+    assert!(
+        error.contains("states.broad"),
+        "the wrong state was named: {error}"
+    );
+}
