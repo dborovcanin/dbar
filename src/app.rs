@@ -75,6 +75,18 @@ const SPIN_STEP: std::time::Duration = std::time::Duration::from_millis(60);
 /// than at the spinner's. The redraw it asks for is still held back by the frame callback,
 /// so a compositor that draws more slowly than this simply drops the steps in between.
 const TRAVEL_STEP: std::time::Duration = std::time::Duration::from_millis(16);
+/// How long the pointer rests on a row before its submenu opens.
+///
+/// A small pause keeps a trip down a menu from opening every branch it crosses. This is
+/// the same 225 ms convention GTK menus use, and therefore close to what a tray menu in
+/// Waybar feels like without bringing GTK into dbar.
+const SUBMENU_OPEN_AFTER: std::time::Duration = std::time::Duration::from_millis(225);
+/// How long a submenu gets to receive the pointer after it left the menu that opened it.
+///
+/// Wayland reports the leave of the parent surface before the enter of the child. Keeping
+/// the branch briefly gives that enter time to cancel the close, while still dismissing a
+/// branch when the pointer really left the menu stack.
+const SUBMENU_LEAVE_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
 
 /// A group on its way between open and shut.
 ///
@@ -334,6 +346,8 @@ struct OpenMenu {
     frame: MenuFrame,
     /// Which row the pointer is on.
     hover: Option<usize>,
+    /// Whether the pointer is currently on this popup's surface.
+    inside: bool,
     /// The submenu asked for while the pointer sits on a row, until it arrives.
     ///
     /// An application answers when it answers, and the pointer has usually moved on by
@@ -345,6 +359,44 @@ struct OpenMenu {
     scale: i32,
     configured: bool,
     dirty: bool,
+}
+
+/// What the submenu hover timer will do if the pointer does not change its mind first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuIntent {
+    /// Open `row` below the menu at `level`.
+    Open { level: usize, row: i32 },
+    /// Keep this many outer menus and close the rest.
+    Close { keep: usize },
+}
+
+/// One delayed submenu action.
+#[derive(Clone, Copy, Debug)]
+struct PendingMenuIntent {
+    action: MenuIntent,
+    due: std::time::Instant,
+}
+
+/// Constraint policy for a root menu or a submenu.
+fn menu_constraints(submenu: bool) -> xdg_positioner::ConstraintAdjustment {
+    let vertical =
+        xdg_positioner::ConstraintAdjustment::FlipY | xdg_positioner::ConstraintAdjustment::SlideY;
+    match submenu {
+        true => {
+            xdg_positioner::ConstraintAdjustment::FlipX
+                | xdg_positioner::ConstraintAdjustment::SlideX
+                | vertical
+        }
+        false => xdg_positioner::ConstraintAdjustment::SlideX | vertical,
+    }
+}
+
+/// The enabled submenu currently under the pointer, if there is one.
+fn pointed_submenu(rows: &[crate::tray::menu::Row], hover: Option<usize>) -> Option<i32> {
+    hover
+        .and_then(|row| rows.get(row))
+        .filter(|row| row.selectable() && row.submenu)
+        .map(|row| row.id)
 }
 
 /// Close every menu deeper than `level`, innermost first.
@@ -573,6 +625,10 @@ pub struct App {
     /// A stack rather than one surface, because a menu that opens another has to keep the
     /// first on screen: the second is anchored to a row of it.
     menus: Vec<OpenMenu>,
+    /// The delayed open or close that makes crossing a submenu boundary forgiving.
+    menu_intent: Option<PendingMenuIntent>,
+    /// Whether the event loop already has a timer responsible for `menu_intent`.
+    menu_timer_scheduled: bool,
     /// What the next menu asked for is called, so an answer can be matched to its ask.
     menu_request: u64,
     /// The item whose menu is being opened, while its rows are still being read.
@@ -673,6 +729,8 @@ impl App {
             sway_commands: None,
             menu_request: 0,
             menus: Vec::new(),
+            menu_intent: None,
+            menu_timer_scheduled: false,
             opening: None,
             fault: None,
             warned_names: None,
@@ -936,6 +994,7 @@ impl App {
         let request = self.menu_request.wrapping_add(1);
         self.menu_request = request;
         close_below(&mut self.menus, 0);
+        self.menu_intent = None;
         self.opening = Some((output, key.clone(), x, width, request));
         commands.send(crate::tray::Command::Menu {
             key,
@@ -1047,18 +1106,13 @@ impl App {
             }
         };
         positioner.set_size(width as i32, height as i32);
-        // Slide along the bar rather than hanging off the end of the screen, and flip to
-        // the other side of the anchor when there is no room the way it was asked for -
-        // which is what puts a menu above a bar that sits at the bottom.
-        positioner.set_constraint_adjustment(
-            xdg_positioner::ConstraintAdjustment::SlideX
-                | xdg_positioner::ConstraintAdjustment::FlipY
-                | xdg_positioner::ConstraintAdjustment::SlideY,
-        );
 
         let (parent_surface, scale) = match &anchor {
             Anchor2::Bar { bar, x, width: w } => {
                 let bar = &self.bars[*bar];
+                // A root menu stays under its tray item and slides along the bar when the
+                // item is too close to an edge. Vertically it flips above a bottom bar.
+                positioner.set_constraint_adjustment(menu_constraints(false));
                 positioner.set_anchor_rect(*x as i32, 0, w.ceil() as i32, bar.height as i32);
                 let (anchor, gravity) = match self.config.bar.position {
                     Edge::Top => (
@@ -1076,6 +1130,12 @@ impl App {
             }
             Anchor2::Row { level, id } => {
                 let open = &self.menus[*level];
+                // A submenu belongs beside its row. Flipping has protocol-defined
+                // precedence over sliding, so one near the right edge opens to the left
+                // instead of being slid back across the menu that owns it. Sliding is
+                // retained as the fallback for a submenu wider or taller than the room
+                // available on either side.
+                positioner.set_constraint_adjustment(menu_constraints(true));
                 let row = open
                     .rows
                     .iter()
@@ -1087,7 +1147,7 @@ impl App {
                 positioner.set_anchor_rect(
                     0,
                     row.y as i32,
-                    open.frame.width as i32,
+                    open.width as i32,
                     row.height.ceil() as i32,
                 );
                 positioner.set_anchor(xdg_positioner::Anchor::TopRight);
@@ -1146,6 +1206,7 @@ impl App {
             pool,
             frame,
             hover: None,
+            inside: false,
             awaiting: None,
             width,
             height,
@@ -1159,6 +1220,7 @@ impl App {
     fn close_menus(&mut self) {
         close_below(&mut self.menus, 0);
         self.opening = None;
+        self.menu_intent = None;
     }
 
     /// Which open menu a surface belongs to.
@@ -1254,9 +1316,39 @@ impl App {
     /// open below it keeps its highlight and keeps what it opened, and the pointer landing
     /// on another row is what closes it.
     fn menu_pointer(&mut self, index: usize, at: Option<(f32, f32)>) {
-        if at.is_none() && (self.menus.len() > index + 1 || self.menus[index].awaiting.is_some()) {
-            return;
+        let entering = at.is_some() && !self.menus[index].inside;
+        self.menus[index].inside = at.is_some();
+
+        if entering
+            && matches!(
+                self.menu_intent.map(|intent| intent.action),
+                Some(MenuIntent::Close { .. })
+            )
+        {
+            // A leave from one popup precedes the enter into another. Reaching any menu
+            // in the same stack proves the pointer did not leave the stack after all.
+            self.menu_intent = None;
         }
+
+        if at.is_none() {
+            let has_child = self.menus.len() > index + 1;
+            // A request which has not answered cannot be allowed to open after the pointer
+            // has gone. There is no surface to cross into yet, so no grace is needed.
+            self.menus[index].awaiting = None;
+            if has_child || index > 0 {
+                self.menu_intent = Some(PendingMenuIntent {
+                    action: MenuIntent::Close {
+                        // The root stays because its grab owns the whole interaction. An
+                        // enter on an ancestor or descendant cancels this before it runs;
+                        // without one, the pointer has left the whole nested branch.
+                        keep: 1,
+                    },
+                    due: std::time::Instant::now() + SUBMENU_LEAVE_AFTER,
+                });
+                return;
+            }
+        }
+
         let menu = &mut self.menus[index];
         let was = menu.hover;
         menu.hover = at.and_then(|(_, y)| menu.frame.row_at(y));
@@ -1264,30 +1356,84 @@ impl App {
             return;
         }
         menu.dirty = true;
-        // Moving onto a row that opens another menu opens it, and moving off it closes
-        // whatever it opened - which is what makes a menu feel like a menu.
-        let opening = menu
-            .hover
-            .and_then(|row| menu.rows.get(row))
-            .filter(|row| row.submenu)
-            .map(|row| row.id);
-        let key = menu.key.clone();
-        close_below(&mut self.menus, index + 1);
-        // Whatever the last row asked for is no longer wanted: the pointer has moved.
+
+        // A different row no longer wants the old asynchronous answer or the branch that
+        // is already below it. The newly pointed-at branch waits briefly before opening,
+        // so travelling down the menu does not flash each submenu on the way past.
         self.menus[index].awaiting = None;
-        if let Some(id) = opening
-            && let Some(commands) = &self.tray_commands
-        {
+        close_below(&mut self.menus, index + 1);
+        self.menu_intent =
+            pointed_submenu(&self.menus[index].rows, self.menus[index].hover).map(|row| {
+                PendingMenuIntent {
+                    action: MenuIntent::Open { level: index, row },
+                    due: std::time::Instant::now() + SUBMENU_OPEN_AFTER,
+                }
+            });
+        self.draw_menus();
+    }
+
+    /// Perform a submenu request now, after proving the pointer still wants this row.
+    fn open_submenu(&mut self, level: usize, row: i32) {
+        let wanted = self.menus.get(level).is_some_and(|menu| {
+            menu.inside && pointed_submenu(&menu.rows, menu.hover) == Some(row)
+        });
+        if !wanted {
+            return;
+        }
+
+        let key = self.menus[level].key.clone();
+        close_below(&mut self.menus, level + 1);
+        self.menus[level].awaiting = None;
+        if let Some(commands) = &self.tray_commands {
             let request = self.menu_request.wrapping_add(1);
             self.menu_request = request;
-            self.menus[index].awaiting = Some(request);
+            self.menus[level].awaiting = Some(request);
             commands.send(crate::tray::Command::Menu {
                 key,
-                parent: id,
+                parent: row,
                 request,
             });
         }
-        self.draw_menus();
+    }
+
+    /// Run the delayed submenu action and say when this timer is next wanted.
+    pub fn on_menu_timer(&mut self) -> Option<std::time::Instant> {
+        let Some(intent) = self.menu_intent else {
+            self.menu_timer_scheduled = false;
+            return None;
+        };
+        let now = std::time::Instant::now();
+        if intent.due > now {
+            return Some(intent.due);
+        }
+
+        self.menu_intent = None;
+        match intent.action {
+            MenuIntent::Open { level, row } => self.open_submenu(level, row),
+            MenuIntent::Close { keep } => {
+                close_below(&mut self.menus, keep);
+                for menu in &mut self.menus {
+                    if !menu.inside && menu.hover.take().is_some() {
+                        menu.dirty = true;
+                    }
+                }
+                self.draw_menus();
+            }
+        }
+        self.menu_timer_scheduled = false;
+        None
+    }
+
+    /// Claim responsibility for a delayed submenu action not already driven by a timer.
+    pub fn take_menu_timer(&mut self) -> bool {
+        let needed = self.menu_intent.is_some() && !self.menu_timer_scheduled;
+        self.menu_timer_scheduled |= needed;
+        needed
+    }
+
+    /// Give the submenu timer claim back when the event loop could not install it.
+    pub fn release_menu_timer(&mut self) {
+        self.menu_timer_scheduled = false;
     }
 
     /// Act on a click inside a menu.
@@ -1299,9 +1445,11 @@ impl App {
         if !row.selectable() {
             return;
         }
-        // A row that opens another menu is opened by the pointer resting on it, so a click
-        // on one is not a choice.
+        // Resting opens a submenu after a short pause; a deliberate click opens it now.
         if row.submenu {
+            let id = row.id;
+            self.menu_intent = None;
+            self.open_submenu(index, id);
             return;
         }
         let (key, id) = (menu.key.clone(), row.id);
@@ -2318,6 +2466,9 @@ impl PopupHandler for App {
         if let Some(index) = self.menu_of(popup.wl_surface()) {
             // Everything opened from it goes with it, innermost first.
             close_below(&mut self.menus, index);
+            if index == 0 {
+                self.menu_intent = None;
+            }
         }
     }
 }

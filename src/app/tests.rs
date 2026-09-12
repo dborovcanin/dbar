@@ -1,6 +1,35 @@
 use super::*;
 use crate::config::ClickActions;
 
+#[test]
+fn a_submenu_flips_across_its_row_at_a_horizontal_screen_edge() {
+    let root = menu_constraints(false);
+    assert!(root.contains(xdg_positioner::ConstraintAdjustment::SlideX));
+    assert!(!root.contains(xdg_positioner::ConstraintAdjustment::FlipX));
+
+    let submenu = menu_constraints(true);
+    assert!(submenu.contains(xdg_positioner::ConstraintAdjustment::FlipX));
+    assert!(submenu.contains(xdg_positioner::ConstraintAdjustment::SlideX));
+    assert!(submenu.contains(xdg_positioner::ConstraintAdjustment::FlipY));
+    assert!(submenu.contains(xdg_positioner::ConstraintAdjustment::SlideY));
+}
+
+#[test]
+fn only_an_enabled_submenu_is_opened_by_hover() {
+    let row = |id, enabled, submenu| crate::tray::menu::Row {
+        id,
+        enabled,
+        submenu,
+        ..Default::default()
+    };
+    let rows = vec![row(1, true, false), row(2, false, true), row(3, true, true)];
+
+    assert_eq!(pointed_submenu(&rows, Some(0)), None);
+    assert_eq!(pointed_submenu(&rows, Some(1)), None);
+    assert_eq!(pointed_submenu(&rows, Some(2)), Some(3));
+    assert_eq!(pointed_submenu(&rows, None), None);
+}
+
 /// A placed module with nothing on it, for saying what one gesture key does without
 /// describing a whole bar.
 fn placed() -> PlacedModule {

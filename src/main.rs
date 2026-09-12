@@ -253,6 +253,20 @@ fn schedule_fold(handle: &calloop::LoopHandle<'static, App>) -> Result<()> {
     Ok(())
 }
 
+/// Start the one-shot timer that opens or dismisses a submenu after its pointer grace.
+fn schedule_menu(handle: &calloop::LoopHandle<'static, App>) -> Result<()> {
+    handle
+        .insert_source(
+            calloop::timer::Timer::from_duration(std::time::Duration::from_millis(0)),
+            |_, _, app: &mut App| match app.on_menu_timer() {
+                Some(next) => calloop::timer::TimeoutAction::ToInstant(next),
+                None => calloop::timer::TimeoutAction::Drop,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("inserting the submenu timer: {e}"))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
@@ -537,6 +551,7 @@ fn main() -> Result<()> {
     app.choose_pixel_format();
 
     let handle_for_fold = handle.clone();
+    let handle_for_menu = handle.clone();
     WaylandSource::new(conn, event_queue)
         .insert(handle)
         .map_err(|e| anyhow::anyhow!("inserting the Wayland source: {e}"))?;
@@ -545,13 +560,19 @@ fn main() -> Result<()> {
         event_loop
             .dispatch(None, &mut app)
             .context("dispatching events")?;
-        // A click is a Wayland event, and the pointer handler has no way to reach the
-        // loop from inside a dispatch, so a fold it started is picked up here instead.
+        // Clicks and pointer motion are Wayland events, and their handlers have no way to
+        // reach the loop from inside a dispatch, so timers they started are picked up here.
         if app.take_travel_timer()
             && let Err(e) = schedule_fold(&handle_for_fold)
         {
             log::error!("{e}");
             app.release_travel_timer();
+        }
+        if app.take_menu_timer()
+            && let Err(e) = schedule_menu(&handle_for_menu)
+        {
+            log::error!("{e}");
+            app.release_menu_timer();
         }
         // Anything the handlers marked dirty but could not draw yet gets drawn here.
         app.draw_if_needed();
