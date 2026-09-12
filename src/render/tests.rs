@@ -1436,7 +1436,7 @@ radius = 8
 padding = 0
 spacing = 2
 background = '#00000000'
-collapsed = { icon = '$cpu', padding = 12, background = '#83a598', foreground = '#282828' }
+collapsed = { icon = '$cpu', icon_size = 8, padding = 12, background = '#83a598', foreground = '#282828' }
 edges = { left = 'round', right = 'round' }
 ends = { left = 'none', right = 'slant', width = 12 }
 [module.cpu]
@@ -3069,6 +3069,18 @@ fn module_folds_match_both_endpoints_at_fractional_scales() {
         ("smaller padding", "$cpu", "padding = 1", false),
         ("larger padding", "$cpu", "padding = 8", false),
         (
+            "smaller collapsed icon",
+            "$cpu",
+            "icon_size = 3\npadding = 4",
+            false,
+        ),
+        (
+            "larger collapsed icon",
+            "$cpu",
+            "icon_size = 10\npadding = 4",
+            false,
+        ),
+        (
             "collapsed minimum width",
             "$cpu",
             "padding = 0\nmin_width = 24",
@@ -3185,6 +3197,13 @@ foreground = "#ffffffff"
             let near = frame(Some(0.999), direction);
             let arriving = frame(Some(1.0), direction);
             let module = &near.groups[0].modules[0];
+            if let (false, Some(a), Some(b)) = (
+                swaps_icon,
+                arriving.groups[0].modules[0].icon.as_ref(),
+                settled.groups[0].modules[0].icon.as_ref(),
+            ) {
+                assert_eq!((a.x, a.y, a.size), (b.x, b.y, b.size), "{case}");
+            }
             assert!(module.content_right.is_some(), "{case}");
             assert!(module.text_right < module.content_right, "{case}");
 
@@ -3233,5 +3252,125 @@ foreground = "#ffffffff"
                 }
             }
         }
+    }
+}
+
+/// The two independent cuts can cross while a module and its island are folding together.
+/// Their geometry composes in layout, and the renderer has to intersect both at the same
+/// snapped device columns so the combined hand-off is still exact at fractional scales.
+#[test]
+fn overlapping_module_and_group_folds_match_their_endpoints_at_fractional_scales() {
+    use crate::{
+        collect::Registry,
+        layout::Inputs,
+        status::{Fields, StatusItem, Value},
+    };
+
+    let cfg = Config::parse(
+        r##"
+[bar]
+height = 24
+background = { color = "#00000000" }
+[left]
+groups = ["g"]
+[group.g]
+modules = ["m", "next"]
+padding = 2
+spacing = 3
+background = "#3c3836"
+radius = 7
+collapsible = true
+collapse_button = "left"
+collapse_animation = "150ms"
+collapsed = { icon = "$cpu", icon_size = 8, padding = 5, background = "#83a598" }
+[module.m]
+format = "$text"
+padding = 2
+icon = "$cpu"
+icon_size = 10
+icon_gap = 2
+background = "#cc241d"
+foreground = "#ffffff"
+collapsible = true
+collapse_animation = "150ms"
+collapsed = { icon_size = 6, padding = 4, background = "#458588" }
+[module.next]
+format = "$text"
+padding = 2
+background = "#98971a"
+foreground = "#ffffff"
+"##,
+    )
+    .unwrap();
+    let item = |name: &str, value: &str| {
+        let mut fields = Fields::default();
+        fields.set("text", Value::Text(value.to_string()));
+        StatusItem {
+            id: Some(name.to_string()),
+            fields,
+            state: Default::default(),
+            urgent: false,
+            foreground: None,
+            background: None,
+            action: None,
+        }
+    };
+    let items = [item("m", "TEXT"), item("next", "N")];
+    let native = Registry::new(&Default::default());
+    let empty = Default::default();
+    let collapsed_modules = ["m".to_string()].into();
+    let collapsed_groups = ["g".to_string()].into();
+    let frame = |at: Option<f32>, modules, groups| {
+        let progress: std::collections::HashMap<String, f32> = at
+            .map(|at| [("m".to_string(), at), ("g".to_string(), at)].into())
+            .unwrap_or_default();
+        let inputs = Inputs {
+            items: &items,
+            native: &native,
+            sway: &Default::default(),
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed: modules,
+            collapsed_groups: groups,
+            switching: &Default::default(),
+            folding: &progress,
+            module_folding: &progress,
+            waiting: &Default::default(),
+            spin: 0,
+            tray: &Default::default(),
+            output: None,
+        };
+        crate::layout::compute(
+            &cfg,
+            &inputs,
+            480.0,
+            24.0,
+            &mut Blocks {
+                scale: 1.0,
+                run: None,
+            },
+            None,
+        )
+    };
+
+    let open = frame(None, &empty, &empty);
+    let leaving = frame(Some(0.0), &collapsed_modules, &collapsed_groups);
+    let moving = frame(Some(0.63), &collapsed_modules, &collapsed_groups);
+    let arriving = frame(Some(1.0), &collapsed_modules, &collapsed_groups);
+    let settled = frame(None, &collapsed_modules, &collapsed_groups);
+    assert!(moving.groups[0].content_right.is_some());
+    assert!(moving.groups[0].modules[0].content_right.is_some());
+
+    for scale in [1.0, 1.5, 2.0] {
+        assert_eq!(
+            shot(&leaving, scale).data(),
+            shot(&open, scale).data(),
+            "combined progress zero differs at scale {scale}"
+        );
+        assert_eq!(
+            shot(&arriving, scale).data(),
+            shot(&settled, scale).data(),
+            "combined progress one differs at scale {scale}"
+        );
     }
 }

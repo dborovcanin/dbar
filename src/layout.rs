@@ -1671,7 +1671,6 @@ fn size_group(
             Shut {
                 width: folded.width,
                 module: folded.width,
-                icon: folded.icon_advance + folded.text_width,
                 style,
             }
         });
@@ -1725,11 +1724,6 @@ fn size_group(
         if travel_width > available {
             continue;
         }
-        // Charging the wider of the two wordings is what keeps a travel from re-truncating
-        // the modules behind it: they would otherwise be measured against a budget that
-        // moved on every frame, and a window title among them would shed and regain a
-        // character at a time all the way through.
-        left = (available - reserve).max(0.0);
         let mut sized = SizedModule {
             width,
             drawn_width: None,
@@ -1787,6 +1781,12 @@ fn size_group(
                 sized.carry_style(at, &shut.style);
             }
         }
+        // Charge the final reserve, after every kind of travel has had the opportunity to
+        // raise it. Today a module fold's `Shut` comes from the same folded `Fitted` already
+        // included in `reserve`; keeping this after `fold` makes that safety independent of
+        // how a future destination is built. Holding the wider endpoint is what prevents
+        // modules behind a travel from being re-truncated on every frame.
+        left = (available - sized.reserve).max(0.0);
         modules.push(sized);
     }
     let _ = height;
@@ -1809,7 +1809,6 @@ fn size_group(
     let shut = Shut {
         width: module + group.padding * 2.0 + ends.left_width() + ends.right_width(),
         module,
-        icon: advance,
         style,
     };
     let folded = sized.folded(at, shut);
@@ -1831,9 +1830,6 @@ fn size_group(
 struct Shut {
     width: f32,
     module: f32,
-    /// The icon's own advance, which is all the shut island actually draws. The rest of
-    /// `module` is the collapsed style's padding, and nothing is written in padding.
-    icon: f32,
     style: Style,
 }
 
@@ -1944,17 +1940,21 @@ impl SizedModule {
         }
         self.reserve = self.reserve.max(shut.module);
         self.drawn_width = Some(self.width + (shut.module - self.width) * at);
-        self.shift += self.travel(shut.module) * at;
-        self.text_inset = ((shut.module - shut.icon) / 2.0).max(0.0) * at;
+        self.shift += self.travel(shut) * at;
+        self.text_inset = ((shut.module - self.mark_width(&shut.style)) / 2.0).max(0.0) * at;
         self.clipped = true;
     }
 
-    /// Carry foreground, background, corners and hover paint to a collapsed style.
+    /// Carry the parts of a module's appearance that can change continuously to a collapsed
+    /// style. Padding and minimum width are already represented by the travelling box, while
+    /// the icon's size has to move with its paint or the last animated frame and the settled
+    /// one draw different geometry.
     fn carry_style(&mut self, at: f32, style: &Style) {
         let at = at.clamp(0.0, 1.0);
         self.foreground = self.foreground.mix(style.foreground, at);
         self.background = self.background.mix(style.background, at);
         self.style.radius += (style.radius - self.style.radius) * at;
+        self.style.icon_size += (style.icon_size - self.style.icon_size) * at;
         if let Some(hover) = self.hover_style.as_mut() {
             hover.foreground = hover.foreground.mix(style.foreground, at);
             hover.background = hover.background.mix(style.background, at);
@@ -1968,25 +1968,29 @@ impl SizedModule {
     /// The module's own fold may already have moved it before the group holding it folds.
     /// Returning the distance from that carried position lets the two travels compose
     /// without counting the module contribution twice.
-    fn travel(&self, shut_module: f32) -> f32 {
+    fn travel(&self, shut: &Shut) -> f32 {
         if self.icon_after_text || (self.icon_advance <= 0.0 && self.written_icon_advance <= 0.0) {
             return 0.0;
         }
-        // For a native icon, everything after its centre is the gap and wording. A
-        // configured glyph is part of the wording run, so everything after its centre is
-        // the rest of that run. Source-owned text decorations trail the wording and never
-        // set `written_icon_advance`, which deliberately leaves their current behaviour.
-        let trailing = match self.written_icon_advance > 0.0 {
-            true => self.text_width - self.written_icon_advance,
-            false => {
-                let gap = match self.text.is_empty() {
-                    true => 0.0,
-                    false => self.style.gap(),
-                };
-                self.text_width + gap
-            }
-        };
-        (shut_module - self.width + trailing) / 2.0 - self.shift
+        // Start from the same content origin `place` uses. A native icon can change size on
+        // the way, so its destination is based on the size it will be wearing rather than on
+        // its expanded advance. A configured glyph is part of the wording run and keeps the
+        // measured width of that glyph. Source-owned text decorations trail the wording and
+        // never set `written_icon_advance`, which deliberately leaves their current behaviour.
+        let content = self.icon_advance + self.text_width;
+        let from = ((self.width - content) / 2.0).max(self.style.padding);
+        let mark = self.mark_width(&shut.style);
+        let to = (shut.module - mark) / 2.0;
+        to - from - self.shift
+    }
+
+    /// Width of the mark this module will still be drawing in `style` once its wording has
+    /// gone. A native icon follows `icon_size`; a configured glyph keeps its measured width.
+    fn mark_width(&self, style: &Style) -> f32 {
+        match self.icon {
+            Some((icon, _)) => style.icon_size * icon.width(),
+            None => self.written_icon_advance,
+        }
     }
 }
 
@@ -2025,7 +2029,7 @@ impl SizedGroup {
         // which is the artefact the fold holds its own contents still to avoid.
         self.reserve = self.reserve.max(shut.width);
         self.width += (shut.width - self.width) * at;
-        self.shift = self.modules[0].travel(shut.module) * at;
+        self.shift = self.modules[0].travel(&shut) * at;
         // The leading module's box: as far as its own edge has been carried, or as far as
         // the shut island reaches, whichever is further. The first is what a fold has
         // always done, and it leaves the readings behind it exactly where they were while
@@ -2041,7 +2045,8 @@ impl SizedGroup {
         // standing in that padding to the last frame: an island closing on a generous
         // collapsed padding shows the first characters of its reading until the settled
         // frame takes them away in one step.
-        self.text_inset = ((shut.module - shut.icon) / 2.0).max(0.0) * at;
+        self.text_inset =
+            ((shut.module - self.modules[0].mark_width(&shut.style)) / 2.0).max(0.0) * at;
         // The island is left holding the collapsed style's icon on the collapsed style's
         // ground, so the module that stays behind arrives wearing them. Both ends of the
         // hand-off are then the same picture and the swap on the last frame is a swap of
@@ -2110,6 +2115,17 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             size: m.style.icon_size,
             art: m.art.clone(),
         });
+        // `icon_advance` is the expanded measurement and stays fixed while a fold moves.
+        // Text still has to follow the icon actually being painted when the collapsed style
+        // gives that icon a different size, so derive only this placement advance anew.
+        let painted_icon_advance = match (m.icon_after_text, m.icon) {
+            (true, _) => 0.0,
+            (false, Some((icon, _))) if m.style.icon_size > 0.0 => {
+                m.style.icon_size * icon.width() + icon_gap
+            }
+            (false, Some(_)) => 0.0,
+            (false, None) => m.icon_advance,
+        };
 
         // Hover is resolved here, against the final rectangle, so it is always the module
         // actually under the pointer rather than one from a previous frame.
@@ -2143,11 +2159,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             height: inner_h,
             icon: placed_icon,
             text: m.text,
-            text_x: content_x
-                + match m.icon_after_text {
-                    true => 0.0,
-                    false => m.icon_advance,
-                },
+            text_x: content_x + painted_icon_advance,
             content_right,
             text_right,
             foreground,

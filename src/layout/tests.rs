@@ -304,6 +304,77 @@ padding = 0
     );
 }
 
+/// A source-owned native decoration follows the workspace wording. It is not the mark a
+/// group fold leaves behind, so treating its advance as a leading icon would move the whole
+/// wording towards a centre it never occupies. The edge travels; these contents stay put.
+#[test]
+fn a_group_fold_does_not_lead_with_a_trailing_workspace_icon() {
+    let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["ws"]
+padding = 0
+collapsible = true
+collapse_button = "left"
+collapse_animation = "150ms"
+collapsed = { icon = "$cpu", icon_size = 4, padding = 3 }
+
+[module.ws]
+source = "sway:workspaces"
+format = "$name"
+icons = { "1" = "$slack" }
+icon_size = 4
+icon_gap = 1
+padding = 0
+"##;
+    let cfg = Config::parse(config).unwrap();
+    let sway = two_screens();
+    let native = Registry::new(&Default::default());
+    let groups = ["g".to_string()].into();
+    let moving = [("g".to_string(), 0.5)].into();
+    let no_groups = Default::default();
+    let not_folding = Default::default();
+    let lay_out = |folding, collapsed_groups| {
+        let inputs = Inputs {
+            items: &[],
+            native: &native,
+            sway: &sway,
+            alt: &Default::default(),
+            pages: &Default::default(),
+            collapsed: &Default::default(),
+            collapsed_groups,
+            switching: &Default::default(),
+            folding,
+            module_folding: &Default::default(),
+            waiting: &Default::default(),
+            spin: 0,
+            tray: &Default::default(),
+            output: None,
+        };
+        compute(&cfg, &inputs, 200.0, 10.0, &mut Fixed, None)
+    };
+    let open = lay_out(&not_folding, &no_groups);
+    let folded = lay_out(&moving, &groups);
+    let (open_group, folded_group) = (&open.groups[0], &folded.groups[0]);
+    let (open, folded) = (&open_group.modules[0], &folded_group.modules[0]);
+
+    assert!(
+        (folded_group.width - open_group.width).abs() > 0.001,
+        "the group edge moved"
+    );
+    assert!(
+        open.icon.as_ref().unwrap().x > open.text_x,
+        "the icon trails"
+    );
+    assert_eq!(folded.text_x, open.text_x);
+    assert_eq!(
+        folded.icon.as_ref().unwrap().x,
+        open.icon.as_ref().unwrap().x
+    );
+}
+
 /// A bar showing icons and nothing else is what `icons` with no wording is for, and a
 /// workspace icon written as text has to start where a native one would.
 #[test]

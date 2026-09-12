@@ -1347,24 +1347,28 @@ fn draw_group(
     }
 
     // A folding island is the other case: what it holds was measured for the width it had
-    // when it was open, so something has to stop it as the edge travels over it. Not the
-    // island's own outline, though - the trailing cap sits in room of its own inside that,
-    // the way it does when nothing is folding, and modules run through to the island's
-    // edge would fill the open side of the cap in. Contents stop where contents stop.
+    // when it was open, so something has to stop it as the edge travels over it. An explicit
+    // trailing end owns room past the content edge, so that path stops where contents stop
+    // and then includes the end's shape. Without one, the island outline is the right mask:
+    // module geometry already stops at `content_right`, while rounding the mask there would
+    // cut a second corner inside the island's trailing padding.
     let mask_path = match group.content_right {
         Some(right) => {
             // Module fills and joins share snapped device columns. The moving clip
             // must use the same columns or its partially covered last pixel exposes
             // the bar background beside an otherwise solid ribbon.
             let left = snap(group.x, scale);
-            let stopped = edged_rect(
-                left,
-                group.y,
-                snap(right, scale) - left,
-                group.height,
-                rl,
-                rr,
-            );
+            let stopped = match group.content_edge.is_some() {
+                true => edged_rect(
+                    left,
+                    group.y,
+                    snap(right, scale) - left,
+                    group.height,
+                    rl,
+                    rr,
+                ),
+                false => Some(outline.clone()),
+            };
             // Past that column the island carries on into its own end, and what is written
             // there belongs inside the shape that end is drawn with. The two abut rather
             // than overlap, so one fill rule serves both halves.

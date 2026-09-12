@@ -850,6 +850,9 @@ icon = "$play"
 [module.media.collapsed]
 icon = "$media"
 foreground = "$subtext"
+# A collapsed style can change geometry as well as paint. The icon eases down to this
+# size while keeping its centre on the destination, then the media icon takes its place.
+icon_size = 16
 
 # A disk module is pointed at a filesystem; without `path` it is the root. The
 # percentage leaves out the reserve only root may write into, so a disk with no
