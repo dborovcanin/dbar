@@ -6,7 +6,7 @@ BIN   := dbar
 PREFIX ?= /usr
 DESTDIR ?=
 
-.PHONY: all prod run check test fmt clippy clean install uninstall release-bundle release
+.PHONY: all prod run check test bench fmt clippy clean install uninstall release-bundle release
 
 # Fast iteration build.
 all:
@@ -25,6 +25,15 @@ check:
 
 test:
 	$(CARGO) test
+
+# Release timing probes. Deliberately not part of `make test`: they measure the
+# machine they run on, so they report numbers rather than pass or fail. Run
+# before and after anything that touches layout or painting, and compare.
+bench:
+	$(CARGO) test --release -- --ignored --nocapture \
+		paint_costs_this_much_per_frame \
+		benchmark_joined_ribbon \
+		benchmark_group_collapse_layout
 
 fmt:
 	$(CARGO) fmt
