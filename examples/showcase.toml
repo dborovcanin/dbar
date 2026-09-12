@@ -308,7 +308,7 @@ spacing = 0                         # only used when the group has no separator
 # A visible icon with positive icon_size is required; the icon only toggles the group.
 [group.system.collapsed]
 style = "cool"
-icon = "cpu"
+icon = "$cpu"
 
 [group.system.separator]
 shape = "slant"
@@ -696,7 +696,7 @@ source = "time"
 interval = "1m"
 format = " $now.time(f:'%a %d %b %H:%M') "
 style = "cool"
-icon = "clock"
+icon = "$clock"
 # A clock can be about somewhere else: `tz` takes an IANA zone name, checked
 # against this machine's own database when the config is read, so a typo is a
 # startup error rather than an hour quietly wrong. Two of them in one format is
@@ -720,7 +720,7 @@ source = "cpu"
 interval = "2s"
 format = " $utilization.n(w:4) "
 style = "cool"
-icon = "cpu"
+icon = "$cpu"
 
 # `state` matches how the source rates itself rather than any number it sends.
 # A collector that cannot read says so, and this is how that looks.
@@ -743,7 +743,7 @@ format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
 # bargain `collapse_animation` makes for a whole island.
 alt_animation = "120ms"
 style = "warm"
-icon = "memory"
+icon = "$memory"
 
 # Thresholds read the value the source nominated as its main one. `field` names
 # a different one, which has to be a number the source actually publishes.
@@ -772,7 +772,7 @@ scroll = "5%"
 signal = 8
 format = " $brightness.n(w:4) "
 style = "plain"
-icon = "brightness"
+icon = "$brightness"
 
 # `controls = true` makes a module the remote as well as the display: on a media
 # module a left click plays and pauses, and the wheel moves between tracks. It is
@@ -803,13 +803,13 @@ alt_button = "middle"
 style = "plain"
 max_width = 280
 # A button says what pressing it does, so a playing track wears the pause icon.
-icon = "pause"
+icon = "$pause"
 
 [module.media.states.paused]
 field = "status"
 equals = "paused"
 foreground = "$subtext"
-icon = "play"
+icon = "$play"
 
 # A disk module is pointed at a filesystem; without `path` it is the root. The
 # percentage leaves out the reserve only root may write into, so a disk with no
@@ -821,7 +821,7 @@ interval = "1m"
 format = " $available "
 format_alt = " $percent.n(w:4) of $total.n(d:0) "
 style = "mint"
-icon = "disk"
+icon = "$disk"
 
 [module.disk.states.filling]
 above = 90
@@ -837,12 +837,12 @@ interval = "2s"
 format = " $down{  $up} "
 format_alt = [" $device $state ", " $signal.n(w:4)  $dbm.n(d:0) dBm "]
 style = "plain"
-icon = "wifi"
+icon = "$wifi"
 
 [module.wifi.states.offline]
 field = "state"
 equals = "down"
-icon = "wifi-off"
+icon = "$wifi-off"
 
 # Load is a count of runnable processes, not a percentage, so what "busy" means
 # depends on the machine: 4.0 saturates a quad-core and idles a sixteen. The
@@ -871,7 +871,7 @@ format_alt = " $temp.n(d:0) $label ($chip) "
 style = "plain"
 # Graded like the battery and the wifi: five steps, read here from the degrees
 # themselves, since a processor lives inside the first hundred of them.
-icon = "temperature"
+icon = "$temperature"
 
 [module.temperature.states.warm]
 state = "warning"
@@ -883,7 +883,7 @@ style = "critical"
 
 [module.volume]
 style = "plain"
-icon = "volume"
+icon = "$volume"
 
 # One module covers all three states: the provider spells each into the text and
 # a rule reads it there. "strip" drops the wording once matched, so what is left
@@ -895,12 +895,12 @@ icon = "volume"
 [module.volume.states.muted]
 contains = "MUTED"
 strip = true
-icon = "volume-muted"
+icon = "$volume-muted"
 
 [module.volume.states.headphones]
 contains = "HEAD"
 strip = true
-icon = "headphones"
+icon = "$headphones"
 
 # Braces hold what should disappear rather than draw half a sentence. A machine
 # on mains has no time to report, one allowed to charge to full has no cap, and
@@ -911,7 +911,7 @@ interval = "30s"
 format = " $percent.n(w:4){  $time.dur(style:short) left}{  cap $threshold} "
 format_alt = " $percent.n(w:4)  $status{  $power.n(d:1)}  health $health.n(d:0) "
 style = "stone"
-icon = "battery"
+icon = "$battery"
 
 # `equals` compares a field the source published, where `contains` searches the
 # text a format produced. Both say "match on a word", but only this one is
@@ -924,7 +924,7 @@ icon = "battery"
 [module.battery.states.charging]
 field = "status"
 equals = "charging"
-icon = "battery-charging"
+icon = "$battery-charging"
 
 # A battery rates its own situation, and only alarms while it is actually
 # draining: the same 10% with the charger in is fine. Keying on that rather

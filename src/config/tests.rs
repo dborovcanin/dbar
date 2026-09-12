@@ -536,14 +536,14 @@ fn two_things_wanting_one_button_is_a_startup_error() {
 #[test]
 fn folding_answers_to_the_right_button_unless_told_otherwise() {
     let cfg = Config::parse(&one_module(
-        "source = \"cpu\"\ncollapsible = true\nicon = \"cpu\"",
+        "source = \"cpu\"\ncollapsible = true\nicon = \"$cpu\"",
     ))
     .expect("a module that folds");
     assert_eq!(cfg.modules().next().unwrap().collapse_button, Button::Right);
 
     // Moved off the right, which then leaves the right free for something else.
     let moved = Config::parse(&one_module(
-            "source = \"cpu\"\ncollapsible = true\nicon = \"cpu\"\ncollapse_button = \"middle\"\non_click = { right = [\"true\"] }",
+            "source = \"cpu\"\ncollapsible = true\nicon = \"$cpu\"\ncollapse_button = \"middle\"\non_click = { right = [\"true\"] }",
         ))
         .expect("nothing is claimed twice");
     let module = moved.modules().next().unwrap();
@@ -1132,7 +1132,7 @@ modules = ["cpu"]
 
 [module.cpu]
 source = "cpu"
-icon = "cpu"
+icon = "$cpu"
 collapsible = true
 "#,
     )
@@ -1383,21 +1383,21 @@ modules = ["volume"]
 
 [module.volume]
 source = "audio"
-icon = "volume"
+icon = "$volume"
 
 [module.volume.states.zz_both]
 fields = { muted = "yes", port = "headphones" }
-icon = "headphones-muted"
+icon = "$headphones-muted"
 
 [module.volume.states.muted]
 field = "muted"
 equals = "yes"
-icon = "volume-muted"
+icon = "$volume-muted"
 
 [module.volume.states.port]
 field = "port"
 equals = "headphones"
-icon = "headphones"
+icon = "$headphones"
 "##;
     let cfg = Config::parse(config).expect("parses");
     let module = cfg
@@ -1417,12 +1417,21 @@ icon = "headphones"
             .states
             .iter()
             .find(|rule| rule.matches(StateFlags::default(), false, &fields, ""))
-            .and_then(|rule| rule.style.icon)
+            .and_then(|rule| rule.style.icon.clone())
     };
 
-    assert_eq!(says("yes", "headphones"), Icon::parse("headphones-muted"));
-    assert_eq!(says("yes", "speaker"), Icon::parse("volume-muted"));
-    assert_eq!(says("no", "headphones"), Icon::parse("headphones"));
+    assert_eq!(
+        says("yes", "headphones"),
+        Icon::parse("headphones-muted").map(IconSpec::Native)
+    );
+    assert_eq!(
+        says("yes", "speaker"),
+        Icon::parse("volume-muted").map(IconSpec::Native)
+    );
+    assert_eq!(
+        says("no", "headphones"),
+        Icon::parse("headphones").map(IconSpec::Native)
+    );
     assert_eq!(
         says("no", "speaker"),
         None,
@@ -1528,7 +1537,7 @@ fn a_group_may_not_reserve_a_button_one_of_its_modules_uses() {
     let config = |group: &str, module: &str| {
         format!(
             "[left]\ngroups = ['g']\n[group.g]\nmodules = ['m']\ncollapsible = true\n\
-                 collapse_button = '{group}'\ncollapsed = {{ icon = 'cpu' }}\n\
+                 collapse_button = '{group}'\ncollapsed = {{ icon = '$cpu' }}\n\
                  [module.m]\nsource = 'cpu'\n{module}\n"
         )
     };
@@ -1537,7 +1546,7 @@ fn a_group_may_not_reserve_a_button_one_of_its_modules_uses() {
         (
             "right",
             "collapsible = true
-icon = 'cpu'",
+icon = '$cpu'",
             "collapsible",
         ),
         ("left", "format_alt = '$utilization'", "format_alt"),
@@ -1554,7 +1563,7 @@ icon = 'cpu'",
 
     // A module operating the volume claims the button that mutes it.
     let volume = "[left]\ngroups = ['g']\n[group.g]\nmodules = ['m']\ncollapsible = true\n\
-             collapse_button = 'middle'\ncollapsed = { icon = 'cpu' }\n\
+             collapse_button = 'middle'\ncollapsed = { icon = '$cpu' }\n\
              [module.m]\nsource = 'audio'\nscroll = '5%'\n";
     let e = Config::parse(volume).expect_err("middle mutes");
     assert!(format!("{e:#}").contains("mute_button"), "{e:#}");
@@ -1572,7 +1581,7 @@ icon = 'cpu'",
 fn a_fold_is_instant_unless_the_config_gives_it_a_time() {
     let prefix = "[left]\ngroups = ['system']\n[group.system]\nmodules = []\n";
     let parse = |extra: &str| Config::parse(&format!("{prefix}{extra}"));
-    let shut = "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'cpu' }";
+    let shut = "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = '$cpu' }";
     let collapse = |cfg: &Config| cfg.positions[0].groups[0].collapse.clone().unwrap();
 
     // The default is the behaviour that costs nothing: a fold is one redraw.
@@ -1644,23 +1653,23 @@ fn group_collapse_defaults_requirements_and_style_cascade() {
         ("collapsible = true\ncollapse_button = 'right'", "icon"),
         ("collapsible = true\ncollapse_button = 'wheel'", "wheel"),
         (
-            "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'bogus' }",
-            "unknown icon",
+            "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = '$bogus' }",
+            "unknown native icon",
         ),
         (
             "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'none' }",
             "icon",
         ),
         (
-            "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'cpu', icon_size = 0 }",
+            "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = '$cpu', icon_size = 0 }",
             "icon_size",
         ),
         (
-            "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'cpu', icon_size = -1 }",
+            "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = '$cpu', icon_size = -1 }",
             "icon_size",
         ),
         (
-            "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = 'cpu', icon_size = inf }",
+            "collapsible = true\ncollapse_button = 'right'\ncollapsed = { icon = '$cpu', icon_size = inf }",
             "icon_size",
         ),
         (
@@ -1674,7 +1683,7 @@ fn group_collapse_defaults_requirements_and_style_cascade() {
     }
     for button in ["left", "middle", "right"] {
         let cfg = parse(&format!(
-            "collapsible = true\ncollapse_button = '{button}'\ncollapsed = {{ icon = 'cpu' }}"
+            "collapsible = true\ncollapse_button = '{button}'\ncollapsed = {{ icon = '$cpu' }}"
         ))
         .unwrap();
         let collapse = cfg.positions[0].groups[0].collapse.as_ref().unwrap();
@@ -1682,14 +1691,19 @@ fn group_collapse_defaults_requirements_and_style_cascade() {
         assert_eq!(collapse.style.padding, Style::default().padding);
         assert_eq!(collapse.style.icon_size, cfg.bar.icon_size);
     }
-    let cfg = parse("collapsible = true\ncollapse_button = 'middle'\ncollapsed = { style = 'tile', icon = 'cpu', padding = 7 }\n[style.tile]\nbackground = '#123456'\nicon = 'memory'\nicon_size = 12\npadding = 3").unwrap();
-    let style = cfg.positions[0].groups[0].collapse.as_ref().unwrap().style;
-    assert_eq!(style.icon, Icon::parse("cpu"));
+    let cfg = parse("collapsible = true\ncollapse_button = 'middle'\ncollapsed = { style = 'tile', icon = '$cpu', padding = 7 }\n[style.tile]\nbackground = '#123456'\nicon = '$memory'\nicon_size = 12\npadding = 3").unwrap();
+    let style = cfg.positions[0].groups[0]
+        .collapse
+        .as_ref()
+        .unwrap()
+        .style
+        .clone();
+    assert_eq!(style.icon, Icon::parse("cpu").map(IconSpec::Native));
     assert_eq!(style.icon_size, 12.0);
     assert_eq!(style.padding, 7.0);
     assert_eq!(style.background, Color::parse("#123456").unwrap());
     assert!(
-        parse("collapsible = false\ncollapse_button = 'right'\ncollapsed = { icon = 'cpu' }")
+        parse("collapsible = false\ncollapse_button = 'right'\ncollapsed = { icon = '$cpu' }")
             .unwrap()
             .positions[0]
             .groups[0]
@@ -1697,6 +1711,6 @@ fn group_collapse_defaults_requirements_and_style_cascade() {
             .is_none()
     );
     // Group reservation must not relax conflicting bindings inside the child.
-    let error = Config::parse("[left]\ngroups = ['g']\n[group.g]\nmodules = ['m']\ncollapsible = true\ncollapse_button = 'left'\ncollapsed = { icon = 'cpu' }\n[module.m]\nformat_alt = 'alt'\non_click = { left = ['true'] }").unwrap_err();
+    let error = Config::parse("[left]\ngroups = ['g']\n[group.g]\nmodules = ['m']\ncollapsible = true\ncollapse_button = 'left'\ncollapsed = { icon = '$cpu' }\n[module.m]\nformat_alt = 'alt'\non_click = { left = ['true'] }").unwrap_err();
     assert!(format!("{error:#}").contains("on_click.left"));
 }

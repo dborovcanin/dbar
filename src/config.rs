@@ -85,20 +85,42 @@ pub struct TrayView {
 pub struct WorkspaceView {
     pub scope: Scope,
     /// Workspace name to decoration. `default` is used when no exact name is present.
-    pub icons: BTreeMap<String, WorkspaceIcon>,
+    pub icons: BTreeMap<String, IconSpec>,
 }
 
 impl WorkspaceView {
-    pub fn icon(&self, name: &str) -> Option<&WorkspaceIcon> {
+    pub fn icon(&self, name: &str) -> Option<&IconSpec> {
         self.icons.get(name).or_else(|| self.icons.get("default"))
     }
 }
 
-/// What follows a workspace name: native vector geometry or ordinary shaped text.
+/// An icon a config asked for: dbar's own vector geometry, or ordinary shaped text.
+///
+/// One notion everywhere an icon can be written. `$name` is a built-in, drawn as geometry
+/// that scales with `icon_size`; anything else is text, shaped with the font beside the
+/// wording, which is how an icon font's glyph or an emoji gets onto the bar.
+///
+/// The text arm is shared rather than owned because a `Style` is cloned per module per
+/// frame, and a glyph that allocated on the way would be paid for on every redraw.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum WorkspaceIcon {
+pub enum IconSpec {
     Native(Icon),
-    Text(String),
+    Text(std::sync::Arc<str>),
+}
+
+impl IconSpec {
+    /// Read one written icon: `$name` for a built-in, anything else as text.
+    ///
+    /// A misspelled `$name` is a startup error, which is the whole reason the sigil is
+    /// there: without it there is no telling a typo from a glyph nobody can see.
+    pub fn parse(spec: &str) -> Result<IconSpec> {
+        match spec.strip_prefix('$') {
+            Some(native) => Icon::parse(native)
+                .map(IconSpec::Native)
+                .ok_or_else(|| anyhow!("unknown native icon \"${native}\"")),
+            None => Ok(IconSpec::Text(spec.into())),
+        }
+    }
 }
 
 impl TrayView {
@@ -1153,7 +1175,7 @@ impl StateRule {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Style {
     pub background: Color,
     pub foreground: Color,
@@ -1162,7 +1184,7 @@ pub struct Style {
     pub min_width: f32,
     /// Widest the module may draw, in logical pixels. Zero leaves it unbounded.
     pub max_width: f32,
-    pub icon: Option<Icon>,
+    pub icon: Option<IconSpec>,
     /// Icon edge length in logical pixels, independent of the font size.
     pub icon_size: f32,
     /// Space between the icon and the text, in logical pixels. Absent means a share of
@@ -1234,7 +1256,7 @@ impl Style {
         if let Some(name) = &over.icon {
             self.icon = match name.as_str() {
                 "none" => None,
-                other => Some(Icon::parse(other).ok_or_else(|| anyhow!("unknown icon {other:?}"))?),
+                other => Some(IconSpec::parse(other)?),
             };
         }
         if let Some(v) = over.icon_size {
@@ -1245,6 +1267,38 @@ impl Style {
         }
         Ok(self)
     }
+}
+
+/// What an icon a fold leaves behind has to satisfy to be worth folding to.
+///
+/// It is the only thing left to click on to open the thing again, so an icon that cannot
+/// be drawn is not a narrow module - it is one that disappears until dbar is restarted.
+/// Geometry is checked against the width it will take, worked out the way layout does it;
+/// a glyph is measured by the text backend at layout time and can only be checked for
+/// being there at all.
+fn check_collapsed_icon(icon: &IconSpec, style: &Style, where_: &str) -> Result<()> {
+    match icon {
+        IconSpec::Text(glyph) => {
+            if glyph.is_empty() {
+                bail!("{where_}: the icon folded to is empty, so there would be nothing to click");
+            }
+        }
+        IconSpec::Native(native) => {
+            if !style.icon_size.is_finite() || style.icon_size <= 0.0 {
+                bail!("{where_}: a native icon needs a positive finite icon_size");
+            }
+            let width =
+                (style.icon_size * native.width() + style.padding * 2.0).max(style.min_width);
+            if style.max_width > 0.0 && width > style.max_width {
+                bail!(
+                    "{where_}: the icon needs {width}px but max_width is {max}px, so there \
+                     would be nothing left to expand it with",
+                    max = style.max_width
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Named colors, so a config can say `background = "$surface"`.
@@ -1578,9 +1632,12 @@ impl Config {
 
         // Named styles resolve against the built-in defaults, once.
         let base = base_style(bar.icon_size);
+        // Cloned into each cascade below: a style carries a shared glyph now, so this is
+        // a refcount rather than the copy it used to be.
         let mut styles: HashMap<String, Style> = HashMap::new();
         for (name, raw_style) in &raw.styles {
             let style = base
+                .clone()
                 .overlay(raw_style, &palette)
                 .with_context(|| format!("in [style.{name}]"))?;
             styles.insert(name.clone(), style);
@@ -1611,7 +1668,7 @@ impl Config {
                     .groups
                     .get(group_name)
                     .ok_or_else(|| anyhow!("group {group_name:?} is used but not defined"))?;
-                let group = resolve_group(group_name, raw_group, &raw, &palette, &styles, base)?;
+                let group = resolve_group(group_name, raw_group, &raw, &palette, &styles, &base)?;
                 if slot.separator.is_some() && (group.opacity != 1.0 || group.padding != 0.0) {
                     bail!(
                         "[{name}.separator] joins group {group_name:?}, which must have opacity = 1 and padding = 0"
@@ -1889,17 +1946,9 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
             let mut icons = BTreeMap::new();
             if let Some(written) = raw.map(|m| &m.icons) {
                 for (workspace, name) in written {
-                    let icon = match name.strip_prefix('$') {
-                        Some(native) => {
-                            WorkspaceIcon::Native(Icon::parse(native).ok_or_else(|| {
-                                anyhow!(
-                                    "module {module_name:?} gives workspace {workspace:?} unknown \
-                                 native icon {name:?}"
-                                )
-                            })?)
-                        }
-                        None => WorkspaceIcon::Text(name.clone()),
-                    };
+                    let icon = IconSpec::parse(name).with_context(|| {
+                        format!("module {module_name:?}, workspace {workspace:?}")
+                    })?;
                     icons.insert(workspace.clone(), icon);
                 }
             }
@@ -2081,17 +2130,18 @@ fn resolve_group(
     raw: &RawConfig,
     palette: &Palette,
     styles: &HashMap<String, Style>,
-    base: Style,
+    base: &Style,
 ) -> Result<Group> {
     let collapsed_style = raw_group
         .collapsed
         .as_ref()
         .map(|collapsed| {
             let start = match &collapsed.style {
-                Some(style) => *styles
+                Some(style) => styles
                     .get(style)
+                    .cloned()
                     .ok_or_else(|| anyhow!("unknown style {style:?}"))?,
-                None => base,
+                None => base.clone(),
             };
             start.overlay(&collapsed.overrides, palette)
         })
@@ -2101,28 +2151,11 @@ fn resolve_group(
         let button = raw_group.collapse_button.ok_or_else(|| {
             anyhow!("[group.{name}]: collapsible requires an explicit collapse_button")
         })?;
-        let style = collapsed_style.unwrap_or(base);
-        let Some(icon) = style.icon else {
-            bail!(
-                "[group.{name}.collapsed]: collapsible requires an icon with positive finite icon_size"
-            );
+        let style = collapsed_style.unwrap_or_else(|| base.clone());
+        let Some(icon) = &style.icon else {
+            bail!("[group.{name}.collapsed]: collapsible requires an icon");
         };
-        if !style.icon_size.is_finite() || style.icon_size <= 0.0 {
-            bail!(
-                "[group.{name}.collapsed]: collapsible requires an icon with positive finite icon_size"
-            );
-        }
-        // The collapsed icon is the only thing left to click on to expand the group again,
-        // so a width it can never fit into is not a group that renders narrow - it is a
-        // group that disappears until dbar is restarted. Worked out the way layout does.
-        let width = (style.icon_size * icon.width() + style.padding * 2.0).max(style.min_width);
-        if style.max_width > 0.0 && width > style.max_width {
-            bail!(
-                "[group.{name}.collapsed]: the collapsed icon needs {width}px but max_width \
-                 is {max}px, so the group would have nothing left to expand it with",
-                max = style.max_width
-            );
-        }
+        check_collapsed_icon(icon, &style, &format!("[group.{name}.collapsed]"))?;
         let animation = raw_group
             .collapse_animation
             .as_deref()
@@ -2163,17 +2196,17 @@ fn resolve_group(
         let style = match raw.modules.get(module_name) {
             Some(raw_module) => {
                 let start = match &raw_module.style {
-                    Some(style_name) => *styles.get(style_name).ok_or_else(|| {
+                    Some(style_name) => styles.get(style_name).cloned().ok_or_else(|| {
                         anyhow!("module {module_name:?} references unknown style {style_name:?}")
                     })?,
-                    None => base,
+                    None => base.clone(),
                 };
                 start
                     .overlay(&raw_module.overrides, palette)
                     .with_context(|| format!("in [module.{module_name}]"))?
             }
             // A module listed in a group but never configured still renders with defaults.
-            None => base,
+            None => base.clone(),
         };
 
         // A state applies the named style's own keys over the module's, rather than
@@ -2181,7 +2214,7 @@ fn resolve_group(
         let mut states = Vec::new();
         if let Some(raw_module) = raw.modules.get(module_name) {
             for (state_name, raw_state) in &raw_module.states {
-                let mut state_style = style;
+                let mut state_style = style.clone();
                 if let Some(style_name) = &raw_state.style {
                     let named = raw.styles.get(style_name).ok_or_else(|| {
                         anyhow!(
@@ -2487,7 +2520,10 @@ fn resolve_group(
     }
 
     // Wildcard groups need a style for blocks that have no `[module.*]` table.
-    let fallback = styles.get("default").copied().unwrap_or(base);
+    let fallback = styles
+        .get("default")
+        .cloned()
+        .unwrap_or_else(|| base.clone());
 
     let separator = raw_group
         .separator

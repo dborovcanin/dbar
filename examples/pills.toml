@@ -179,7 +179,7 @@ source = "cpu"
 interval = "2s"
 format = "$utilization.n(d:0)"
 style = "pill"
-icon = "cpu"
+icon = "$cpu"
 foreground = "$text"
 min_width = 74
 
@@ -193,7 +193,7 @@ interval = "5s"
 format = "$percent.n(d:0)"
 format_alt = "$used.n(d:1) of $total.n(d:0)"
 style = "pill"
-icon = "memory"
+icon = "$memory"
 min_width = 74
 
 [module.memory.states.full]
@@ -205,7 +205,7 @@ source = "temperature"
 interval = "5s"
 format = "$temp.n(d:0)"
 style = "pill"
-icon = "temperature"
+icon = "$temperature"
 min_width = 76
 
 [module.temperature.states.hot]
@@ -218,12 +218,12 @@ interval = "2s"
 format = "$ssid|$device"
 format_alt = "$down{  $up}"
 style = "pill"
-icon = "wifi"
+icon = "$wifi"
 
 [module.network.states.offline]
 field = "state"
 equals = "down"
-icon = "wifi-off"
+icon = "$wifi-off"
 foreground = "$subtext"
 
 [module.volume]
@@ -231,31 +231,31 @@ source = "audio"
 scroll = "5%"
 format = "$volume.n(d:0)"
 style = "pill"
-icon = "volume"
+icon = "$volume"
 min_width = 74
 
 [module.volume.states.headphones_muted]
 fields = { muted = "yes", port = "headphones" }
 foreground = "$subtext"
-icon = "headphones-muted"
+icon = "$headphones-muted"
 
 [module.volume.states.muted]
 field = "muted"
 equals = "yes"
 foreground = "$subtext"
-icon = "volume-muted"
+icon = "$volume-muted"
 
 [module.volume.states.port]
 field = "port"
 equals = "headphones"
-icon = "headphones"
+icon = "$headphones"
 
 [module.brightness]
 source = "backlight"
 scroll = "5%"
 format = "$brightness.n(d:0)"
 style = "pill"
-icon = "brightness"
+icon = "$brightness"
 min_width = 74
 
 [module.battery]
@@ -264,13 +264,13 @@ interval = "30s"
 format = "$percent.n(d:0)"
 format_alt = "$percent.n(d:0){  $time.dur(style:short) left}"
 style = "pill"
-icon = "battery"
+icon = "$battery"
 min_width = 74
 
 [module.battery.states.plugged]
 field = "supply"
 equals = "mains"
-icon = "battery-charging"
+icon = "$battery-charging"
 
 [module.battery.states.warning]
 state = "warning"
@@ -286,4 +286,4 @@ interval = "1m"
 format = "$now.time(f:'%H:%M')"
 format_alt = "$now.time(f:'%a %d %b  %H:%M')"
 style = "pill"
-icon = "clock"
+icon = "$clock"

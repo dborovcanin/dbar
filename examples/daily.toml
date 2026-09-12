@@ -238,13 +238,13 @@ style = "panel"
 max_width = 320
 # The icon is a button, so it shows what a click will do rather than what is
 # already happening: while a track plays, clicking pauses it.
-icon = "pause"
+icon = "$pause"
 
 [module.media.states.paused]
 field = "status"
 equals = "paused"
 foreground = "$subtext"
-icon = "play"
+icon = "$play"
 
 [module.title]
 source = "sway:window"
@@ -256,7 +256,7 @@ source = "cpu"
 interval = "2s"
 format = " $utilization.n(w:4) "
 style = "panel"
-icon = "cpu"
+icon = "$cpu"
 
 [module.cpu.states.busy]
 above = 85
@@ -273,7 +273,7 @@ interval = "5s"
 format = " $percent.n(w:4) "
 format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
 style = "panel"
-icon = "memory"
+icon = "$memory"
 
 [module.memory.states.full]
 above = 90
@@ -288,7 +288,7 @@ interval = "5s"
 format = " $temp.n(d:0) "
 format_alt = " $temp.n(d:0) $label "
 style = "panel"
-icon = "temperature"
+icon = "$temperature"
 
 [module.temperature.states.warm]
 state = "warning"
@@ -305,7 +305,7 @@ source = "sway:language"
 format = " $short "
 format_alt = " $layout "
 style = "panel"
-icon = "keyboard"
+icon = "$keyboard"
 
 # What to call each layout, keyed by xkb's own name for it. Optional: a layout
 # with no line here is abbreviated instead, and "English (US)" would be "US".
@@ -329,12 +329,12 @@ interval = "2s"
 format = " $ssid|$device "
 format_alt = [" $down{  $up} ", " $signal.n(w:4){  $dbm.n(d:0) dBm} "]
 style = "panel"
-icon = "wifi"
+icon = "$wifi"
 
 [module.network.states.offline]
 field = "state"
 equals = "down"
-icon = "wifi-off"
+icon = "$wifi-off"
 
 # PipeWire says when the volume moves, so this is never sampled: it follows the
 # default output, which is what the volume keys move, and follows it to a headset
@@ -348,7 +348,7 @@ scroll = "5%"
 format = " $volume.n(w:4) "
 format_alt = " $volume.n(w:4)  $device "
 style = "panel"
-icon = "volume"
+icon = "$volume"
 
 # Muted is not a volume of zero - the level is still there, waiting - so the icon
 # says so and the number goes quiet rather than changing.
@@ -358,20 +358,20 @@ icon = "volume"
 [module.volume.states.headphones_muted]
 fields = { muted = "yes", port = "headphones" }
 foreground = "$subtext"
-icon = "headphones-muted"
+icon = "$headphones-muted"
 
 [module.volume.states.muted]
 field = "muted"
 equals = "yes"
 foreground = "$subtext"
-icon = "volume-muted"
+icon = "$volume-muted"
 
 # Which socket the sound is leaving by, so the icon follows the headphones onto
 # your head. Rules are tried in name order, so `muted` above wins over this one.
 [module.volume.states.port]
 field = "port"
 equals = "headphones"
-icon = "headphones"
+icon = "$headphones"
 
 # The kernel reports a brightness change, so this is read when it moves and
 # never in between - no interval, and nothing to press after a brightness key.
@@ -383,7 +383,7 @@ source = "backlight"
 scroll = "5%"
 format = " $brightness.n(w:4) "
 style = "panel"
-icon = "brightness"
+icon = "$brightness"
 
 # Braces hold what should disappear rather than draw half a sentence: a machine
 # on mains has no time remaining to report and does not mention one.
@@ -400,7 +400,7 @@ format_alt = [
     " $percent.n(w:4){  $time.dur(style:short) left} ",
 ]
 style = "panel"
-icon = "battery"
+icon = "$battery"
 
 # On the mains, not charging: a battery held at full, or at whatever cap a
 # charge threshold sets, still reports `not charging`, and the icon should say
@@ -408,7 +408,7 @@ icon = "battery"
 [module.battery.states.plugged]
 field = "supply"
 equals = "mains"
-icon = "battery-charging"
+icon = "$battery-charging"
 
 # The battery rates its own situation and only alarms while it is draining: the
 # same 10% with the charger in is fine.
@@ -427,4 +427,4 @@ interval = "1m"
 format = " $now.time(f:'%a %d %b  %H:%M') "
 style = "panel"
 foreground = "$background"
-icon = "clock"
+icon = "$clock"

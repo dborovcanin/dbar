@@ -1178,17 +1178,17 @@ radius = 16
 padding = 2
 spacing = 2
 background = '#313244'
-collapsed = { icon = 'cpu', padding = 6 }
+collapsed = { icon = '$cpu', padding = 6 }
 edges = { left = 'round', right = 'round' }
 [module.cpu]
 format = '$text'
 padding = 6
-icon = 'cpu'
+icon = '$cpu'
 background = '#cc241d'
 [module.memory]
 format = '$text'
 padding = 6
-icon = 'memory'
+icon = '$memory'
 background = '#458588'
 ";
     let cfg = Config::parse(config).unwrap();
@@ -1291,21 +1291,21 @@ radius = 8
 padding = 0
 spacing = 2
 background = '#00000000'
-collapsed = { icon = 'cpu', padding = 12, background = '#83a598', foreground = '#282828' }
+collapsed = { icon = '$cpu', padding = 12, background = '#83a598', foreground = '#282828' }
 edges = { left = 'round', right = 'round' }
 ends = { left = 'none', right = 'slant', width = 12 }
 [module.cpu]
 format = '$text'
 padding = 0
 icon_gap = 3
-icon = 'cpu'
+icon = '$cpu'
 background = '#cc241d'
 foreground = '#ebdbb2'
 [module.memory]
 format = '$text'
 padding = 0
 icon_gap = 3
-icon = 'memory'
+icon = '$memory'
 background = '#458588'
 ";
     let cfg = Config::parse(config).unwrap();
@@ -1478,10 +1478,10 @@ fn a_fold_arrives_with_nothing_standing_in_the_lean_of_its_cap() {
              modules = ['cpu', 'memory']\ncollapsible = true\ncollapse_button = 'right'\n\
              radius = 0\npadding = 0\nspacing = 2\nbackground = '#00000000'\n\
              ends = { left = 'none', right = 'slant', width = 12 }\n\
-             collapsed = { icon = 'cpu', padding = 0, background = '#83a598' }\n\
-             [module.cpu]\nformat = '$text'\npadding = 0\nicon = 'cpu'\n\
+             collapsed = { icon = '$cpu', padding = 0, background = '#83a598' }\n\
+             [module.cpu]\nformat = '$text'\npadding = 0\nicon = '$cpu'\n\
              background = '#cc241d'\nforeground = '#ebdbb2'\n\
-             [module.memory]\nformat = '$text'\npadding = 0\nicon = 'memory'\n\
+             [module.memory]\nformat = '$text'\npadding = 0\nicon = '$memory'\n\
              background = '#458588'\n",
     )
     .unwrap();
@@ -2238,7 +2238,7 @@ fn a_folding_island_leaves_the_open_side_of_its_cap_alone() {
              collapse_button = 'right'\ncollapse_animation = '150ms'\nbackground = '#00000000'\n\
              radius = 0\npadding = 0\nseparator = { shape = 'slant', width = 5, overlap = 1 }\n\
              ends = { left = 'slant', right = 'slant', width = 8, \
-             direction = 'right' }\ncollapsed = { icon = 'cpu', icon_size = 8, padding = 2, \
+             direction = 'right' }\ncollapsed = { icon = '$cpu', icon_size = 8, padding = 2, \
              background = '#83a598' }\n[module.a]\nbackground = '#cc241d'\npadding = 2\n\
              format = '$text'\n",
     )
@@ -2371,10 +2371,10 @@ fn a_sliver_of_a_module_at_a_rounded_corner_stays_inside_it() {
         "[bar]\nheight = 24\nicon_size = 12\n[left]\ngroups = ['a']\n[group.a]\n\
              modules = ['a', 'b']\ncollapsible = true\ncollapse_button = 'right'\n\
              collapse_animation = '150ms'\nbackground = '#3c3836'\nradius = 12\npadding = 0\n\
-             spacing = 0\ncollapsed = { icon = 'cpu', padding = 4 }\n\
+             spacing = 0\ncollapsed = { icon = '$cpu', padding = 4 }\n\
              edges = { left = 'round', right = 'round' }\n\
-             [module.a]\nbackground = '#cc241d'\npadding = 4\nformat = '$text'\nicon = 'cpu'\n\
-             [module.b]\nbackground = '#458588'\npadding = 4\nformat = '$text'\nicon = 'memory'\n",
+             [module.a]\nbackground = '#cc241d'\npadding = 4\nformat = '$text'\nicon = '$cpu'\n\
+             [module.b]\nbackground = '#458588'\npadding = 4\nformat = '$text'\nicon = '$memory'\n",
     )
     .unwrap();
     let items: Vec<_> = [("a", "aaaaaaaa"), ("b", "bbbbbbbb")]
@@ -2484,7 +2484,7 @@ fn a_folding_island_paints_nothing_outside_its_own_outline() {
              background = '#3c3836'\nradius = 6\npadding = 0\n\
              separator = { shape = 'slant', width = 5, overlap = 1 }\n\
              ends = { left = 'slant', right = 'slant', width = 6, direction = 'right' }\n\
-             collapsed = { icon = 'cpu', icon_size = 6, padding = 3, \
+             collapsed = { icon = '$cpu', icon_size = 6, padding = 3, \
              background = '#83a598' }\n[module.a]\nbackground = '#cc241d'\npadding = 2\n\
              format = '$text'\n[module.b]\nbackground = '#98971a'\npadding = 2\n\
              format = '$text'\n[module.c]\nbackground = '#458588'\npadding = 2\n\
@@ -2628,7 +2628,7 @@ fn collapsed_groups_keep_islands_caps_and_damage_every_changed_pixel() {
             );
             for (name, color) in [("a", "#cc241d"), ("b", "#98971a"), ("c", "#458588")] {
                 config += &format!(
-                    "[group.{name}]\nmodules = ['{name}']\ncollapsible = true\ncollapse_button = 'right'\nbackground = '#3c3836'\nradius = 8\npadding = {}\nopacity = {}\nends = {{ left = 'slant', right = 'slant', direction = '{direction}', width = 6 }}\ncollapsed = {{ icon = 'cpu', icon_size = 10, padding = 3, background = '#83a598' }}\n[module.{name}]\nbackground = '{color}'\npadding = 12\nformat = '$text'\n",
+                    "[group.{name}]\nmodules = ['{name}']\ncollapsible = true\ncollapse_button = 'right'\nbackground = '#3c3836'\nradius = 8\npadding = {}\nopacity = {}\nends = {{ left = 'slant', right = 'slant', direction = '{direction}', width = 6 }}\ncollapsed = {{ icon = '$cpu', icon_size = 10, padding = 3, background = '#83a598' }}\n[module.{name}]\nbackground = '{color}'\npadding = 12\nformat = '$text'\n",
                     if joined { 0 } else { 2 },
                     if joined { 1.0 } else { 0.8 }
                 );
@@ -2838,7 +2838,7 @@ foreground = "#ffffffff"
 [module.a.states.show]
 contains = "SHOW"
 strip = true
-icon = "cpu"
+icon = "$cpu"
 "##;
     let cfg = crate::config::Config::parse(config).unwrap();
     let items = [crate::status::StatusItem {

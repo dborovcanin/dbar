@@ -80,7 +80,7 @@ source = "cpu"
 interval = "2s"
 format = " $utilization.n(w:4) "
 style = "plain"
-icon = "cpu"
+icon = "$cpu"
 
 [module.cpu.states.busy]
 above = 70
@@ -92,7 +92,7 @@ interval = "5s"
 format = " $percent.n(w:4) "
 format_alt = " $used.n(d:1) of $total.n(d:0){  swap $swap_percent} "
 style = "plain"
-icon = "memory"
+icon = "$memory"
 
 [module.memory.states.high]
 above = 85
@@ -103,14 +103,14 @@ source = "backlight"
 signal = 8
 format = " $brightness.n(w:4) "
 style = "plain"
-icon = "brightness"
+icon = "$brightness"
 
 [module.clock]
 source = "time"
 interval = "1m"
 format = " $now.time(f:'%H:%M') "
 style = "plain"
-icon = "clock"
+icon = "$clock"
 
 [module.date]
 source = "time"

@@ -136,7 +136,7 @@ overlap = 1
 
 [group.system.collapsed]
 style = "tile"
-icon = "arch"
+icon = "$arch"
 
 
 [group.power]
@@ -189,7 +189,7 @@ source = "cpu"
 interval = "2s"
 format = "$utilization.n(d:0)"
 style = "tile"
-icon = "cpu"
+icon = "$cpu"
 min_width = 66
 
 [module.cpu.states.busy]
@@ -202,7 +202,7 @@ interval = "5s"
 format = "$percent.n(d:0)"
 format_alt = "$used.n(d:1) of $total.n(d:0)"
 style = "tile_alt"
-icon = "memory"
+icon = "$memory"
 min_width = 66
 
 [module.memory.states.full]
@@ -214,7 +214,7 @@ source = "temperature"
 interval = "5s"
 format = "$temp.n(d:0)"
 style = "tile"
-icon = "temperature"
+icon = "$temperature"
 min_width = 68
 
 [module.temperature.states.hot]
@@ -227,43 +227,43 @@ interval = "2s"
 format = "$ssid|$device"
 format_alt = "$down{  $up}"
 style = "tile_alt"
-icon = "wifi"
+icon = "$wifi"
 
 [module.network.states.offline]
 field = "state"
 equals = "down"
-icon = "wifi-off"
+icon = "$wifi-off"
 
 [module.volume]
 source = "audio"
 scroll = "5%"
 format = "$volume.n(d:0)"
 style = "tile"
-icon = "volume"
+icon = "$volume"
 min_width = 66
 
 [module.volume.states.headphones_muted]
 fields = { muted = "yes", port = "headphones" }
 foreground = "$subtext"
-icon = "headphones-muted"
+icon = "$headphones-muted"
 
 [module.volume.states.muted]
 field = "muted"
 equals = "yes"
 foreground = "$subtext"
-icon = "volume-muted"
+icon = "$volume-muted"
 
 [module.volume.states.port]
 field = "port"
 equals = "headphones"
-icon = "headphones"
+icon = "$headphones"
 
 [module.brightness]
 source = "backlight"
 scroll = "5%"
 format = "$brightness.n(d:0)"
 style = "tile_alt"
-icon = "brightness"
+icon = "$brightness"
 min_width = 66
 
 [module.battery]
@@ -272,13 +272,13 @@ interval = "30s"
 format = "$percent.n(d:0)"
 format_alt = "$percent.n(d:0){  $time.dur(style:short) left}"
 style = "tile"
-icon = "battery"
+icon = "$battery"
 min_width = 66
 
 [module.battery.states.plugged]
 field = "supply"
 equals = "mains"
-icon = "battery-charging"
+icon = "$battery-charging"
 
 [module.battery.states.warning]
 state = "warning"
@@ -294,4 +294,4 @@ interval = "1m"
 format = "$now.time(f:'%a %d %b  %H:%M')"
 style = "plain"
 foreground = "$base"
-icon = "clock"
+icon = "$clock"

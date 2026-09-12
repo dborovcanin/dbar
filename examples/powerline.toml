@@ -136,7 +136,7 @@ source = "cpu"
 interval = "2s"
 format = "$utilization.n(d:0)"
 style = "block_alt"
-icon = "cpu"
+icon = "$cpu"
 min_width = 68
 
 [module.cpu.states.busy]
@@ -149,7 +149,7 @@ interval = "5s"
 format = "$percent.n(d:0)"
 format_alt = "$used.n(d:1) of $total.n(d:0)"
 style = "block"
-icon = "memory"
+icon = "$memory"
 min_width = 68
 
 [module.memory.states.full]
@@ -161,7 +161,7 @@ source = "temperature"
 interval = "5s"
 format = "$temp.n(d:0)"
 style = "block_alt"
-icon = "temperature"
+icon = "$temperature"
 min_width = 70
 
 [module.temperature.states.hot]
@@ -174,12 +174,12 @@ interval = "2s"
 format = "$ssid|$device"
 format_alt = "$down{  $up}"
 style = "block"
-icon = "wifi"
+icon = "$wifi"
 
 [module.network.states.offline]
 field = "state"
 equals = "down"
-icon = "wifi-off"
+icon = "$wifi-off"
 foreground = "$subtext"
 
 [module.volume]
@@ -187,30 +187,30 @@ source = "audio"
 scroll = "5%"
 format = "$volume.n(d:0)"
 style = "block_alt"
-icon = "volume"
+icon = "$volume"
 min_width = 68
 
 [module.volume.states.headphones_muted]
 fields = { muted = "yes", port = "headphones" }
 foreground = "$subtext"
-icon = "headphones-muted"
+icon = "$headphones-muted"
 
 [module.volume.states.muted]
 field = "muted"
 equals = "yes"
 foreground = "$subtext"
-icon = "volume-muted"
+icon = "$volume-muted"
 
 [module.volume.states.port]
 field = "port"
 equals = "headphones"
-icon = "headphones"
+icon = "$headphones"
 
 [module.backlight]
 source = "backlight"
 format = "$brightness.n(d:0)"
 style = "block"
-icon = "brightness"
+icon = "$brightness"
 min_width = 68
 
 [module.battery]
@@ -219,13 +219,13 @@ interval = "30s"
 format = "$percent.n(d:0)"
 format_alt = "$percent.n(d:0){  $time.dur(style:short) left}"
 style = "block_alt"
-icon = "battery"
+icon = "$battery"
 min_width = 68
 
 [module.battery.states.plugged]
 field = "supply"
 equals = "mains"
-icon = "battery-charging"
+icon = "$battery-charging"
 
 [module.battery.states.warning]
 state = "warning"
@@ -242,7 +242,7 @@ source = "time"
 interval = "1m"
 format = "$now.time(f:'%a %d %b  %H:%M')"
 style = "accent"
-icon = "clock"
+icon = "$clock"
 
 # ---------------------------------------------------------------------------
 # Groups

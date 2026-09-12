@@ -6,8 +6,8 @@
 use crate::collect::{Registry, Which};
 use crate::color::Color;
 use crate::config::{
-    Config, Ends, Group as GroupCfg, Module as ModuleCfg, Scope, Separator, SeparatorColor, Source,
-    StateFlags, Style, WorkspaceIcon,
+    Config, Ends, Group as GroupCfg, IconSpec, Module as ModuleCfg, Scope, Separator,
+    SeparatorColor, Source, StateFlags, Style,
 };
 use crate::format::Format;
 use crate::geometry::{Direction, EdgeShape, Edges, SeparatorShape};
@@ -1192,8 +1192,8 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     // slot to its style, the way it did before there were any.
                     let decoration =
                         (!view.icons.is_empty()).then(|| match view.icon(&workspace.name) {
-                            Some(WorkspaceIcon::Native(icon)) => Decoration::Native(*icon),
-                            Some(WorkspaceIcon::Text(icon)) if !icon.is_empty() => {
+                            Some(IconSpec::Native(icon)) => Decoration::Native(*icon),
+                            Some(IconSpec::Text(icon)) if !icon.is_empty() => {
                                 Decoration::Text(icon)
                             }
                             _ => Decoration::Nothing,
@@ -1267,10 +1267,16 @@ fn size_group(
     {
         // Do not even collect candidates: that would format hidden children and copy
         // provider/tray data. The source registry continues updating independently.
-        let style = collapse.style;
-        let icon = style.icon.expect("validated collapsed icon");
-        let icon_advance = style.icon_size * icon.width();
-        let width = shut_width(&style, icon_advance);
+        let style = collapse.style.clone();
+        let spec = style.icon.as_ref().expect("validated collapsed icon");
+        let (icon, shut_text, advance) = collapsed_icon(spec, &style, text);
+        // A glyph is wording and is charged to the text; geometry is charged to the icon.
+        // Either way the island is that wide plus its padding, which is what a fold lands on.
+        let icon_advance = match icon.is_some() {
+            true => advance,
+            false => 0.0,
+        };
+        let width = shut_width(&style, advance);
         if width > left || (style.max_width > 0.0 && width > style.max_width) {
             return None;
         }
@@ -1282,18 +1288,18 @@ fn size_group(
             to_drawn: true,
             before: 0.0,
             clipped: false,
-            text_width: 0.0,
+            text_width: advance - icon_advance,
             name: None,
             collapsible: false,
             hover_style: None,
             icon_advance,
-            icon: Some((icon, 0)),
+            icon,
             icon_after_text: false,
             art: None,
-            text: String::new(),
-            style,
+            text: shut_text,
             foreground: style.foreground,
             background: style.background,
+            style,
             action: None,
             alt: None,
             alt_button: Button::Left,
@@ -1349,8 +1355,8 @@ fn size_group(
                 .states
                 .iter()
                 .find(|rule| rule.matches(flags, hovered, &values, text))
-                .map(|rule| rule.style)
-                .unwrap_or(module.style)
+                .map(|rule| rule.style.clone())
+                .unwrap_or_else(|| module.style.clone())
         };
         let value = values.primary().and_then(|v| v.num());
 
@@ -1394,7 +1400,7 @@ fn size_group(
             // them have nothing written on them at all.
             let hidden = Fitted {
                 drawn: false,
-                style,
+                style: style.clone(),
                 ..Fitted::default()
             };
             if raw.is_empty()
@@ -1424,11 +1430,11 @@ fn size_group(
             // would resize the module under the pointer, which can move the pointer off it
             // and oscillate, so the metrics always come from the unhovered style.
             let hovered = resolve(true, &content);
-            let hover_style = (hovered != style).then_some(Style {
+            let hover_style = (hovered != style).then(|| Style {
                 padding: style.padding,
                 min_width: style.min_width,
                 icon_size: style.icon_size,
-                icon: style.icon,
+                icon: style.icon.clone(),
                 ..hovered
             });
 
@@ -1454,29 +1460,47 @@ fn size_group(
             // A picture the source handed over stands in for whatever icon the style
             // names: an application's own artwork is the thing a tray module exists to
             // show.
-            let styled = || {
-                style.icon.map(|icon| {
-                    let level = if icon.is_graded() {
-                        value.map(icon::level_of).unwrap_or(0)
-                    } else {
-                        0
+            // The style's icon splits by what kind it is: geometry takes the icon slot
+            // and is graded on the value, a glyph is wording and leads the text the way it
+            // would if it had been typed at the front of the format. Both are the icon as
+            // far as folding is concerned, which is the point of writing them the same way.
+            let styled = || match style.icon.as_ref() {
+                Some(IconSpec::Native(icon)) => {
+                    let level = match icon.is_graded() {
+                        true => value.map(icon::level_of).unwrap_or(0),
+                        false => 0,
                     };
-                    (icon, level)
-                })
+                    (Some((*icon, level)), None)
+                }
+                Some(IconSpec::Text(glyph)) => (None, Some(glyph.as_ref())),
+                None => (None, None),
             };
-            let (icon, icon_after_text) = match (waiting, art.is_some(), source_icon) {
-                (true, _, _) => (Some((Icon::Spinner, inputs.spin)), false),
-                (false, true, _) => (Some((Icon::Raster, 0)), false),
-                (false, false, Some(icon)) => (Some((icon, 0)), true),
+            let (icon, icon_after_text, lead) = match (waiting, art.is_some(), source_icon) {
+                (true, _, _) => (Some((Icon::Spinner, inputs.spin)), false, None),
+                (false, true, _) => (Some((Icon::Raster, 0)), false, None),
+                (false, false, Some(icon)) => (Some((icon, 0)), true, None),
                 (false, false, None) => match (decoration, folded) {
                     // A source that decorates its own items and gave this one nothing gets
                     // nothing: the style's icon would land on exactly the workspaces the
                     // config passed over. Folding is the exception, since it takes the
                     // wording away and the style's icon is then all there is left to click.
-                    (Some(Decoration::Nothing), true) | (None, _) => (styled(), false),
-                    (Some(_), _) => (None, false),
+                    (Some(Decoration::Nothing), true) | (None, _) => {
+                        let (icon, lead) = styled();
+                        (icon, false, lead)
+                    }
+                    (Some(_), _) => (None, false, None),
                 },
             };
+            // In front of the wording rather than behind it, which is the one thing that
+            // separates a configured icon from a decoration a source wrote for itself.
+            // Folding cleared the wording just above, so a folded module is the glyph
+            // alone - the whole reason a glyph can be an icon at all.
+            if let Some(lead) = lead {
+                if !content.is_empty() {
+                    content.insert(0, ' ');
+                }
+                content.insert_str(0, lead);
+            }
             // The icon and the space after it, which is what the text starts behind. An
             // icon is as tall as `icon_size` and as wide as its own shape asks for, which
             // is the same thing for everything but the battery.
@@ -1596,9 +1620,9 @@ fn size_group(
             icon_after_text,
             art,
             text: content,
-            style,
             foreground: foreground.unwrap_or(style.foreground),
             background: background.unwrap_or(style.background),
+            style,
             action,
             // How many views this module has in all, so a click knows where it wraps.
             alt: (!module.format_alt.is_empty()).then(|| module.format_alt.len() + 1),
@@ -1629,13 +1653,13 @@ fn size_group(
     let (Some(at), Some(collapse)) = (folding, &group.collapse) else {
         return Some(sized);
     };
-    let style = collapse.style;
-    let icon = style.icon.expect("validated collapsed icon");
+    let style = collapse.style.clone();
+    let spec = style.icon.as_ref().expect("validated collapsed icon");
     // The island the fold is travelling to, worked out the way the shut branch above and
     // `finish_group` between them would have worked it out: the icon, and everything drawn
     // beside it that belongs to the group rather than to a module. Landing anywhere else
     // would show as a jump on the last frame.
-    let advance = style.icon_size * icon.width();
+    let (_, _, advance) = collapsed_icon(spec, &style, text);
     let module = shut_width(&style, advance);
     let shut = Shut {
         width: module + group.padding * 2.0 + ends.left_width() + ends.right_width(),
@@ -1658,7 +1682,7 @@ fn size_group(
 
 /// The island a fold is travelling to: how wide it is, how wide the one module in it is,
 /// and what that module is drawn in.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Shut {
     width: f32,
     module: f32,
@@ -1666,6 +1690,26 @@ struct Shut {
     /// `module` is the collapsed style's padding, and nothing is written in padding.
     icon: f32,
     style: Style,
+}
+
+/// What a collapsed thing draws in place of its contents, and how wide that is.
+///
+/// Geometry goes in the icon slot and is sized by `icon_size`. A glyph is wording, shaped
+/// with the font like any other, so it goes in the text and only the backend knows how wide
+/// it comes out - which is why this takes a measurer at all.
+fn collapsed_icon(
+    icon: &IconSpec,
+    style: &Style,
+    text: &mut dyn Measure,
+) -> (Option<(Icon, usize)>, String, f32) {
+    match icon {
+        IconSpec::Native(native) => (
+            Some((*native, 0)),
+            String::new(),
+            style.icon_size * native.width(),
+        ),
+        IconSpec::Text(glyph) => (None, glyph.to_string(), text.measure(glyph)),
+    }
 }
 
 /// The width the collapsed icon needs, which is what a fold travels to and from.
@@ -1896,9 +1940,9 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         // Hover is resolved here, against the final rectangle, so it is always the module
         // actually under the pointer rather than one from a previous frame.
         let over = pointer.is_some_and(|(px, py)| contains(px, py, x, inner_y, width, inner_h));
-        let paint = match (over, m.hover_style) {
+        let paint = match (over, &m.hover_style) {
             (true, Some(hover)) => hover,
-            _ => m.style,
+            _ => &m.style,
         };
         let (foreground, background) = if over && m.hover_style.is_some() {
             (paint.foreground, paint.background)

@@ -198,7 +198,7 @@ spacing = 0
 
 [group.system.collapsed]
 style = "tile"
-icon = "cpu"
+icon = "$cpu"
 
 [group.system.separator]
 shape = "slant"
@@ -294,20 +294,20 @@ collapsible = true
 format = "{$artist  }$title"
 style = "tile_alt"
 max_width = 120
-icon = "pause"
+icon = "$pause"
 
 [module.media.states.paused]
 field = "status"
 equals = "paused"
 foreground = "$subtext"
-icon = "play"
+icon = "$play"
 
 [module.mode]
 source = "sway:mode"
 format = "$mode"
 style = "panel"
 foreground = "$ink"
-icon = "keyboard"
+icon = "$keyboard"
 background = "$warning"
 
 [module.title]
@@ -321,7 +321,7 @@ interval = "2s"
 format = "$utilization.n(d:0)"
 min_width = 56
 style = "tile"
-icon = "cpu"
+icon = "$cpu"
 
 [module.cpu.states.busy]
 above = 85
@@ -339,7 +339,7 @@ format = "$percent.n(d:0)"
 format_alt = "$used.n(d:1) of $total.n(d:0){  swap $swap_percent}"
 min_width = 56
 style = "tile_alt"
-icon = "memory"
+icon = "$memory"
 
 [module.memory.states.full]
 above = 90
@@ -353,7 +353,7 @@ format_alt = "$temp.n(d:0) $label"
 min_width = 56
 style = "tile"
 background = "123456"
-icon = "temperature"
+icon = "$temperature"
 
 [module.temperature.states.warm]
 state = "warning"
@@ -368,7 +368,7 @@ source = "sway:language"
 format = "$short"
 format_alt = "$layout"
 style = "tile_alt"
-icon = "keyboard"
+icon = "$keyboard"
 
 [module.language.layouts]
 "English (US)" = "EN"
@@ -381,13 +381,13 @@ interval = "2s"
 format = "$ssid|$device"
 format_alt = ["$down{  $up}", "$signal.n(d:0){  $dbm.n(d:0) dBm}"]
 style = "tile"
-icon = "wifi"
+icon = "$wifi"
 max_width = 100
 
 [module.network.states.offline]
 field = "state"
 equals = "down"
-icon = "wifi-off"
+icon = "$wifi-off"
 
 [module.volume]
 source = "audio"
@@ -396,23 +396,23 @@ format = "$volume.n(d:0)"
 format_alt = "$volume.n(d:0)  $device"
 min_width = 56
 style = "tile"
-icon = "volume"
+icon = "$volume"
 
 [module.volume.states.headphones_muted]
 fields = { "muted" = "yes", "port" = "headphones" }
 foreground = "$subtext"
-icon = "headphones-muted"
+icon = "$headphones-muted"
 
 [module.volume.states.muted]
 field = "muted"
 equals = "yes"
 foreground = "$subtext"
-icon = "volume-muted"
+icon = "$volume-muted"
 
 [module.volume.states.port]
 field = "port"
 equals = "headphones"
-icon = "headphones"
+icon = "$headphones"
 
 [module.brightness]
 source = "backlight"
@@ -420,7 +420,7 @@ scroll = "5%"
 format = "$brightness.n(d:0)"
 min_width = 56
 style = "tile_alt"
-icon = "brightness"
+icon = "$brightness"
 
 [module.battery]
 source = "battery"
@@ -432,12 +432,12 @@ format_alt = [
 ]
 min_width = 56
 style = "tile"
-icon = "battery"
+icon = "$battery"
 
 [module.battery.states.plugged]
 field = "supply"
 equals = "mains"
-icon = "battery-charging"
+icon = "$battery-charging"
 
 [module.battery.states.warning]
 state = "warning"
@@ -483,4 +483,4 @@ format = "$now.time(f:'%a %d %b  %H:%M')"
 on_click = { "left" = ["examples/sway_calendar.sh"] }
 style = "accent"
 foreground = "$ink"
-icon = "clock"
+icon = "$clock"

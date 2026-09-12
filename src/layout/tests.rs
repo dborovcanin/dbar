@@ -379,7 +379,7 @@ modules = ["ws"]
 source = "sway:workspaces"
 format = "$name"
 icons = { "1" = "$slack", "2" = "XX" }
-icon = "cpu"
+icon = "$cpu"
 icon_size = 10
 collapsible = true
 padding = 0
@@ -1238,7 +1238,7 @@ modules = ["weather"]
 source = "command"
 command = ["weather"]
 interval = "30m"
-icon = "clock"
+icon = "$clock"
 "##;
     let which = Which::Command(crate::collect::CommandSpec {
         argv: vec!["weather".to_string()],
@@ -1638,7 +1638,7 @@ fn padding_is_added_on_both_sides_and_nowhere_else() {
 
 #[test]
 fn the_gap_between_an_icon_and_its_text_is_the_configured_one() {
-    let keys = |gap: &str| format!("padding = 0\nicon = \"cpu\"\nicon_size = 10\n{gap}");
+    let keys = |gap: &str| format!("padding = 0\nicon = \"$cpu\"\nicon_size = 10\n{gap}");
     // Icon, gap, then the text.
     assert_eq!(width_of(&keys("icon_gap = 0")), 13.0);
     assert_eq!(width_of(&keys("icon_gap = 4")), 17.0);
@@ -1648,7 +1648,7 @@ fn the_gap_between_an_icon_and_its_text_is_the_configured_one() {
 
 #[test]
 fn a_bigger_icon_keeps_its_breathing_room_without_being_told() {
-    let width = |size: f32| width_of(&format!("padding = 0\nicon = \"cpu\"\nicon_size = {size}"));
+    let width = |size: f32| width_of(&format!("padding = 0\nicon = \"$cpu\"\nicon_size = {size}"));
     // Twice the icon is twice the gap, so the proportions hold as the bar grows.
     assert_eq!(width(10.0) - 3.0, 12.5);
     assert_eq!(width(20.0) - 3.0, 25.0);
@@ -1658,7 +1658,7 @@ fn a_bigger_icon_keeps_its_breathing_room_without_being_told() {
 fn a_battery_is_given_the_room_a_long_icon_needs() {
     let width = |icon: &str| {
         width_of(&format!(
-            "padding = 0\nicon_gap = 0\nicon_size = 20\nicon = \"{icon}\""
+            "padding = 0\nicon_gap = 0\nicon_size = 20\nicon = \"${icon}\""
         ))
     };
     // Three characters of text either way, and a square icon takes its size.
@@ -1745,7 +1745,7 @@ modules = ["cpu"]
 
 [module.cpu]
 padding = 0
-icon = "cpu"
+icon = "$cpu"
 icon_size = 10
 collapsible = true
 "##;
@@ -1786,7 +1786,7 @@ modules = ["cpu"]
 
 [module.cpu]
 padding = 6
-icon = "cpu"
+icon = "$cpu"
 icon_size = 12
 collapsible = true
 "##;
@@ -1820,7 +1820,7 @@ modules = ["cpu"]
 
 [module.cpu]
 padding = 0
-icon = "cpu"
+icon = "$cpu"
 collapsible = true
 "##;
     let frame = frame_of(config, &[item("cpu", "")]);
@@ -1894,12 +1894,12 @@ modules = ["bat"]
 [module.bat]
 source = "battery"
 format = "x"
-icon = "battery"
+icon = "$battery"
 
 [module.bat.states.charging]
 field = "status"
 equals = "charging"
-icon = "battery-charging"
+icon = "$battery-charging"
 "##;
     let charging = |status: &str| {
         let mut fields = Fields::default();
@@ -2020,7 +2020,7 @@ groups = ["g"]
 modules = ["bat"]
 
 [module.bat]
-icon = "battery"
+icon = "$battery"
 "##;
     for (percent, level) in [(0.0, 0), (50.0, 2), (100.0, 4)] {
         let frame = frame_of(config, &[with_percent(item("bat", "x"), percent)]);
@@ -2378,7 +2378,7 @@ fn collapse_config() -> String {
     let mut config = JOINED.to_string();
     for name in ["a", "b", "c"] {
         config = config.replace(&format!("[group.{name}]"), &format!(
-                "[group.{name}]\ncollapsible = true\ncollapse_button = 'right'\ncollapsed = {{ icon = 'cpu', icon_size = 8, padding = 2, background = '#83a598' }}"
+                "[group.{name}]\ncollapsible = true\ncollapse_button = 'right'\ncollapsed = {{ icon = '$cpu', icon_size = 8, padding = 2, background = '#83a598' }}"
             ));
     }
     config
@@ -2436,11 +2436,11 @@ modules = ["cpu", "mem"]
 collapsible = true
 collapse_button = "right"
 padding = 2
-collapsed = { icon = "cpu", padding = 6, background = "#83a598", foreground = "#282828" }
+collapsed = { icon = "$cpu", padding = 6, background = "#83a598", foreground = "#282828" }
 [module.cpu]
 format = "$text"
 padding = 6
-icon = "cpu"
+icon = "$cpu"
 background = "#cc241d"
 foreground = "#ebdbb2"
 [module.cpu.states.hover]
@@ -2449,7 +2449,7 @@ background = "#fb4934"
 [module.mem]
 format = "$text"
 padding = 6
-icon = "memory"
+icon = "$memory"
 background = "#458588"
 "##;
     let cfg = Config::parse(config).unwrap();
@@ -2518,7 +2518,7 @@ modules = ["cpu"]
 collapsible = true
 collapse_button = "right"
 padding = 0
-collapsed = { icon = "cpu", icon_size = 8, padding = 0 }
+collapsed = { icon = "$cpu", icon_size = 8, padding = 0 }
 [group.t]
 modules = ["title"]
 padding = 0
@@ -2591,7 +2591,7 @@ collapsible = true
 collapse_button = "right"
 padding = 2
 spacing = 2
-collapsed = { icon = "cpu", padding = 6 }
+collapsed = { icon = "$cpu", padding = 6 }
 [group.s.edges]
 left = "round"
 right = "round"
@@ -2600,11 +2600,11 @@ format = "$text"
 min_width = 66
 padding = 6
 icon_gap = 3
-icon = "cpu"
+icon = "$cpu"
 [module.mem]
 format = "$text"
 padding = 6
-icon = "memory"
+icon = "$memory"
 "##;
     let cfg = Config::parse(config).unwrap();
     let native = Registry::new(&Default::default());
@@ -2767,7 +2767,7 @@ fn a_fold_that_would_grow_out_of_its_run_is_left_out_of_it() {
     let cfg = Config::parse(
         "[bar]\ngap = 0\n[left]\ngroups = ['a']\n[group.a]\nmodules = ['a']\n\
              collapsible = true\ncollapse_button = 'right'\n\
-             collapsed = { icon = 'cpu', icon_size = 40, padding = 6 }\n",
+             collapsed = { icon = '$cpu', icon_size = 40, padding = 6 }\n",
     )
     .unwrap();
     let native = Registry::new(&Default::default());
@@ -2871,14 +2871,14 @@ groups = ['g', 'other']
 modules = ['folded', 'weather']
 collapsible = true
 collapse_button = 'right'
-collapsed = { icon = 'cpu', icon_size = 8 }
+collapsed = { icon = '$cpu', icon_size = 8 }
 [group.other]
 modules = ['other']
 collapsible = true
 collapse_button = 'middle'
-collapsed = { icon = 'memory', icon_size = 8 }
+collapsed = { icon = '$memory', icon_size = 8 }
 [module.folded]
-icon = 'cpu'
+icon = '$cpu'
 collapsible = true
 # Not the group's own button: a group answers for its whole island, so a child
 # claiming the reserved one is a config error rather than a key that does nothing.
@@ -3053,7 +3053,7 @@ fn benchmark_group_collapse_layout() {
 
 #[test]
 fn collapsed_island_respects_padding_caps_and_icon_width_limits() {
-    let config = "[bar]\ngap = 0\n[left]\ngroups = ['g']\n[group.g]\nmodules = ['*']\ncollapsible = true\ncollapse_button = 'right'\npadding = 2\nradius = 8\nopacity = 0.7\nends = { left = 'slant', right = 'slant', width = 3 }\ncollapsed = { icon = 'tux', icon_size = 10, padding = 4, min_width = 22 }";
+    let config = "[bar]\ngap = 0\n[left]\ngroups = ['g']\n[group.g]\nmodules = ['*']\ncollapsible = true\ncollapse_button = 'right'\npadding = 2\nradius = 8\nopacity = 0.7\nends = { left = 'slant', right = 'slant', width = 3 }\ncollapsed = { icon = '$tux', icon_size = 10, padding = 4, min_width = 22 }";
     let cfg = Config::parse(config).unwrap();
     let native = Registry::new(&Default::default());
     let groups = ["g".to_string()].into();
@@ -3222,7 +3222,7 @@ fn a_wording_wider_than_its_box_is_cut_at_it() {
 fn a_folded_module_does_not_travel_between_wordings() {
     let cfg = Config::parse(&SWITCHING.replace(
         "[module.a]",
-        "[module.a]\ncollapsible = true\ncollapse_button = \"right\"\nicon = \"cpu\"",
+        "[module.a]\ncollapsible = true\ncollapse_button = \"right\"\nicon = \"$cpu\"",
     ))
     .unwrap();
     let native = Registry::new(&Default::default());
@@ -3433,4 +3433,57 @@ padding = 0
         }
         assert!((separators.last().unwrap().width - 10.0).abs() < 0.001);
     }
+}
+
+/// A glyph in the icon slot is wording, and it leads the format the way geometry leads it.
+///
+/// The stub measurer makes every character one unit, so the module is the glyph, the space
+/// that separates it from the wording, and the three characters of the wording itself.
+#[test]
+fn a_written_icon_is_shaped_in_front_of_the_wording() {
+    assert_eq!(width_of("padding = 0"), 3.0);
+    assert_eq!(width_of("padding = 0\nicon = \"\u{f0e7}\""), 5.0);
+    // Nothing is charged for `icon_size` or the gap: a glyph is not geometry, so neither
+    // of the two knobs that place geometry has anything to say about it.
+    assert_eq!(
+        width_of("padding = 0\nicon = \"\u{f0e7}\"\nicon_size = 40\nicon_gap = 9"),
+        5.0
+    );
+}
+
+/// Folding a module with a written icon leaves the glyph, which is the whole reason a
+/// glyph is allowed in the slot: a module whose icon is text could not be folded before.
+#[test]
+fn a_module_folds_down_to_a_written_icon() {
+    let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+padding = 0
+spacing = 0
+
+[module.cpu]
+padding = 0
+collapsible = true
+icon = "µ"
+"##;
+    let items = [item("cpu", "abc")];
+    let open = frame_of(config, &items);
+    assert_eq!(open.groups[0].modules[0].width, 5.0);
+    assert_eq!(open.groups[0].modules[0].text, "\u{b5}\u{20}abc");
+
+    let folded: std::collections::HashSet<String> = ["cpu".to_string()].into();
+    let shut = frame_folded(
+        config,
+        &items,
+        Registry::new(&Default::default()),
+        &Default::default(),
+        &folded,
+    );
+    // The glyph alone, with no icon in the geometry slot and no space left behind it.
+    assert_eq!(shut.groups[0].modules[0].width, 1.0);
+    assert_eq!(shut.groups[0].modules[0].text, "\u{b5}");
+    assert!(shut.groups[0].modules[0].icon.is_none());
 }
