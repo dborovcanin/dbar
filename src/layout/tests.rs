@@ -3765,3 +3765,98 @@ max_width = 0.5
     assert!(module.width > 0.0, "nothing left to click");
     assert_eq!(module.text, "\u{b5}");
 }
+
+/// A fold shows the icon the module is actually wearing, which is the matching state's.
+///
+/// A module that swaps its icon per state - a player showing pause while it plays and play
+/// while it is paused - folds to the icon for what it is doing now. Naming one in the
+/// `collapsed` table overrides that; leaving the table out, or writing one that says
+/// nothing about the icon, lets the state through.
+#[test]
+fn a_fold_takes_the_icon_of_the_state_the_module_is_in() {
+    let module = |collapsed: &str| {
+        format!(
+            r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["m"]
+padding = 0
+spacing = 0
+
+[module.m]
+padding = 0
+collapsible = true
+icon = "$play"
+icon_size = 10
+icon_gap = 0
+
+[module.m.states.busy]
+state = "warning"
+icon = "$pause"
+{collapsed}
+"##
+        )
+    };
+    let folded: std::collections::HashSet<String> = ["m".to_string()].into();
+    let warned = |text: &str| {
+        let mut it = item("m", text);
+        it.state = State::Warning;
+        it
+    };
+
+    // No collapsed table: the state's icon is what is left on the bar.
+    for (case, state_item, want) in [
+        ("idle", item("m", "abc"), "play"),
+        ("warning", warned("abc"), "pause"),
+    ] {
+        let frame = frame_folded(
+            &module(""),
+            &[state_item],
+            Registry::new(&Default::default()),
+            &Default::default(),
+            &folded,
+        );
+        assert_eq!(
+            frame.groups[0].modules[0].icon.as_ref().unwrap().icon,
+            crate::icon::Icon::parse(want).unwrap(),
+            "{case}: the fold did not take the state's icon"
+        );
+    }
+
+    // A collapsed table that says nothing about the icon still lets the state through.
+    let coloured = "\n[module.m.collapsed]\nforeground = \"#ff0000\"\n";
+    let frame = frame_folded(
+        &module(coloured),
+        &[warned("abc")],
+        Registry::new(&Default::default()),
+        &Default::default(),
+        &folded,
+    );
+    assert_eq!(
+        frame.groups[0].modules[0].icon.as_ref().unwrap().icon,
+        crate::icon::Icon::parse("pause").unwrap(),
+        "a collapsed table with no icon should not take the state's away"
+    );
+    assert_eq!(
+        frame.groups[0].modules[0].foreground,
+        Color::parse("#ff0000").unwrap(),
+        "the collapsed table's own keys still apply"
+    );
+
+    // One it does name wins over every state.
+    let named = "\n[module.m.collapsed]\nicon = \"$media\"\n";
+    let frame = frame_folded(
+        &module(named),
+        &[warned("abc")],
+        Registry::new(&Default::default()),
+        &Default::default(),
+        &folded,
+    );
+    assert_eq!(
+        frame.groups[0].modules[0].icon.as_ref().unwrap().icon,
+        crate::icon::Icon::parse("media").unwrap(),
+        "a named collapsed icon should win"
+    );
+}

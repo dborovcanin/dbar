@@ -927,9 +927,20 @@ is spelled correctly and does nothing. None may be longer than ten seconds.
 `[module.*.collapsed]` is what a folded module wears, when that should differ
 from what it wears open. It starts from the module's own style, so it says only
 what changes — usually the icon, so the thing left on the bar says what a click
-will bring back rather than what the open module's icon promised. Left out, a
-folded module keeps whatever it would have worn, state rules included. Written,
-it stands in place of those rules, hover among them.
+will bring back rather than what the open module's icon promised.
+
+The icon is the part that falls through. Name one there and it is what every
+fold shows; say nothing about it and the fold shows the icon the module is
+actually wearing, which is the matching state's. A player that swaps to a pause
+icon while it plays folds to that, and back to play when it is paused, without
+the collapsed table repeating a line per state. Everything else the table
+mentions stands in place of the state rules, hover among them.
+
+Because the icon falls through, a collapsible module needs one in every
+appearance it can wear: its own, and each state's. A state that sets
+`icon = "none"` is a startup error unless the collapsed table names an icon to
+fold to, since that state would otherwise fold away to nothing and take its own
+way back with it.
 
 While something is travelling the bar redraws at about the rate the screen
 refreshes, eased so it leaves and arrives slowly. Everything else about the click

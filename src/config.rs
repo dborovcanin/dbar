@@ -892,6 +892,13 @@ pub struct ModuleCollapse {
     /// table asks for something definite instead, and then it is that rather than the state
     /// rules - the same trade `[group.*.collapsed]` already makes.
     pub style: Option<Style>,
+    /// The icon a fold leaves behind, for a `collapsed` table that named one.
+    ///
+    /// `None` means the table said nothing about it, and then the fold shows whatever the
+    /// module is wearing - which is the matching state's icon when a rule is firing. A
+    /// player that swaps its icon on `paused` folds to the icon for what it is doing,
+    /// without the collapsed table having to repeat every state that module has.
+    pub icon: Option<IconSpec>,
     /// How long the module takes to reach its other width, if it travels at all.
     ///
     /// Absent is a fold in one redraw, which is the default and costs nothing at idle.
@@ -2239,8 +2246,10 @@ fn resolve_group(
         // A state applies the named style's own keys over the module's, rather than
         // replacing it wholesale, so per-module settings such as the icon survive.
         let mut states = Vec::new();
+        let mut state_names: Vec<String> = Vec::new();
         if let Some(raw_module) = raw.modules.get(module_name) {
             for (state_name, raw_state) in &raw_module.states {
+                state_names.push(state_name.clone());
                 let mut state_style = style.clone();
                 if let Some(style_name) = &raw_state.style {
                     let named = raw.styles.get(style_name).ok_or_else(|| {
@@ -2422,17 +2431,59 @@ fn resolve_group(
             .map(parse_duration)
             .transpose()
             .with_context(|| format!("in [module.{module_name}]: collapse_animation"))?;
+        // Whether the `collapsed` table named an icon of its own, which is not the same
+        // question as what its resolved style ended up holding: the table starts from the
+        // module's style, so it inherits an icon it never mentioned.
+        let written_icon = raw_module
+            .and_then(|m| m.collapsed.as_ref())
+            .and_then(|c| c.overrides.icon.as_deref())
+            .map(IconSpec::parse)
+            .transpose()
+            .with_context(|| format!("in [module.{module_name}.collapsed]"))?;
         let collapse = if collapsible {
-            // Folding a module with no icon leaves an empty box on the bar, and no way
-            // back: there would be nothing left to see or click.
             let worn = collapsed_style.as_ref().unwrap_or(&style);
-            let Some(icon) = &worn.icon else {
-                bail!(
-                    "module {module_name:?} is collapsible but has no icon; folded down it \
-                     would leave nothing to see or click"
-                );
+            let collapsed_icon = match written_icon {
+                // Folding to nothing is the one thing a fold may not do: the icon it
+                // leaves is the only way back, so asking for none is asking for a module
+                // that disappears on a click and stays gone.
+                Some(None) => bail!(
+                    "[module.{module_name}.collapsed]: icon is \"none\", so folding would \
+                     leave nothing to see or click"
+                ),
+                Some(Some(icon)) => {
+                    check_collapsed_icon(&icon, worn, &format!("module {module_name:?}"))?;
+                    Some(icon)
+                }
+                // Nothing named, so the fold wears the module's own icon - which means
+                // every appearance it can wear has to have one. The module's is reachable
+                // whenever no rule is firing, and each state's whenever its own is.
+                None => {
+                    let Some(icon) = &style.icon else {
+                        bail!(
+                            "module {module_name:?} is collapsible but has no icon, and no \
+                             [module.{module_name}.collapsed] icon to fold to; folded down \
+                             it would leave nothing to see or click"
+                        );
+                    };
+                    check_collapsed_icon(icon, &style, &format!("module {module_name:?}"))?;
+                    for (name, rule) in state_names.iter().zip(&states) {
+                        let Some(icon) = &rule.style.icon else {
+                            bail!(
+                                "[module.{module_name}.states.{name}]: no icon, and module \
+                                 {module_name:?} folds to whichever icon it is wearing; \
+                                 give the state one, or give \
+                                 [module.{module_name}.collapsed] an icon to fold to"
+                            );
+                        };
+                        check_collapsed_icon(
+                            icon,
+                            &rule.style,
+                            &format!("[module.{module_name}.states.{name}]"),
+                        )?;
+                    }
+                    None
+                }
             };
-            check_collapsed_icon(icon, worn, &format!("module {module_name:?}"))?;
             if let Some(animation) = collapse_animation
                 && animation > LONGEST_ANIMATION
             {
@@ -2445,6 +2496,7 @@ fn resolve_group(
             Some(ModuleCollapse {
                 button: collapse_button,
                 style: collapsed_style,
+                icon: collapsed_icon,
                 animation: collapse_animation,
             })
         } else {

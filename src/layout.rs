@@ -1413,9 +1413,22 @@ fn size_group(
             // What a folded module wears, for one that asked to wear something definite.
             // Resolved before the rules so the table wins outright, the way a group's does.
             let collapsed = module.collapse.as_ref().and_then(|c| c.style.as_ref());
+            let resolved = resolve(false, &raw);
+            // What a fold leaves behind: the icon its `collapsed` table named, and
+            // otherwise whatever the module is wearing. The second is the interesting one -
+            // it is the matching state's icon, so a player that swaps to a pause icon folds
+            // to that rather than to whatever it wore when nothing was playing, and the
+            // collapsed table does not have to repeat every state the module has.
+            let icon = match (
+                folded,
+                module.collapse.as_ref().and_then(|c| c.icon.as_ref()),
+            ) {
+                (true, Some(named)) => Some(named.clone()),
+                _ => resolved.icon.clone(),
+            };
             let (style, wearing_collapsed) = match (folded, collapsed) {
                 (true, Some(worn)) => (worn.clone(), true),
-                _ => (resolve(false, &raw), false),
+                _ => (resolved, false),
             };
             // A wording that renders empty hides the module, which is what the i3bar
             // protocol means by an empty `full_text`. A module with a picture to show is
@@ -1454,10 +1467,10 @@ fn size_group(
             // and oscillate, so the metrics always come from the unhovered style.
             //
             // Hover is a state rule, and a written `collapsed` table stands in place of
-            // the rules - so a module wearing one has no hover style, rather than one
-            // resolved from a cascade it is not wearing. Comparing the two differs on
-            // nearly every key, which handed the open colours to anything under the
-            // pointer and took the collapsed ones away.
+            // the rules for everything but the icon - so a module wearing one has no hover
+            // style, rather than one resolved from a cascade it is not wearing. Comparing
+            // the two differs on nearly every key, which handed the open colours to
+            // anything under the pointer and took the collapsed ones away.
             let hover_style = match wearing_collapsed {
                 true => None,
                 false => {
@@ -1466,7 +1479,7 @@ fn size_group(
                         padding: style.padding,
                         min_width: style.min_width,
                         icon_size: style.icon_size,
-                        icon: style.icon.clone(),
+                        icon: icon.clone(),
                         ..hovered
                     })
                 }
@@ -1498,7 +1511,7 @@ fn size_group(
             // and is graded on the value, a glyph is wording and leads the text the way it
             // would if it had been typed at the front of the format. Both are the icon as
             // far as folding is concerned, which is the point of writing them the same way.
-            let styled = || match style.icon.as_ref() {
+            let styled = || match icon.as_ref() {
                 Some(IconSpec::Native(icon)) => {
                     let level = match icon.is_graded() {
                         true => value.map(icon::level_of).unwrap_or(0),

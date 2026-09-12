@@ -805,10 +805,16 @@ icon = "$brightness"
 #
 # `[module.*.collapsed]` is what the module wears folded, when that should differ
 # from what it wears open. It starts from the module's own style, so it says only
-# what changes - usually the icon, so the thing left on the bar can show what a
-# click will bring back. Leave the table out and a folded module keeps whatever it
-# would have worn, state rules included: a paused player stays paused-coloured
-# while it is a single icon.
+# what changes. Leave the table out and a folded module keeps whatever it would
+# have worn, state rules included: a paused player stays paused-coloured while it
+# is a single icon.
+#
+# The icon falls through even when the table is there. Name one and every fold
+# shows it; say nothing about it and the fold shows the icon the module is wearing,
+# which is the matching state's - so the player below folds to whichever of play
+# and pause it is currently showing, without a line here per state. That also means
+# a collapsible module needs an icon in every appearance it can wear: its own and
+# each state's, unless this table names one for all of them.
 #
 # `alt_button` and `collapse_button` say which button does each of those, and
 # `on_click` gives a button a program of your own - see the clock at the end of
@@ -836,10 +842,11 @@ equals = "paused"
 foreground = "$subtext"
 icon = "$play"
 
-# Folded, the module is one icon, and this is the one. Written out because the
-# open module's icon is a button that says what a click will do, and a click on
-# the folded module unfolds it instead - so the icon has to say that and not
-# "pause". Everything else is inherited from the module itself.
+# Folded, the module is one icon, and this names it. Written out because the open
+# module's icon is a button saying what a click will do, and a click on the folded
+# module unfolds it instead - so the icon has to say "a player lives here" rather
+# than "pause". Drop the `icon` line and the fold would show play or pause instead,
+# following the state, which is the other reasonable answer.
 [module.media.collapsed]
 icon = "$media"
 foreground = "$subtext"

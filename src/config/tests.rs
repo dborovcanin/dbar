@@ -1861,3 +1861,50 @@ fn none_means_no_icon_wherever_an_icon_is_written() {
     );
     assert!(matches!(view.icon("3"), Some(Some(IconSpec::Text(_)))));
 }
+
+/// A fold must have an icon to leave behind in every appearance it can wear.
+///
+/// It falls through to whatever the module is wearing, so the module's own icon and every
+/// state's have to be there - the module's because it is what shows when no rule fires.
+/// Naming one in the `collapsed` table answers for all of them at once.
+#[test]
+fn a_fold_needs_an_icon_in_every_appearance_it_can_wear() {
+    let module =
+        |body: &str| format!("source = \"cpu\"\ncollapsible = true\nicon_size = 10\n{body}");
+    for (case, body, message) in [
+        ("nothing anywhere", "", "collapsible but has no icon"),
+        (
+            "a state that drops it",
+            "icon = \"$cpu\"\n[module.m.states.hot]\nabove = 90\nicon = \"none\"",
+            "states.hot",
+        ),
+        (
+            "folding to none on purpose",
+            "icon = \"$cpu\"\ncollapsed = { icon = \"none\" }",
+            "nothing to see or click",
+        ),
+    ] {
+        let error = format!(
+            "{:#}",
+            Config::parse(&one_module(&module(body))).expect_err(case)
+        );
+        assert!(error.contains(message), "{case}: {error}");
+    }
+
+    // A collapsed icon answers for every state, so a state without one is fine then.
+    Config::parse(&one_module(&module(
+        "icon = \"$cpu\"\ncollapsed = { icon = \"$media\" }\n[module.m.states.hot]\nabove = 90\nicon = \"none\"",
+    )))
+    .expect("a named collapsed icon covers every state");
+
+    // And the ordinary case: the module's icon, inherited by a state that only recolours.
+    let cfg = Config::parse(&one_module(&module(
+        "icon = \"$cpu\"\n[module.m.states.hot]\nabove = 90\nforeground = \"#ff0000\"",
+    )))
+    .expect("a state that keeps the icon");
+    let collapse = cfg.modules().next().unwrap().collapse.as_ref().unwrap();
+    assert!(
+        collapse.icon.is_none(),
+        "nothing was named, so the fold follows what is worn"
+    );
+}
