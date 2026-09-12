@@ -36,7 +36,8 @@ impl DrawText for Blocks {
         let height = (BLOCK * s) as usize;
         self.run = Some(TextRun {
             left: 0,
-            top: 0,
+            // A block stands on the bottom of its line, as a glyph with no descender does.
+            baseline: height as i32,
             width,
             height,
             pixels: RunPixels::Coverage(vec![0xff; width * height]),
@@ -937,69 +938,86 @@ fn text_on_a_faded_island_lands_where_it_would_on_the_bar() {
     }
 }
 
-/// A font's line box is not centred on its own ink: the ascent leaves more room above
-/// the letters than the descent leaves below, so centring the box puts every wording a
-/// little high. What a module centres is where the ink is.
+/// Different glyphs and fallback faces produce different ink bounds. What they have in
+/// common is the line their letters stand on, and that is what has to line up: centring
+/// each wording's own ink would move that common baseline as the wording changed.
 #[test]
-fn a_wording_is_centred_on_its_ink_rather_than_on_its_line_box() {
-    /// A backend whose ink sits high in its line, the way a real font's does.
+fn wordings_with_different_ink_bounds_share_a_baseline() {
+    /// Two runs with different visible heights around the same baseline, like strings whose
+    /// glyphs came from faces with different metrics.
     struct Lopsided {
+        scale: f32,
         run: Option<TextRun>,
     }
 
     const LINE: f32 = 12.0;
-    const INK_TOP: f32 = 2.0;
-    const INK: f32 = 6.0;
+    const INK: usize = 6;
+    const OFFSET: f32 = 2.75;
+    /// How tall each wording's ink is, and how far down it the baseline sits.
+    const SHORT: (f32, f32) = (5.0, 5.0);
+    const TALL: (f32, f32) = (9.0, 6.0);
 
     impl DrawText for Lopsided {
         fn line_height(&self) -> f32 {
             LINE
         }
 
-        fn middle(&mut self) -> f32 {
-            INK_TOP + INK / 2.0
+        fn baseline_offset(&mut self) -> f32 {
+            OFFSET
         }
 
         fn run(&mut self, text: &str) -> Option<&TextRun> {
-            let width = text.chars().count() * INK as usize;
+            let (ink, baseline) = if text == "short" { SHORT } else { TALL };
+            let height = (ink * self.scale) as usize;
+            let width = (text.chars().count() as f32 * INK as f32 * self.scale) as usize;
             self.run = Some(TextRun {
                 left: 0,
-                top: INK_TOP as i32,
+                baseline: (baseline * self.scale) as i32,
                 width,
-                height: INK as usize,
-                pixels: RunPixels::Coverage(vec![0xff; width * INK as usize]),
+                height,
+                pixels: RunPixels::Coverage(vec![0xff; width * height]),
             });
             self.run.as_ref()
         }
     }
 
-    let frame = Frame {
-        groups: vec![PlacedGroup {
-            modules: vec![module(0.0, 40.0, TILE, "ab", false)],
-            ..island(1.0).groups.remove(0)
-        }],
-        ..Frame::default()
-    };
-    let mut pixmap = Pixmap::new(40, 20).unwrap();
-    render(
-        &mut pixmap.as_mut(),
-        &frame,
-        1.0,
-        &mut Painter::new(Lopsided { run: None }),
-        &mut Clip::default(),
-    );
+    for (text, (ink, baseline)) in [("short", SHORT), ("tall", TALL)] {
+        for scale in [1.0, 1.5, 2.0] {
+            let frame = Frame {
+                groups: vec![PlacedGroup {
+                    modules: vec![module(0.0, 40.0, TILE, text, false)],
+                    ..island(1.0).groups.remove(0)
+                }],
+                ..Frame::default()
+            };
+            let mut pixmap = Pixmap::new((40.0 * scale) as u32, (20.0 * scale) as u32).unwrap();
+            render(
+                &mut pixmap.as_mut(),
+                &frame,
+                scale,
+                &mut Painter::new(Lopsided { scale, run: None }),
+                &mut Clip::default(),
+            );
 
-    let inked =
-        |y: usize| (0..40).any(|x| pixmap.pixels()[y * 40 + x].red() > TILE.r.max(TILE_ALT.r));
-    let rows: Vec<usize> = (0..20).filter(|&y| inked(y)).collect();
-    let module = &frame.groups[0].modules[0];
-    let (top, bottom) = (rows[0] as f32, rows[rows.len() - 1] as f32 + 1.0);
-    assert_eq!(
-        (top - module.y, module.y + module.height - bottom),
-        (7.0, 7.0),
-        "ink in rows {top}..{bottom} of a module {} tall - it is not centred",
-        module.height
-    );
+            let width = pixmap.width() as usize;
+            let inked = |y: usize| {
+                (0..width).any(|x| pixmap.pixels()[y * width + x].red() > TILE.r.max(TILE_ALT.r))
+            };
+            let rows: Vec<usize> = (0..pixmap.height() as usize)
+                .filter(|&y| inked(y))
+                .collect();
+            let top = rows[0] as f32;
+            let bottom = rows[rows.len() - 1] as f32 + 1.0;
+            // The module is 20 tall, so its middle is 10 and the baseline is OFFSET below.
+            let want = (10.0 + OFFSET) * scale;
+            assert!(
+                (top + (baseline * scale).floor() - want).abs() <= 0.5
+                    && (bottom - top - (ink * scale).floor()).abs() <= 0.5,
+                "{text} at scale {scale} painted at {top}..{bottom}, so its baseline is not \
+                 on {want}"
+            );
+        }
+    }
 }
 
 /// And in the same colours: fading is one multiply over the finished island, so every

@@ -26,12 +26,12 @@ pub trait DrawText {
     /// Height of one line, in logical pixels.
     fn line_height(&self) -> f32;
 
-    /// Where ink sits inside the line box, in logical pixels from its top.
+    /// How far below the middle of a module the baseline goes, in logical pixels.
     ///
-    /// What a module centres on. The default is the middle of the box, which is what a
-    /// backend whose glyphs fill their line has; a backend drawing a real font says where
-    /// its letters are instead.
-    fn middle(&mut self) -> f32 {
+    /// What every wording is placed by. The default suits a backend whose glyphs stand on
+    /// the bottom of their line box and fill it; a backend drawing a real font says where
+    /// its own letters are instead - see `TextRenderer::baseline_offset`.
+    fn baseline_offset(&mut self) -> f32 {
         self.line_height() / 2.0
     }
 
@@ -48,8 +48,8 @@ impl DrawText for TextRenderer {
         TextRenderer::line_height(self)
     }
 
-    fn middle(&mut self) -> f32 {
-        TextRenderer::middle(self)
+    fn baseline_offset(&mut self) -> f32 {
+        TextRenderer::baseline_offset(self)
     }
 
     fn run(&mut self, text: &str) -> Option<&TextRun> {
@@ -405,8 +405,6 @@ struct Tools<'a> {
     mask: &'a mut Option<Mask>,
     icons: &'a mut IconCache,
     text: &'a mut dyn DrawText,
-    /// Where ink sits inside the line box, asked once a frame rather than once a module.
-    middle: f32,
 }
 
 /// Draw an icon through the cache, rasterising it the first time it is seen at this size
@@ -526,10 +524,13 @@ struct Blit<'a> {
     y: i32,
 }
 
-/// Put a string on the pixmap with its left edge at `x` and its top at `y`.
+/// Put a string on the pixmap with its text origin at `x` and its baseline set by `y`.
 ///
-/// The backend does the placing and the colouring: the text side hands back pixels and
-/// where they sit relative to the origin, and knows nothing about what they land on.
+/// The backend does the shaping and colouring: the text side hands back the trimmed ink,
+/// where it sits relative to the origin and where the letters stand within it, and knows
+/// nothing about what it lands on. `y` is the middle of the module; what is put there is
+/// the baseline the backend asks for, not the ink box, so a wording does not move because
+/// it gained a descender or because a fallback face brought taller metrics to the line.
 ///
 /// Glyphs are the one thing tiny-skia's clip cannot catch, because the backend rasterises
 /// and places them itself rather than filling a path. An island that cuts its contents off
@@ -546,12 +547,13 @@ fn draw_text(
     if color.is_transparent() {
         return;
     }
-    let (ox, oy) = ((at.0 * scale).round() as i32, (at.1 * scale).round() as i32);
+    let ox = (at.0 * scale).round() as i32;
+    let oy = ((at.1 + text.baseline_offset()) * scale).round() as i32;
     let Some(run) = text.run(what) else {
         return;
     };
-    let (rx, ry) = (ox + run.left, oy + run.top);
     let (rw, rh) = (run.width, run.height);
+    let (rx, ry) = (ox + run.left, oy - run.baseline);
     let blit = |pixels| Blit {
         pixels,
         width: rw,
@@ -1075,7 +1077,7 @@ fn render_menu(
             pixmap,
             text,
             &row.text,
-            (row.text_x, row.text_y),
+            (row.text_x, row.text_middle),
             scale,
             row.foreground,
             Cut::default(),
@@ -1211,7 +1213,6 @@ fn render(
         icons,
     } = painter;
     let mask = &mut clip.0;
-    let middle = text.middle();
     let (pw, ph) = (pixmap.width(), pixmap.height());
 
     for group in &frame.groups {
@@ -1233,12 +1234,7 @@ fn render(
                 group,
                 scale,
                 transform,
-                &mut Tools {
-                    mask,
-                    icons,
-                    text,
-                    middle,
-                },
+                &mut Tools { mask, icons, text },
             );
             continue;
         };
@@ -1250,12 +1246,7 @@ fn render(
                 group,
                 scale,
                 transform,
-                &mut Tools {
-                    mask,
-                    icons,
-                    text,
-                    middle,
-                },
+                &mut Tools { mask, icons, text },
             );
             continue;
         };
@@ -1273,7 +1264,6 @@ fn render(
                 mask: layer_mask,
                 icons,
                 text,
-                middle,
             },
         );
         composite(pixmap, layer.as_ref(), (bx, by, bw, bh), group.opacity);
@@ -1520,9 +1510,9 @@ fn draw_group(
             .text_right
             .map(|right| ((right + offset.0) * scale).ceil() as i32);
         let wording = wording_stop.map_or(wording, |stop| wording.stopped(stop));
-        // Layout already placed the text; only the vertical centring is ours, and it
-        // centres the ink rather than the line box it sits in.
-        let ty = module.y + module.height / 2.0 - tools.middle;
+        // Layout already placed the text; only the vertical placing is ours, and every
+        // wording is put on the one baseline rather than centred on its own ink.
+        let ty = module.y + module.height / 2.0;
         let (tx, ty) = (module.text_x + offset.0, ty + offset.1);
         draw_text(
             pixmap,

@@ -41,8 +41,8 @@ struct Shaped {
     /// over and over - most of them every redraw, unchanged. Measuring and drawing share
     /// this, so a value that layout has already sized costs nothing to put on screen.
     shapes: Generations<Buffer>,
-    /// Where the ink's middle sits inside the line box, once it has been measured.
-    middle: Option<f32>,
+    /// How far the baseline sits below the middle of a module, once it has been measured.
+    offset: Option<f32>,
 }
 
 impl Shaped {
@@ -52,7 +52,7 @@ impl Shaped {
             widths: Generations::new(WIDTHS_KEPT),
             runs: Generations::new(SHAPES_KEPT),
             shapes: Generations::new(SHAPES_KEPT),
-            middle: None,
+            offset: None,
         }
     }
 }
@@ -81,7 +81,7 @@ fn select(shaped: &mut Vec<Shaped>, scale: f32) -> usize {
 /// that came and went does not keep its glyphs forever.
 const SCALES_KEPT: usize = 4;
 
-/// The string `middle` measures the ink of.
+/// The string `baseline_offset` measures the ink of.
 ///
 /// A digit is the right shape to ask: it is cap height in every font a bar is likely to be
 /// set in, it sits on the baseline without a descender, and every font has one.
@@ -93,11 +93,19 @@ const REFERENCE: &str = "0";
 /// the other half, and a bar draws the same strings frame after frame. The coverage does
 /// not depend on the colour, so one of these serves a module whatever state it is in, and
 /// it does not depend on where the string lands either, because glyphs are positioned
-/// within the run and the run is placed as a whole.
+/// within the run and the trimmed run is placed as a whole.
 pub struct TextRun {
-    /// Where the run's top-left corner sits relative to the text origin, in device pixels.
+    /// Where the run's left edge sits relative to the text origin, in device pixels.
     pub left: i32,
-    pub top: i32,
+    /// How far below the run's own top edge the letters stand on, in device pixels.
+    ///
+    /// What a wording has to line up by. Trimmed ink says nothing about where the letters
+    /// stand - an x-height word and one with capitals or descenders have different bounds,
+    /// so centring both boxes puts their baselines at different heights - and the line box
+    /// says the wrong thing as soon as a fallback face with taller metrics joins the line
+    /// and moves everything in it. The baseline is the one line every glyph in the run
+    /// agrees on, whichever face drew it.
+    pub baseline: i32,
     pub width: usize,
     pub height: usize,
     pub pixels: RunPixels,
@@ -388,28 +396,28 @@ impl TextRenderer {
         (self.size * 1.3).ceil()
     }
 
-    /// Where drawn ink sits inside the line box, in logical pixels from its top.
+    /// How far below the middle of a module the baseline goes, in logical pixels.
     ///
-    /// Centring the line box in a module puts the wording a little high: the box is the
-    /// font's ascent and descent, and neither a digit nor a capital reaches either of
-    /// them, so the slack above the letters is larger than the slack below. Rasterising
-    /// one digit says where the ink actually is, and a module that centres that instead
-    /// centres what is on the screen. A digit rather than the module's own string,
-    /// because the answer has to be the same for every module and not move when a
-    /// wording gains a descender.
+    /// Every wording is drawn from its baseline, so this is the one number that decides
+    /// where text sits, and it is the same for all of them - a line does not move because
+    /// a word gained a descender. Where to put it is a question about the letters rather
+    /// than the line box: the box is the font's ascent and descent and neither a digit nor
+    /// a capital reaches either, so centring it puts the wording a little high. Rasterising
+    /// one digit says where the ink of an ordinary letter actually is, and the baseline
+    /// that centres that digit is the baseline that centres the wording.
     ///
     /// Measured once per scale and kept, so this costs one glyph for the life of the bar.
-    pub fn middle(&mut self) -> f32 {
-        if let Some(middle) = self.shaped[self.active].middle {
-            return middle;
+    pub fn baseline_offset(&mut self) -> f32 {
+        if let Some(offset) = self.shaped[self.active].offset {
+            return offset;
         }
         let scale = self.scale();
-        let middle = match self.run(REFERENCE) {
-            Some(run) => (run.top as f32 + run.height as f32 / 2.0) / scale,
-            None => self.line_height() / 2.0,
+        let offset = match self.run(REFERENCE) {
+            Some(run) => (run.baseline as f32 - run.height as f32 / 2.0) / scale,
+            None => 0.0,
         };
-        self.shaped[self.active].middle = Some(middle);
-        middle
+        self.shaped[self.active].offset = Some(offset);
+        offset
     }
 
     fn metrics(&self) -> Metrics {
@@ -502,6 +510,15 @@ fn painted(
 
 type Rgb = (u8, u8, u8);
 
+/// The baseline inside a trimmed run, using the same Y hinting as cosmic-text.
+///
+/// `LayoutGlyph::physical` truncates the line position before Swash rasterises it. Rounding
+/// here instead can move a run by one device pixel when a fallback face changes the line's
+/// ascent or descent enough to put its baseline on the other side of a half pixel.
+fn baseline_in_run(line_y: f32, min_y: i32) -> i32 {
+    line_y.trunc() as i32 - min_y
+}
+
 /// The colours the run is drawn against to find out which glyphs have one of their own.
 const FIRST_PROBE: Rgb = (0xff, 0xff, 0xff);
 const SECOND_PROBE: Rgb = (0x00, 0x00, 0x00);
@@ -534,6 +551,13 @@ fn rasterise(
         max_x = max_x.max(x + w as i32);
         max_y = max_y.max(y + h as i32);
     }
+
+    // Taken from the layout rather than the pixels: where the letters stand is a fact
+    // about the shaping, and no glyph need have ink on the line itself.
+    let line_y = buffer
+        .layout_runs()
+        .next()
+        .map_or(min_y as f32, |run| run.line_y);
 
     let owns_colour = own_colours(buffer, fonts, swash, &patches);
     let coloured = owns_colour.iter().any(|&own| own);
@@ -573,7 +597,7 @@ fn rasterise(
     }
     Some(TextRun {
         left: min_x,
-        top: min_y,
+        baseline: baseline_in_run(line_y, min_y),
         width,
         height,
         pixels: match coloured {
@@ -647,6 +671,16 @@ impl Measure for TextRenderer {
 
 #[cfg(test)]
 mod tests {
+
+    /// cosmic-text hints glyphs by truncating their physical Y origin. The baseline kept
+    /// beside the resulting pixels must cross integer rows at exactly the same points,
+    /// especially when two fallback combinations produce different fractional line boxes.
+    #[test]
+    fn a_run_baseline_uses_the_rasterisers_y_hinting() {
+        assert_eq!(baseline_in_run(10.25, 3), 7);
+        assert_eq!(baseline_in_run(10.75, 3), 7);
+        assert_eq!(baseline_in_run(11.0, 3), 8);
+    }
 
     /// A glyph that followed the colour it was given is text to tint; one that came back
     /// the same both times brought its own, which is what an emoji does. Deciding this per

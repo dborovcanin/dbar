@@ -130,7 +130,7 @@ pub struct PlacedRow {
     pub highlight_color: Color,
     pub text: String,
     pub text_x: f32,
-    pub text_y: f32,
+    pub text_middle: f32,
     pub foreground: Color,
     pub icon: Option<PlacedIcon>,
     /// Where a tick goes, for a row that carries one and is on.
@@ -166,14 +166,11 @@ impl MenuFrame {
 /// surface and has no column to fit into - so it is measured from what it has to say and
 /// capped where a label would otherwise run off the screen.
 ///
-/// `line` sizes a row and `middle` says where the ink sits inside it, which is what a
-/// label is centred on - see `TextRenderer::middle`.
 pub fn menu(
     rows: &[crate::tray::menu::Row],
     style: &crate::config::Menu,
     icon_size: f32,
     line: f32,
-    middle: f32,
     hover: Option<usize>,
     text: &mut dyn Measure,
 ) -> MenuFrame {
@@ -228,7 +225,7 @@ pub fn menu(
             highlight_color: style.highlight,
             text: labels[index].clone(),
             text_x,
-            text_y: y + height / 2.0 - middle,
+            text_middle: y + height / 2.0,
             foreground,
             icon: row.icon.as_ref().map(|art| PlacedIcon {
                 icon: Icon::Raster,
