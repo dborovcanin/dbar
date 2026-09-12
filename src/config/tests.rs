@@ -1834,3 +1834,30 @@ fn the_media_icon_answers_to_both_its_names() {
         Some(IconSpec::Text(_))
     ));
 }
+
+/// `none` means no icon in every slot that takes one.
+///
+/// It used to mean absence in a style and the literal word in a workspace mapping, which
+/// is the one difference the shared notion exists to remove.
+#[test]
+fn none_means_no_icon_wherever_an_icon_is_written() {
+    let styled = Config::parse(&one_module("source = \"cpu\"\nicon = \"none\"")).unwrap();
+    assert_eq!(styled.modules().next().unwrap().style.icon, None);
+
+    let workspaces = Config::parse(
+        "[left]\ngroups = ['g']\n[group.g]\nmodules = ['w']\n\
+         [module.w]\nsource = 'sway:workspaces'\n\
+         icons = { '1' = 'none', '2' = '$arch', '3' = 'x' }",
+    )
+    .unwrap();
+    let crate::config::Source::SwayWorkspaces(view) = &workspaces.modules().next().unwrap().source
+    else {
+        panic!("a workspaces module");
+    };
+    assert_eq!(view.icon("1"), Some(&None), "none is not a glyph");
+    assert_eq!(
+        view.icon("2"),
+        Some(&Icon::parse("arch").map(IconSpec::Native))
+    );
+    assert!(matches!(view.icon("3"), Some(Some(IconSpec::Text(_)))));
+}

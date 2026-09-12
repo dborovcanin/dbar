@@ -1197,8 +1197,8 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     // slot to its style, the way it did before there were any.
                     let decoration =
                         (!view.icons.is_empty()).then(|| match view.icon(&workspace.name) {
-                            Some(IconSpec::Native(icon)) => Decoration::Native(*icon),
-                            Some(IconSpec::Text(icon)) if !icon.is_empty() => {
+                            Some(Some(IconSpec::Native(icon))) => Decoration::Native(*icon),
+                            Some(Some(IconSpec::Text(icon))) if !icon.is_empty() => {
                                 Decoration::Text(icon)
                             }
                             _ => Decoration::Nothing,

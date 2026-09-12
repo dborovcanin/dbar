@@ -85,11 +85,12 @@ pub struct TrayView {
 pub struct WorkspaceView {
     pub scope: Scope,
     /// Workspace name to decoration. `default` is used when no exact name is present.
-    pub icons: BTreeMap<String, IconSpec>,
+    /// A workspace mapped to nothing wears nothing, which is what `none` writes.
+    pub icons: BTreeMap<String, Option<IconSpec>>,
 }
 
 impl WorkspaceView {
-    pub fn icon(&self, name: &str) -> Option<&IconSpec> {
+    pub fn icon(&self, name: &str) -> Option<&Option<IconSpec>> {
         self.icons.get(name).or_else(|| self.icons.get("default"))
     }
 }
@@ -109,16 +110,23 @@ pub enum IconSpec {
 }
 
 impl IconSpec {
-    /// Read one written icon: `$name` for a built-in, anything else as text.
+    /// Read one written icon: `none` for no icon, `$name` for a built-in, anything
+    /// else as text.
+    ///
+    /// Every slot that takes an icon reads it through here, so the three answers mean the
+    /// same thing in a style, a state, a collapsed table and a workspace mapping alike.
+    /// `none` in particular: it was once absence in a style and the literal word in a
+    /// workspace, which is exactly the kind of difference the one notion exists to remove.
     ///
     /// A misspelled `$name` is a startup error, which is the whole reason the sigil is
     /// there: without it there is no telling a typo from a glyph nobody can see.
-    pub fn parse(spec: &str) -> Result<IconSpec> {
+    pub fn parse(spec: &str) -> Result<Option<IconSpec>> {
         match spec.strip_prefix('$') {
             Some(native) => Icon::parse(native)
-                .map(IconSpec::Native)
+                .map(|icon| Some(IconSpec::Native(icon)))
                 .ok_or_else(|| anyhow!("unknown native icon \"${native}\"")),
-            None => Ok(IconSpec::Text(spec.into())),
+            None if spec == "none" => Ok(None),
+            None => Ok(Some(IconSpec::Text(spec.into()))),
         }
     }
 }
@@ -1276,10 +1284,7 @@ impl Style {
             self.max_width = v.max(0.0);
         }
         if let Some(name) = &over.icon {
-            self.icon = match name.as_str() {
-                "none" => None,
-                other => Some(IconSpec::parse(other)?),
-            };
+            self.icon = IconSpec::parse(name)?;
         }
         if let Some(v) = over.icon_size {
             self.icon_size = v.max(0.0);
