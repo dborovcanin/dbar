@@ -237,9 +237,19 @@ impl Sinks {
     /// Send what the default sink is now saying, if it is saying anything new.
     fn publish(&mut self) {
         let Some(levels) = self.levels() else {
-            // The default output has gone - the last sink removed, or its card unplugged.
-            // Saying nothing here would leave the volume, the device and the port of
-            // something that is no longer there on the bar for as long as the bar runs.
+            // A sink going away and the default moving to another one are two events, and
+            // the removal comes first: a Bluetooth headset disconnecting takes its node
+            // out before the server names the speaker that replaces it. Reporting nothing
+            // in between blanks the module for as long as that takes, so while there is
+            // still an output on the machine the last reading stands and the next event
+            // corrects it.
+            if !self.by_id.is_empty() {
+                return;
+            }
+            // Nothing is left to play anything - the last sink removed, or its card
+            // unplugged. Saying nothing here would leave the volume, the device and the
+            // port of something that is no longer there on the bar for as long as the bar
+            // runs.
             if self.last != Sent::Absent {
                 log::debug!("no default output, so the module has nothing to show");
                 self.last = Sent::Absent;
@@ -347,9 +357,19 @@ fn run(
     // listening to goes away: an error on the core is how a client learns that, and
     // without one the thread sits in a loop with nothing on the other end of it for as
     // long as the bar runs. Ending the loop is what lets the thread try again.
+    //
+    // Errors arrive here for every object this client holds, and only the ones about the
+    // core say anything about the connection. A Bluetooth headset disconnecting destroys
+    // its node while a request of ours is still in flight, and the answer is an error
+    // about that node - reconnecting over it dropped the whole module for a second, for a
+    // socket that was never in any trouble.
     let quit = {
         let main_loop = main_loop.downgrade();
-        move |_id: u32, _seq: i32, res: i32, message: &str| {
+        move |id: u32, _seq: i32, res: i32, message: &str| {
+            if id != pw::core::PW_ID_CORE {
+                log::debug!("PipeWire reported {message} ({res}) about object {id}");
+                return;
+            }
             log::debug!("PipeWire reported {message} ({res}); the connection is finished");
             if let Some(main_loop) = main_loop.upgrade() {
                 main_loop.quit();
