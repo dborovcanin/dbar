@@ -286,6 +286,148 @@ fn paint_costs_this_much_per_frame() {
     }
 }
 
+/// What one travelling module costs to lay out and paint.
+///
+/// Ignored for the same reason as the other timing probes: this reports the machine it
+/// runs on rather than passing or failing. Run old and new code back to back and compare
+/// medians instead of treating one noisy sample as a result.
+#[test]
+#[ignore = "release module-fold timing probe; run with --release --ignored --nocapture"]
+fn benchmark_module_collapse() {
+    use crate::{
+        collect::Registry,
+        layout::Inputs,
+        status::{Fields, State, StatusItem, Value},
+    };
+    use std::{hint::black_box, time::Instant};
+
+    let cfg = Config::parse(
+        r##"
+[bar]
+height = 30
+[left]
+groups = ["system"]
+[group.system]
+modules = ["cpu", "memory", "clock"]
+padding = 2
+spacing = 4
+background = "#313244"
+[module.cpu]
+format = "$text"
+padding = 8
+icon = "$cpu"
+collapsible = true
+collapse_animation = "150ms"
+background = "#45475a"
+collapsed = { padding = 4, background = "#585b70" }
+[module.memory]
+format = "$text"
+padding = 8
+icon = "$memory"
+[module.clock]
+format = "$text"
+padding = 8
+icon = "$clock"
+"##,
+    )
+    .expect("the module-fold bench config parses");
+    let items: Vec<_> = [
+        ("cpu", "CPU 12%"),
+        ("memory", "Memory 34%"),
+        ("clock", "12:34"),
+    ]
+    .into_iter()
+    .map(|(name, value)| {
+        let mut fields = Fields::default();
+        fields.set("text", Value::Text(value.to_string()));
+        StatusItem {
+            id: Some(name.to_string()),
+            fields,
+            state: State::Idle,
+            urgent: false,
+            foreground: None,
+            background: None,
+            action: None,
+        }
+    })
+    .collect();
+    let native = Registry::new(&Default::default());
+    let collapsed = ["cpu".to_string()].into();
+    let module_folding = [("cpu".to_string(), 0.5)].into();
+    let inputs = Inputs {
+        items: &items,
+        native: &native,
+        sway: &Default::default(),
+        alt: &Default::default(),
+        pages: &Default::default(),
+        collapsed: &collapsed,
+        collapsed_groups: &Default::default(),
+        switching: &Default::default(),
+        folding: &Default::default(),
+        module_folding: &module_folding,
+        waiting: &Default::default(),
+        spin: 0,
+        tray: &Default::default(),
+        output: None,
+    };
+    let mut painter = Painter::new(Blocks {
+        scale: 1.0,
+        run: None,
+    });
+
+    for _ in 0..100 {
+        black_box(crate::layout::compute(
+            &cfg,
+            &inputs,
+            1920.0,
+            30.0,
+            &mut painter.text,
+            None,
+        ));
+    }
+    let start = Instant::now();
+    for _ in 0..20_000 {
+        black_box(crate::layout::compute(
+            &cfg,
+            &inputs,
+            1920.0,
+            30.0,
+            &mut painter.text,
+            None,
+        ));
+    }
+    let layout = start.elapsed().as_secs_f64() * 1e6 / 20_000.0;
+
+    let frame = crate::layout::compute(&cfg, &inputs, 1920.0, 30.0, &mut painter.text, None);
+    let (pw, ph) = (1920, 30);
+    let mut canvas = vec![0; pw as usize * ph as usize * 4];
+    let mut clip = Clip::default();
+    let mut paint = || {
+        render_to_buffer(
+            Target {
+                canvas: &mut canvas,
+                width: pw,
+                height: ph,
+                clip: &mut clip,
+                pixels: Pixels::AsWritten,
+            },
+            &frame,
+            1.0,
+            &mut painter,
+        )
+        .expect("painting the module-fold bench frame");
+    };
+    for _ in 0..20 {
+        paint();
+    }
+    let start = Instant::now();
+    for _ in 0..1_000 {
+        paint();
+    }
+    let paint = start.elapsed().as_secs_f64() * 1e6 / 1_000.0;
+    println!("module fold layout={layout:.2} us/frame paint={paint:.2} us/frame");
+}
+
 const A: Color = Color::rgba(0x3c, 0x38, 0x36, 0xff);
 const B: Color = Color::rgba(0x50, 0x49, 0x45, 0xff);
 const INK: Color = Color::rgba(0xff, 0xff, 0xff, 0xff);
@@ -655,6 +797,7 @@ fn module(x: f32, width: f32, background: Color, text: &str, icon: bool) -> Plac
         text: text.to_string(),
         text_x: x + 16.0,
         content_right: None,
+        text_right: None,
         foreground: INK,
         background,
         radius: 0.0,
@@ -2906,6 +3049,189 @@ icon = "$cpu"
                     .all(|(n, pixel)| { n as u32 % image.width() < edge || pixel.alpha() == 0 }),
                 "the icon ran past its module at {at} scale {scale}"
             );
+        }
+    }
+}
+
+/// A module fold has the same endpoint contract as a group fold: progress zero is the
+/// open frame and progress one is the settled collapsed frame. The expanded contents stay
+/// in place between them while the module box, icon centre, wording cut and collapsed
+/// paint travel over those contents.
+#[test]
+fn module_folds_match_both_endpoints_at_fractional_scales() {
+    use crate::{
+        collect::Registry,
+        layout::Inputs,
+        status::{Fields, StatusItem, Value},
+    };
+
+    let cases = [
+        ("smaller padding", "$cpu", "padding = 1", false),
+        ("larger padding", "$cpu", "padding = 8", false),
+        (
+            "collapsed minimum width",
+            "$cpu",
+            "padding = 0\nmin_width = 24",
+            false,
+        ),
+        (
+            "changed icon",
+            "$cpu",
+            "icon = '$memory'\npadding = 4",
+            true,
+        ),
+        ("written icon", "µ", "padding = 5", false),
+    ];
+    for (case, icon, collapsed_style, swaps_icon) in cases {
+        let config = format!(
+            r##"
+[bar]
+height = 20
+background = {{ color = "#00000000" }}
+[left]
+groups = ["g"]
+[group.g]
+modules = ["m", "next"]
+padding = 0
+spacing = 2
+background = "#00000000"
+[module.m]
+format = "$text"
+padding = 4
+icon = "{icon}"
+icon_size = 6
+icon_gap = 2
+background = "#cc241d"
+foreground = "#ffffffff"
+radius = 1
+collapsible = true
+collapse_animation = "150ms"
+[module.m.collapsed]
+{collapsed_style}
+background = "#458588"
+radius = 6
+[module.next]
+format = "$text"
+padding = 2
+background = "#98971a"
+foreground = "#ffffffff"
+"##
+        );
+        let cfg = Config::parse(&config).unwrap_or_else(|error| panic!("{case}: {error:#}"));
+        let mut fields = Fields::default();
+        fields.set("text", Value::Text("TEXT".to_string()));
+        let mut next_fields = Fields::default();
+        next_fields.set("text", Value::Text("N".to_string()));
+        let items = [
+            StatusItem {
+                id: Some("m".to_string()),
+                fields,
+                state: Default::default(),
+                urgent: false,
+                foreground: None,
+                background: None,
+                action: None,
+            },
+            StatusItem {
+                id: Some("next".to_string()),
+                fields: next_fields,
+                state: Default::default(),
+                urgent: false,
+                foreground: None,
+                background: None,
+                action: None,
+            },
+        ];
+        let native = Registry::new(&Default::default());
+        let empty = Default::default();
+        let collapsed = ["m".to_string()].into();
+        let frame = |at: Option<f32>, shut: &std::collections::HashSet<String>| {
+            let module_folding = at
+                .map(|at| [("m".to_string(), at)].into())
+                .unwrap_or_default();
+            let inputs = Inputs {
+                items: &items,
+                native: &native,
+                sway: &Default::default(),
+                alt: &Default::default(),
+                pages: &Default::default(),
+                collapsed: shut,
+                collapsed_groups: &Default::default(),
+                switching: &Default::default(),
+                folding: &Default::default(),
+                module_folding: &module_folding,
+                waiting: &Default::default(),
+                spin: 0,
+                tray: &Default::default(),
+                output: None,
+            };
+            crate::layout::compute(
+                &cfg,
+                &inputs,
+                480.0,
+                20.0,
+                &mut Blocks {
+                    scale: 1.0,
+                    run: None,
+                },
+                None,
+            )
+        };
+        let open = frame(None, &empty);
+        let settled = frame(None, &collapsed);
+
+        for direction in [&empty, &collapsed] {
+            let leaving = frame(Some(0.0), direction);
+            let near = frame(Some(0.999), direction);
+            let arriving = frame(Some(1.0), direction);
+            let module = &near.groups[0].modules[0];
+            assert!(module.content_right.is_some(), "{case}");
+            assert!(module.text_right < module.content_right, "{case}");
+
+            for scale in [1.0, 1.5, 2.0] {
+                assert_eq!(
+                    shot(&leaving, scale).data(),
+                    shot(&open, scale).data(),
+                    "{case}: progress zero differs at scale {scale}"
+                );
+
+                // The space between the wording cut and the travelling edge is the
+                // collapsed padding. Neither the old wording nor a clipped icon may leave
+                // foreground pixels standing in it near arrival.
+                let image = shot(&near, scale);
+                let from = (module.text_right.unwrap() * scale).ceil() as u32;
+                let to = (module.content_right.unwrap() * scale).floor() as u32;
+                let y0 = (module.y * scale) as u32;
+                let y1 = ((module.y + module.height) * scale) as u32;
+                for y in y0..y1 {
+                    for x in from..to {
+                        let pixel = image.pixel(x, y).unwrap();
+                        assert_ne!(
+                            (pixel.red(), pixel.green(), pixel.blue()),
+                            (255, 255, 255),
+                            "{case}: foreground remained in collapsed padding at {x},{y}, scale {scale}"
+                        );
+                    }
+                }
+
+                let mut comparable = arriving.clone();
+                if swaps_icon {
+                    comparable.groups[0].modules[0].icon.as_mut().unwrap().icon =
+                        settled.groups[0].modules[0].icon.as_ref().unwrap().icon;
+                }
+                assert_eq!(
+                    shot(&comparable, scale).data(),
+                    shot(&settled, scale).data(),
+                    "{case}: progress one differs from settled at scale {scale}"
+                );
+                if swaps_icon {
+                    assert_ne!(
+                        shot(&arriving, scale).data(),
+                        shot(&settled, scale).data(),
+                        "{case}: the fixture did not exercise the documented icon swap"
+                    );
+                }
+            }
         }
     }
 }

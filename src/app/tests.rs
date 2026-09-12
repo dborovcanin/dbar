@@ -13,6 +13,7 @@ fn placed() -> PlacedModule {
         text: String::new(),
         text_x: 0.0,
         content_right: None,
+        text_right: None,
         foreground: crate::color::Color::TRANSPARENT,
         background: crate::color::Color::TRANSPARENT,
         radius: 0.0,

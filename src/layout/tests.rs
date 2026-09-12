@@ -3557,6 +3557,182 @@ icon_gap = 0
     }
 }
 
+/// A module fold keeps the open measurement while a separate box travels to the shut
+/// width. This is the awkward growing case that used to put the expanded contents into a
+/// successively re-centred box: 8.49 logical pixels open and 10 folded.
+#[test]
+fn a_module_fold_carries_an_8_49_box_to_10_without_recentering_its_contents() {
+    let config = r##"
+[left]
+groups = ["g"]
+[group.g]
+modules = ["m", "next"]
+padding = 0
+spacing = 2
+[module.m]
+format = "$text"
+padding = 1.745
+icon = "$cpu"
+icon_size = 4
+icon_gap = 0
+collapsible = true
+collapse_animation = "150ms"
+collapsed = { padding = 0, min_width = 10 }
+[module.next]
+format = "$text"
+padding = 0
+"##;
+    let cfg = Config::parse(config).unwrap();
+    let items = [item("m", "x"), item("next", "n")];
+    let native = Registry::new(&Default::default());
+    let empty = Default::default();
+    let shut: std::collections::HashSet<String> = ["m".to_string()].into();
+    let frame = |at: Option<f32>, collapsed| {
+        let folding = at
+            .map(|at| [("m".to_string(), at)].into())
+            .unwrap_or_default();
+        let mut inputs = group_inputs(&items, &native, collapsed);
+        inputs.collapsed = collapsed;
+        inputs.module_folding = &folding;
+        compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None)
+    };
+
+    let open = frame(None, &empty);
+    let settled = frame(None, &shut);
+    assert!((open.groups[0].modules[0].width - 8.49).abs() < 0.0001);
+    assert_eq!(settled.groups[0].modules[0].width, 10.0);
+    for idle in [&open, &settled] {
+        let module = &idle.groups[0].modules[0];
+        assert_eq!((module.content_right, module.text_right), (None, None));
+    }
+    assert_eq!(frame(None, &shut).damage(&settled), Damage::Rects(vec![]));
+
+    // `collapsed` records which end the application is heading towards; layout follows
+    // the fold's progress in either direction, so both directions must have the same four
+    // geometries and the same hand-off at each end.
+    for collapsed in [&empty, &shut] {
+        let leaving = frame(Some(0.0), collapsed);
+        let near = frame(Some(0.999), collapsed);
+        let arriving = frame(Some(1.0), collapsed);
+        assert!(leaving.groups[0].same_paint(&open.groups[0]));
+        assert!((near.groups[0].modules[0].width - 9.99849).abs() < 0.0001);
+
+        let (module, next) = (
+            &arriving.groups[0].modules[0],
+            &arriving.groups[0].modules[1],
+        );
+        let (settled_module, settled_next) =
+            (&settled.groups[0].modules[0], &settled.groups[0].modules[1]);
+        assert_eq!(module.width, 10.0);
+        assert_eq!(module.content_right, Some(module.x + module.width));
+        assert_eq!(module.text_right, Some(module.text_x));
+        assert_eq!(
+            module.icon.as_ref().unwrap().x,
+            settled_module.icon.as_ref().unwrap().x
+        );
+        assert_eq!(next.x, settled_next.x);
+        assert_eq!(arriving.groups[0].width, settled.groups[0].width);
+    }
+}
+
+/// A configured glyph is the leading icon even though it shares the wording run. Its own
+/// width is carried separately so the glyph reaches the collapsed centre while the rest
+/// of the run retires at its far edge.
+#[test]
+fn a_written_icon_travels_to_the_collapsed_centre() {
+    let config = r##"
+[left]
+groups = ["g"]
+[group.g]
+modules = ["m", "next"]
+padding = 0
+spacing = 2
+[module.m]
+format = "$text"
+padding = 2
+icon = "µ"
+collapsible = true
+collapse_animation = "150ms"
+collapsed = { padding = 3 }
+[module.next]
+format = "$text"
+padding = 0
+"##;
+    let cfg = Config::parse(config).unwrap();
+    let items = [item("m", "abc"), item("next", "n")];
+    let native = Registry::new(&Default::default());
+    let shut: std::collections::HashSet<String> = ["m".to_string()].into();
+    let folding = [("m".to_string(), 1.0)].into();
+    let mut inputs = group_inputs(&items, &native, &shut);
+    inputs.collapsed = &shut;
+    inputs.module_folding = &folding;
+    let arriving = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+    let not_folding = Default::default();
+    inputs.module_folding = &not_folding;
+    let settled = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+
+    let (a, b) = (
+        &arriving.groups[0].modules[0],
+        &settled.groups[0].modules[0],
+    );
+    assert_eq!(a.width, b.width);
+    assert_eq!(a.text_x, b.text_x);
+    assert_eq!(a.text_right, Some(a.text_x + 1.0));
+    assert_eq!(
+        arriving.groups[0].modules[1].x,
+        settled.groups[0].modules[1].x
+    );
+}
+
+/// Module and group folds can be caught in flight together. The group continues from the
+/// module's already-carried icon position and its topology starts at the module's current
+/// visible width, so neither contribution is counted twice.
+#[test]
+fn overlapping_module_and_group_folds_compose_their_travel() {
+    let config = r##"
+[left]
+groups = ["g"]
+[group.g]
+modules = ["m", "next"]
+padding = 0
+spacing = 2
+collapsible = true
+collapse_button = "left"
+collapse_animation = "150ms"
+collapsed = { icon = "$cpu", icon_size = 4, padding = 5 }
+[module.m]
+format = "$text"
+padding = 1
+icon = "$cpu"
+icon_size = 4
+icon_gap = 0
+collapsible = true
+collapse_animation = "150ms"
+collapsed = { padding = 3 }
+[module.next]
+format = "$text"
+padding = 0
+"##;
+    let cfg = Config::parse(config).unwrap();
+    let items = [item("m", "abc"), item("next", "n")];
+    let native = Registry::new(&Default::default());
+    let module_folding = [("m".to_string(), 0.5)].into();
+    let no_groups = Default::default();
+    let mut inputs = group_inputs(&items, &native, &no_groups);
+    inputs.module_folding = &module_folding;
+    let module_only = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+
+    let group_folding = [("g".to_string(), 0.5)].into();
+    inputs.folding = &group_folding;
+    let both = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+    let start = module_only.groups[0].modules[0].icon.as_ref().unwrap().x;
+    let carried = both.groups[0].modules[0].icon.as_ref().unwrap().x;
+    // The module-only icon is one pixel into its four-pixel trip. The group fold carries
+    // it halfway over the three pixels still left, not halfway over all four again.
+    assert!((carried - start - 1.5).abs() < 0.001);
+    assert!((both.groups[0].modules[1].x - 13.75).abs() < 0.001);
+}
+
 /// A module that names a collapsed style wears it folded, icon and all, so the thing left
 /// on the bar can say something the open module does not.
 #[test]

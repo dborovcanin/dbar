@@ -292,13 +292,18 @@ pub struct PlacedModule {
     pub text_x: f32,
     /// Where the module's contents stop, for one holding more than it shows.
     ///
-    /// A module travelling between two wordings is drawn at a width neither of them was
-    /// fitted to, so its icon and wording have to be cut at the box it is in rather than
-    /// at the box they were measured for. Short of the fills by the module's own padding,
-    /// because nothing is drawn in padding: cutting at the fills would leave the last
-    /// pixels standing in it and take them away in one step. `None` on every module that
-    /// has arrived, which is all of them but the one under a click.
+    /// A module travelling between two wordings is drawn at a width neither was fitted to,
+    /// so both are cut short of the box by the fitted padding. A module fold instead cuts
+    /// marks at the travelling box itself; its wording has the separate inset below.
+    /// `None` on every module that has arrived, which is all of them but the one under a
+    /// click.
     pub content_right: Option<f32>,
+    /// Where the module's wording stops, when that is short of the rest of its contents.
+    ///
+    /// A wording travel uses the same edge for both. A fold retires the wording before
+    /// the icon, leaving the collapsed style's empty padding around that icon by the time
+    /// it arrives. `None` on every settled module.
+    pub text_right: Option<f32>,
     pub foreground: Color,
     pub background: Color,
     pub radius: f32,
@@ -546,6 +551,7 @@ impl SamePaint for PlacedModule {
             && self.text == other.text
             && self.text_x == other.text_x
             && self.content_right == other.content_right
+            && self.text_right == other.text_right
             && self.foreground == other.foreground
             && self.background == other.background
             && self.radius == other.radius
@@ -881,16 +887,28 @@ struct Fitted {
     content: String,
     text_width: f32,
     icon_advance: f32,
+    /// Width of a configured glyph leading the wording, or zero for native and
+    /// source-owned decorations.
+    written_icon_advance: f32,
     width: f32,
 }
 
 struct SizedModule {
-    /// What the module is drawn at, which is between the two wordings' widths while a
-    /// click is carrying it from one to the other.
+    /// The width this module's expanded contents were fitted and centred against.
+    ///
+    /// A wording travel changes this because the two wordings really have two fitted
+    /// widths. A fold does not: it keeps the expanded measurement and carries the visible
+    /// box separately, the same way a group fold keeps the modules it is closing over.
     width: f32,
-    /// What it charges the group, which is `width` for everything but a module travelling
-    /// between two wordings: that one is charged the wider of the two from end to end of
-    /// the travel, so nothing behind it is re-measured on the way.
+    /// The box a module fold is visibly carrying, or `None` when it is settled.
+    drawn_width: Option<f32>,
+    /// How far the expanded contents have travelled towards the collapsed icon's centre.
+    shift: f32,
+    /// How far before the travelling box edge wording stops during a module fold.
+    text_inset: f32,
+    /// What it charges the group, which is `width` for every settled module. A wording or
+    /// fold in flight is charged the wider endpoint from end to end, so nothing behind it
+    /// is re-measured on the way.
     reserve: f32,
     /// How much of a drawn module exists at this point of a wording travel.
     presence: f32,
@@ -910,6 +928,8 @@ struct SizedModule {
     hover_style: Option<Style>,
     /// Width of the icon plus its gap, or zero.
     icon_advance: f32,
+    /// Width of a configured glyph at the start of `text`.
+    written_icon_advance: f32,
     icon: Option<(Icon, usize)>,
     icon_after_text: bool,
     /// Pixels for an icon that arrived as a picture, carried beside `icon`.
@@ -1291,6 +1311,9 @@ fn size_group(
         }
         modules.push(SizedModule {
             width,
+            drawn_width: None,
+            shift: 0.0,
+            text_inset: 0.0,
             reserve: width,
             presence: 1.0,
             from_drawn: true,
@@ -1302,6 +1325,7 @@ fn size_group(
             collapsible: false,
             hover_style: None,
             icon_advance,
+            written_icon_advance: 0.0,
             icon,
             icon_after_text: false,
             art: None,
@@ -1538,6 +1562,7 @@ fn size_group(
                     (Some(_), _) => (None, false, None),
                 },
             };
+            let written_icon_advance = lead.map_or(0.0, |lead| text.measure(lead));
             // In front of the wording rather than behind it, which is the one thing that
             // separates a configured icon from a decoration a source wrote for itself.
             // Folding cleared the wording just above, so a folded module is the glyph
@@ -1601,6 +1626,7 @@ fn size_group(
                 content,
                 text_width,
                 icon_advance,
+                written_icon_advance,
                 width,
             }
         };
@@ -1632,6 +1658,23 @@ fn size_group(
                 }),
             ),
         };
+        // The same destination description a group fold uses. A native icon owns the
+        // icon advance and a written one owns the text width; together they are exactly
+        // the mark the collapsed module leaves on the bar.
+        let module_shut = folding.zip(leaving.as_ref()).map(|(_, folded)| {
+            // Provider colours win over a style in the settled frame, so they also belong
+            // to the destination a travelling frame carries. Leaving the raw collapsed
+            // style here would replace them for one frame and hand them back on settling.
+            let mut style = folded.style.clone();
+            style.foreground = foreground.unwrap_or(style.foreground);
+            style.background = background.unwrap_or(style.background);
+            Shut {
+                width: folded.width,
+                module: folded.width,
+                icon: folded.icon_advance + folded.text_width,
+                style,
+            }
+        });
         // One number for both kinds of travel, since a module is never on two at once.
         // A fold's is turned around: it counts how shut the module is, and the width below
         // eases towards whatever `arriving` holds, which for a fold is the open end.
@@ -1652,68 +1695,46 @@ fn size_group(
             }
             None => f32::from(u8::from(to_drawn)),
         };
-        let was = leaving.map(|leaving| leaving.width);
+        let was = leaving.as_ref().map(|leaving| leaving.width);
         let Fitted {
-            mut style,
-            mut hover_style,
+            style,
+            hover_style,
             icon,
             icon_after_text,
             content,
             text_width,
             icon_advance,
+            written_icon_advance,
             width,
             ..
         } = arriving;
-        // What it draws eases from one wording's width to the other's, and what it charges
-        // stays at the wider of them for the whole travel.
-        let (width, reserve) = match (at, was) {
+        // A wording travel really is laid out between two fitted widths. A fold keeps the
+        // expanded fitted width and carries only its visible box; `folded` below does that
+        // part after the ordinary module has been assembled.
+        let expanded_width = width;
+        let (travel_width, reserve) = match (at, was) {
             (Some(at), Some(was)) => (was + (width - was) * at, width.max(was)),
             _ => (width, width),
         };
+        let width = match folding {
+            Some(_) => expanded_width,
+            None => travel_width,
+        };
         // A module with nothing left to draw in is left out entirely, rather than drawn
         // over whatever the run was making room for.
-        if width > available {
+        if travel_width > available {
             continue;
-        }
-        // The collapsed look is carried across the travel rather than swapped in on the
-        // frame it arrives, which is what a group fold already does for its own island.
-        // Both ends of the hand-off are then the same picture and the last frame changes
-        // nothing but the icon, which has no in-between to be drawn at.
-        //
-        // Keyed on the fold's own number rather than on `at`, which was turned around for
-        // the width: this one counts how shut the module is, which is the direction the
-        // collapsed look arrives from.
-        let mut foreground = foreground;
-        let mut background = background;
-        if let Some(shut) = folding
-            && let Some(worn) = module.collapse.as_ref().and_then(|c| c.style.as_ref())
-        {
-            foreground = Some(
-                foreground
-                    .unwrap_or(style.foreground)
-                    .mix(worn.foreground, shut),
-            );
-            background = Some(
-                background
-                    .unwrap_or(style.background)
-                    .mix(worn.background, shut),
-            );
-            style.radius += (worn.radius - style.radius) * shut;
-            // A pointer resting on the module it just folded would otherwise hold it at
-            // its hover colours for the whole travel and land on the collapsed ones.
-            if let Some(hover) = hover_style.as_mut() {
-                hover.foreground = hover.foreground.mix(worn.foreground, shut);
-                hover.background = hover.background.mix(worn.background, shut);
-                hover.radius += (worn.radius - hover.radius) * shut;
-            }
         }
         // Charging the wider of the two wordings is what keeps a travel from re-truncating
         // the modules behind it: they would otherwise be measured against a budget that
         // moved on every frame, and a window title among them would shed and regain a
         // character at a time all the way through.
         left = (available - reserve).max(0.0);
-        modules.push(SizedModule {
+        let mut sized = SizedModule {
             width,
+            drawn_width: None,
+            shift: 0.0,
+            text_inset: 0.0,
             reserve,
             presence,
             from_drawn,
@@ -1722,10 +1743,11 @@ fn size_group(
             // Cut at its own edge while it is travelling: the wording it is going to was
             // fitted to the width it lands at, which is not the width it is being drawn
             // in until it arrives.
-            clipped: at.is_some(),
+            clipped: travelling.is_some(),
             text_width,
             hover_style,
             icon_advance,
+            written_icon_advance,
             icon,
             icon_after_text,
             art,
@@ -1755,7 +1777,17 @@ fn size_group(
                 || pages > 1)
                 .then(|| module.name.clone()),
             on_click: module.on_click.clone(),
-        });
+        };
+        if let (Some(at), Some(shut)) = (folding, module_shut.as_ref()) {
+            sized.fold(at, shut);
+            // With no collapsed table the module keeps the appearance it resolved from
+            // its state and provider. A table asks for a definite look, and that look is
+            // carried over the travel just as a group's collapsed style is.
+            if module.collapse.as_ref().is_some_and(|c| c.style.is_some()) {
+                sized.carry_style(at, &shut.style);
+            }
+        }
+        modules.push(sized);
     }
     let _ = height;
     let sized = finish_group(group, ends, between, modules)?;
@@ -1851,11 +1883,11 @@ fn finish_group(
     }
     let presence = prior;
 
-    let content: f32 = modules.iter().map(|m| m.width).sum();
+    let content: f32 = modules.iter().map(SizedModule::drawn_width).sum();
     // What the modules between them have reserved, which is more than they are showing
-    // only while one of them is travelling between two wordings. The island charges the
-    // run that instead, so the groups after it are measured against one budget from end
-    // to end of the travel the way they are through a fold.
+    // while one is travelling between wordings or folding. The island charges the run
+    // that instead, so the groups after it are measured against one budget from end to end
+    // of either travel.
     let held: f32 = modules.iter().map(|m| m.reserve).sum();
     let gaps: f32 = modules.iter().map(|m| m.before).sum();
     // A shaped end needs room of its own: it is drawn beside the modules, not over them.
@@ -1898,6 +1930,66 @@ fn finish_group(
     })
 }
 
+impl SizedModule {
+    /// The box this module contributes to its island at this point in a fold.
+    fn drawn_width(&self) -> f32 {
+        self.drawn_width.unwrap_or(self.width)
+    }
+
+    /// Carry the module's box and expanded contents towards a collapsed destination.
+    fn fold(&mut self, at: f32, shut: &Shut) {
+        let at = at.clamp(0.0, 1.0);
+        if at == 0.0 {
+            return;
+        }
+        self.reserve = self.reserve.max(shut.module);
+        self.drawn_width = Some(self.width + (shut.module - self.width) * at);
+        self.shift += self.travel(shut.module) * at;
+        self.text_inset = ((shut.module - shut.icon) / 2.0).max(0.0) * at;
+        self.clipped = true;
+    }
+
+    /// Carry foreground, background, corners and hover paint to a collapsed style.
+    fn carry_style(&mut self, at: f32, style: &Style) {
+        let at = at.clamp(0.0, 1.0);
+        self.foreground = self.foreground.mix(style.foreground, at);
+        self.background = self.background.mix(style.background, at);
+        self.style.radius += (style.radius - self.style.radius) * at;
+        if let Some(hover) = self.hover_style.as_mut() {
+            hover.foreground = hover.foreground.mix(style.foreground, at);
+            hover.background = hover.background.mix(style.background, at);
+            hover.radius += (style.radius - hover.radius) * at;
+        }
+    }
+
+    /// How far the contents still have to move for their icon to reach the centre of the
+    /// collapsed module.
+    ///
+    /// The module's own fold may already have moved it before the group holding it folds.
+    /// Returning the distance from that carried position lets the two travels compose
+    /// without counting the module contribution twice.
+    fn travel(&self, shut_module: f32) -> f32 {
+        if self.icon_after_text || (self.icon_advance <= 0.0 && self.written_icon_advance <= 0.0) {
+            return 0.0;
+        }
+        // For a native icon, everything after its centre is the gap and wording. A
+        // configured glyph is part of the wording run, so everything after its centre is
+        // the rest of that run. Source-owned text decorations trail the wording and never
+        // set `written_icon_advance`, which deliberately leaves their current behaviour.
+        let trailing = match self.written_icon_advance > 0.0 {
+            true => self.text_width - self.written_icon_advance,
+            false => {
+                let gap = match self.text.is_empty() {
+                    true => 0.0,
+                    false => self.style.gap(),
+                };
+                self.text_width + gap
+            }
+        };
+        (shut_module - self.width + trailing) / 2.0 - self.shift
+    }
+}
+
 impl SizedGroup {
     /// The island part-way shut: as wide as the fold has got, holding what it held.
     ///
@@ -1933,7 +2025,7 @@ impl SizedGroup {
         // which is the artefact the fold holds its own contents still to avoid.
         self.reserve = self.reserve.max(shut.width);
         self.width += (shut.width - self.width) * at;
-        self.shift = self.travel(shut.module) * at;
+        self.shift = self.modules[0].travel(shut.module) * at;
         // The leading module's box: as far as its own edge has been carried, or as far as
         // the shut island reaches, whichever is further. The first is what a fold has
         // always done, and it leaves the readings behind it exactly where they were while
@@ -1942,7 +2034,7 @@ impl SizedGroup {
         // reading it is closing over arrives with its second module still inside the edge,
         // where the settled frame has only the one. Stretching the module the island is
         // left holding pushes the rest out, and never opens a gap for them to show in.
-        let first = self.modules[0].width;
+        let first = self.modules[0].drawn_width();
         self.leading = Some((first + self.shift).max(first + (shut.module - first) * at));
         // The room the shut island keeps around its icon, which the wording has to be out
         // of before the fold arrives. Cutting text where the fills are cut would leave it
@@ -1954,42 +2046,10 @@ impl SizedGroup {
         // ground, so the module that stays behind arrives wearing them. Both ends of the
         // hand-off are then the same picture and the swap on the last frame is a swap of
         // nothing but the icon itself.
-        let first = &mut self.modules[0];
-        first.foreground = first.foreground.mix(shut.style.foreground, at);
-        first.background = first.background.mix(shut.style.background, at);
-        // Its corners too, for the same reason: the shut island rounds its one module by
-        // the collapsed style, and a module arriving with its own radius would change shape
-        // on the frame after the last one.
-        first.style.radius += (shut.style.radius - first.style.radius) * at;
-        // A pointer resting on the island it just folded would otherwise hold the module
-        // at its hover colours for the whole travel and land on the collapsed ones.
-        if let Some(hover) = first.hover_style.as_mut() {
-            hover.foreground = hover.foreground.mix(shut.style.foreground, at);
-            hover.background = hover.background.mix(shut.style.background, at);
-            hover.radius += (shut.style.radius - hover.radius) * at;
-        }
+        self.modules[0].carry_style(at, &shut.style);
         self.clipped = true;
         self.travel = at;
         self
-    }
-
-    /// How far the contents move for the first module's icon to arrive under the one the
-    /// shut island draws.
-    ///
-    /// Both icons are centred in their own module box and both boxes start at the same
-    /// place, so the distance is between the two centres. A first module with no icon has
-    /// nothing to line up and stays where it was measured.
-    fn travel(&self, shut_module: f32) -> f32 {
-        let first = &self.modules[0];
-        if first.icon_advance <= 0.0 {
-            return 0.0;
-        }
-        // The advance carries the gap before the text, which is not part of the glyph.
-        let gap = match first.text.is_empty() {
-            true => 0.0,
-            false => first.style.gap(),
-        };
-        (shut_module - first.width + first.text_width + gap) / 2.0
     }
 }
 
@@ -2010,12 +2070,13 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     x += lead;
     for (i, m) in sized.modules.into_iter().enumerate() {
         x += m.before;
+        let drawn_width = m.drawn_width();
         // The box a fold is taking to the shut island's width, for the leading module; the
         // measured one for everything behind it, which packs along after that box and is
         // pushed off the end by it.
         let width = match i {
-            0 => sized.leading.unwrap_or(m.width),
-            _ => m.width,
+            0 => sized.leading.unwrap_or(drawn_width),
+            _ => drawn_width,
         };
         // Icon and text are centred together inside the module box - the one it was
         // measured at, plus wherever a fold is carrying it. Centring them in a travelling
@@ -2023,8 +2084,8 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
         // on the icon the shut island draws.
         let content_width = m.icon_advance + m.text_width;
         let carried = match i {
-            0 => sized.shift,
-            _ => 0.0,
+            0 => m.shift + sized.shift,
+            _ => m.shift,
         };
         // Never further in than the module's own padding. A settled box is its content
         // plus that padding on both sides, so the centre is already at or past it and the
@@ -2063,6 +2124,18 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
             (m.foreground, m.background)
         };
 
+        // A wording transition stops inside the box by the fitted style's padding, as it
+        // always has. A module fold uses the travelling box edge itself for marks and
+        // progressively moves only the wording further in, leaving the collapsed padding
+        // empty without clipping the icon that remains there.
+        let content_right = m.clipped.then_some(match m.drawn_width {
+            Some(_) => x + width,
+            None => x + width - m.style.padding,
+        });
+        let text_right = content_right.map(|right| match m.drawn_width {
+            Some(_) => right - m.text_inset,
+            None => right,
+        });
         modules.push(PlacedModule {
             x,
             y: inner_y,
@@ -2075,7 +2148,8 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
                     true => 0.0,
                     false => m.icon_advance,
                 },
-            content_right: m.clipped.then_some(x + width - m.style.padding),
+            content_right,
+            text_right,
             foreground,
             background,
             radius: paint.radius,
@@ -2323,8 +2397,8 @@ pub fn compute(
 
     // A run measures twice: what it is showing, which is what it is placed by, and what it
     // has reserved, which is what the runs after it are given to fit in. The two differ
-    // only while an island is folding, and holding them apart is what keeps a fold from
-    // re-truncating its neighbours on every frame of the travel.
+    // only while an island, module or wording is travelling, and holding them apart keeps
+    // that travel from re-truncating its neighbours on every frame.
     let run_span = |groups: &Vec<SizedGroup>, separator: Option<Separator>, shown: bool| -> f32 {
         if groups.is_empty() {
             return 0.0;
@@ -2470,6 +2544,7 @@ pub fn fault(
                 width: module_width,
                 height,
                 content_right: None,
+                text_right: None,
                 icon: None,
                 action: None,
                 name: None,

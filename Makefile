@@ -33,7 +33,8 @@ bench:
 	$(CARGO) test --release -- --ignored --nocapture \
 		paint_costs_this_much_per_frame \
 		benchmark_joined_ribbon \
-		benchmark_group_collapse_layout
+		benchmark_group_collapse_layout \
+		benchmark_module_collapse
 
 fmt:
 	$(CARGO) fmt

@@ -1491,13 +1491,13 @@ fn draw_group(
                 false => clip,
             },
         );
-        // A wording travel can grow an icon out of a box narrower than the icon itself.
-        // Give it the same straight module cutoff as the wording; the group mask still
-        // supplies any rounded or folding edge underneath it.
-        let module_stop = module
+        // A wording travel can grow an icon out of a box narrower than the icon itself,
+        // and a module fold carries that box over its expanded contents. Marks stop at
+        // the visible box in both cases; the group cut still supplies any island edge.
+        let marks_stop = module
             .content_right
             .map(|right| ((right + offset.0) * scale).ceil() as i32);
-        let marks = module_stop.map_or(marks, |stop| marks.stopped(stop));
+        let marks = marks_stop.map_or(marks, |stop| marks.stopped(stop));
         if let Some(icon) = &module.icon {
             draw_icon_cached(
                 pixmap,
@@ -1508,13 +1508,14 @@ fn draw_group(
                 tools.icons,
             );
         }
-        // A module part way between two wordings is the one thing cut at its own edge
-        // rather than at the island's: its contents were fitted to the width it lands at,
-        // and until it lands that is not the width they are drawn in. Rounded up, because
-        // the column is where the contents stop rather than the last one they reach, and
-        // something that exactly fills its box must not lose its last pixel to it on the
-        // frame before it arrives.
-        let wording = module_stop.map_or(wording, |stop| wording.stopped(stop));
+        // Wording can stop earlier than the icon during a fold, progressively leaving the
+        // collapsed style's padding empty. A wording transition sets both module edges to
+        // the old cutoff, so it keeps its existing behaviour. Rounded up because this is
+        // the first column outside the content rather than its last painted one.
+        let wording_stop = module
+            .text_right
+            .map(|right| ((right + offset.0) * scale).ceil() as i32);
+        let wording = wording_stop.map_or(wording, |stop| wording.stopped(stop));
         // Layout already placed the text; only the vertical centring is ours, and it
         // centres the ink rather than the line box it sits in.
         let ty = module.y + module.height / 2.0 - tools.middle;
