@@ -107,6 +107,7 @@ fn frame_waiting(
         collapsed_groups: &Default::default(),
         switching: &Default::default(),
         folding: &Default::default(),
+        module_folding: &Default::default(),
         waiting,
         spin: 3,
         tray: &Default::default(),
@@ -157,6 +158,7 @@ padding = 0
             collapsed_groups: &Default::default(),
             switching: &Default::default(),
             folding: &Default::default(),
+            module_folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -213,6 +215,7 @@ padding = 0
             collapsed_groups: &Default::default(),
             switching: &Default::default(),
             folding: &Default::default(),
+            module_folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -253,6 +256,7 @@ fn workspaces(
         collapsed_groups: &Default::default(),
         switching,
         folding: &Default::default(),
+        module_folding: &Default::default(),
         collapsed,
         waiting: &Default::default(),
         spin: 0,
@@ -440,6 +444,7 @@ padding = 0
         collapsed_groups: &Default::default(),
         switching: &Default::default(),
         folding: &Default::default(),
+        module_folding: &Default::default(),
         collapsed: &Default::default(),
         waiting: &Default::default(),
         spin: 0,
@@ -482,6 +487,7 @@ padding = 0
             collapsed_groups: &Default::default(),
             switching: &Default::default(),
             folding: &Default::default(),
+            module_folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -560,6 +566,7 @@ format = "$app_id|$class|'?': $title"
         collapsed_groups: &Default::default(),
         switching: &Default::default(),
         folding: &Default::default(),
+        module_folding: &Default::default(),
         collapsed: &Default::default(),
         waiting: &Default::default(),
         spin: 0,
@@ -724,6 +731,7 @@ fn render_with(cfg: &Config, tray: &crate::tray::TrayState) -> Frame {
         collapsed_groups: &Default::default(),
         switching: &Default::default(),
         folding: &Default::default(),
+        module_folding: &Default::default(),
         collapsed: &Default::default(),
         waiting: &Default::default(),
         spin: 0,
@@ -1104,6 +1112,7 @@ padding = 0
             collapsed_groups: &Default::default(),
             switching: &Default::default(),
             folding: &Default::default(),
+            module_folding: &Default::default(),
             collapsed: &Default::default(),
             waiting: &Default::default(),
             spin: 0,
@@ -2132,6 +2141,7 @@ fn joined_frame(
         collapsed_groups: &Default::default(),
         switching: &Default::default(),
         folding: &Default::default(),
+        module_folding: &Default::default(),
         collapsed: &Default::default(),
         waiting: &Default::default(),
         spin: 0,
@@ -2413,6 +2423,7 @@ fn group_inputs<'a>(
         collapsed_groups: groups,
         switching: &SHOWING,
         folding: &SETTLED,
+        module_folding: &SETTLED,
         waiting: &WAITING,
         spin: 0,
         tray: &TRAY,
@@ -3486,4 +3497,116 @@ icon = "µ"
     assert_eq!(shut.groups[0].modules[0].width, 1.0);
     assert_eq!(shut.groups[0].modules[0].text, "\u{b5}");
     assert!(shut.groups[0].modules[0].icon.is_none());
+}
+
+/// A module folding is drawn at neither of its two widths but between them, and holds
+/// more than it shows while it is there.
+#[test]
+fn a_module_folding_eases_between_its_two_widths() {
+    let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+padding = 0
+spacing = 0
+
+[module.cpu]
+padding = 0
+collapsible = true
+collapse_animation = "150ms"
+icon = "$cpu"
+icon_size = 10
+icon_gap = 0
+"##;
+    let items = [item("cpu", "abc")];
+    let native = Registry::new(&Default::default());
+    let no_groups: std::collections::HashSet<String> = Default::default();
+
+    // The icon, and three characters of wording the stub measures at one unit each.
+    let open = frame_of(config, &items);
+    assert_eq!(open.groups[0].modules[0].width, 13.0);
+    // Folded, the wording is gone and the gap goes with it.
+    let shut_set: std::collections::HashSet<String> = ["cpu".to_string()].into();
+    let shut = frame_folded(
+        config,
+        &items,
+        Registry::new(&Default::default()),
+        &Default::default(),
+        &shut_set,
+    );
+    assert_eq!(shut.groups[0].modules[0].width, 10.0);
+
+    // Half way is half way between the two, whichever end it is heading for, and the
+    // module is cut at its own edge because it was fitted to neither width.
+    for shutting in [false, true] {
+        let cfg = Config::parse(config).unwrap();
+        let mut inputs = group_inputs(&items, &native, &no_groups);
+        let settled: std::collections::HashSet<String> = match shutting {
+            true => ["cpu".to_string()].into(),
+            false => Default::default(),
+        };
+        let folding: std::collections::HashMap<String, f32> = [("cpu".to_string(), 0.5)].into();
+        inputs.collapsed = &settled;
+        inputs.module_folding = &folding;
+        let frame = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
+        let module = &frame.groups[0].modules[0];
+        assert_eq!(module.width, 11.5, "shutting = {shutting}");
+        assert!(module.content_right.is_some(), "shutting = {shutting}");
+    }
+}
+
+/// A module that names a collapsed style wears it folded, icon and all, so the thing left
+/// on the bar can say something the open module does not.
+#[test]
+fn a_module_folds_into_the_style_it_named() {
+    let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+padding = 0
+spacing = 0
+
+[module.cpu]
+padding = 0
+collapsible = true
+icon = "$cpu"
+icon_size = 10
+icon_gap = 0
+foreground = "#ffffff"
+
+[module.cpu.collapsed]
+icon = "$memory"
+foreground = "#ff0000"
+"##;
+    let items = [item("cpu", "abc")];
+    let open = frame_of(config, &items);
+    assert_eq!(
+        open.groups[0].modules[0].icon.as_ref().unwrap().icon,
+        crate::icon::Icon::parse("cpu").unwrap()
+    );
+    assert_eq!(
+        open.groups[0].modules[0].foreground,
+        Color::parse("#ffffff").unwrap()
+    );
+
+    let shut_set: std::collections::HashSet<String> = ["cpu".to_string()].into();
+    let shut = frame_folded(
+        config,
+        &items,
+        Registry::new(&Default::default()),
+        &Default::default(),
+        &shut_set,
+    );
+    assert_eq!(
+        shut.groups[0].modules[0].icon.as_ref().unwrap().icon,
+        crate::icon::Icon::parse("memory").unwrap()
+    );
+    assert_eq!(
+        shut.groups[0].modules[0].foreground,
+        Color::parse("#ff0000").unwrap()
+    );
 }

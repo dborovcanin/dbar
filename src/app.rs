@@ -263,6 +263,8 @@ impl Wordings {
 struct Travels {
     /// Islands between open and shut.
     folds: Folds,
+    /// Modules between open and shut, which is the same travel one level down.
+    module_folds: Folds,
     /// Modules between one wording and the next.
     wordings: Wordings,
     /// Whether a timer is already moving them along.
@@ -274,10 +276,14 @@ impl Travels {
     /// to be drawn again.
     fn step(&mut self, now: std::time::Instant) -> (bool, bool) {
         let (folding, folds_changed) = self.folds.step(now);
+        let (module_folding, module_folds_changed) = self.module_folds.step(now);
         let (switching, wordings_changed) = self.wordings.step(now);
-        let going = folding || switching;
+        let going = folding || module_folding || switching;
         self.scheduled = going;
-        (going, folds_changed || wordings_changed)
+        (
+            going,
+            folds_changed || module_folds_changed || wordings_changed,
+        )
     }
 
     /// Whether a travel has started that nothing is moving along yet.
@@ -285,7 +291,8 @@ impl Travels {
     /// Says so once and then claims the job, the way a command starting claims the
     /// spinner: two timers on one travel would step it twice as fast.
     fn claim(&mut self) -> bool {
-        if self.scheduled || (self.folds.idle() && self.wordings.idle()) {
+        if self.scheduled || (self.folds.idle() && self.module_folds.idle() && self.wordings.idle())
+        {
             return false;
         }
         self.scheduled = true;
@@ -1470,6 +1477,39 @@ impl App {
             .turn(name, f32::from(u8::from(shut)), over);
     }
 
+    /// Turn a module's fold around, and set it travelling if the config asked for that.
+    ///
+    /// The settled state flips at once whether or not anything is animated, the same way a
+    /// group's does, so a click is never lost and a fold caught half way still knows which
+    /// end it is heading for.
+    fn fold_module(&mut self, name: String) {
+        let shut = !self.collapsed.remove(&name);
+        if shut {
+            self.collapsed.insert(name.clone());
+        }
+        let Some(over) = self.module_fold_time(&name) else {
+            // Nothing to unwind for a module whose config asks for no travel, but one
+            // whose config changed under a reload could still have one in flight.
+            self.travels.module_folds.settle(&name);
+            return;
+        };
+        self.travels
+            .module_folds
+            .turn(name, f32::from(u8::from(shut)), over);
+    }
+
+    /// How long this module's fold is meant to take, if it takes any time at all.
+    fn module_fold_time(&self, name: &str) -> Option<std::time::Duration> {
+        self.config
+            .positions
+            .iter()
+            .flat_map(|position| &position.groups)
+            .flat_map(|group| &group.modules)
+            .find(|module| module.name == name)
+            .and_then(|module| module.collapse.as_ref())
+            .and_then(|collapse| collapse.animation)
+    }
+
     /// How long this group's fold is meant to take, if it takes any time at all.
     fn fold_time(&self, name: &str) -> Option<std::time::Duration> {
         self.config
@@ -1712,6 +1752,7 @@ impl App {
             collapsed_groups,
             switching: &travels.wordings.at,
             folding: &travels.folds.at,
+            module_folding: &travels.module_folds.at,
             waiting,
             spin: *spin,
             tray,
@@ -1942,9 +1983,7 @@ impl App {
                 let Some(name) = named else {
                     return;
                 };
-                if !self.collapsed.remove(&name) {
-                    self.collapsed.insert(name);
-                }
+                self.fold_module(name);
                 self.invalidate();
             }
             // Nothing on the module wanted the press, so whatever it is showing gets it.

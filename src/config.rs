@@ -493,7 +493,7 @@ struct RawStyle {
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawCollapsedGroup {
+struct RawCollapsedStyle {
     style: Option<String>,
     #[serde(flatten)]
     overrides: RawStyle,
@@ -507,7 +507,7 @@ struct RawGroup {
     collapse_button: Option<Button>,
     /// How long the fold takes. Absent means it happens between one frame and the next.
     collapse_animation: Option<String>,
-    collapsed: Option<RawCollapsedGroup>,
+    collapsed: Option<RawCollapsedStyle>,
     #[serde(default)]
     modules: Vec<String>,
     background: Option<String>,
@@ -635,6 +635,10 @@ struct RawModule {
     alt_button: Option<Button>,
     /// Which button folds the module down to its icon. Defaults to the right.
     collapse_button: Option<Button>,
+    /// How long the fold takes: "150ms". Absent folds between one frame and the next.
+    collapse_animation: Option<String>,
+    /// What the module wears folded down, when that should differ from what it wears open.
+    collapsed: Option<RawCollapsedStyle>,
     /// Which button reads this module's source again. No default: a button is claimed
     /// only where the config asks for one.
     refresh_button: Option<Button>,
@@ -866,6 +870,26 @@ pub struct GroupCollapse {
     pub animation: Option<Duration>,
 }
 
+/// What folding a module down to its icon does, for a module the config lets fold.
+///
+/// Shaped like `GroupCollapse` because it is the same idea one level down: which button
+/// does it, how long it takes, and what is worn once it has.
+#[derive(Debug, Clone)]
+pub struct ModuleCollapse {
+    pub button: Button,
+    /// What the folded module is drawn in, for one that wrote a `collapsed` table.
+    ///
+    /// `None` keeps whatever the module would have worn open, which is what folding always
+    /// did: a paused player stays paused-coloured while it is a single icon. Writing the
+    /// table asks for something definite instead, and then it is that rather than the state
+    /// rules - the same trade `[group.*.collapsed]` already makes.
+    pub style: Option<Style>,
+    /// How long the module takes to reach its other width, if it travels at all.
+    ///
+    /// Absent is a fold in one redraw, which is the default and costs nothing at idle.
+    pub animation: Option<Duration>,
+}
+
 #[derive(Debug, Clone)]
 pub struct Group {
     pub name: String,
@@ -1013,12 +1037,10 @@ pub struct Module {
     pub signal: Option<i32>,
     /// What a click or a scroll here operates, and by how much where that means anything.
     pub control: Option<(Control, f64)>,
-    /// Whether a right click folds this module down to its icon.
-    pub collapsible: bool,
+    /// How this module folds down to its icon, for one the config lets fold.
+    pub collapse: Option<ModuleCollapse>,
     /// Which button moves through `format_alt`. Meaningless without further wordings.
     pub alt_button: Button,
-    /// Which button folds the module down to its icon. Meaningless unless `collapsible`.
-    pub collapse_button: Button,
     /// Which button reads this module's source again, when the config gives one that job.
     pub refresh_button: Option<Button>,
     /// Which button mutes and unmutes, for a module that operates the volume. None where
@@ -2369,15 +2391,66 @@ fn resolve_group(
             ),
             None => None,
         };
-        // Folding a module with no icon leaves an empty box on the bar, and no way back:
-        // there would be nothing left to click on.
         let collapsible = raw_module.and_then(|m| m.collapsible).unwrap_or(false);
-        if collapsible && style.icon.is_none() {
-            bail!(
-                "module {module_name:?} is collapsible but has no icon; folded down it \
-                 would leave nothing to see or click"
-            );
-        }
+        let collapse_button = raw_module
+            .and_then(|m| m.collapse_button)
+            .unwrap_or(Button::Right);
+        // What the module wears folded, for one that asked to wear something else. Built
+        // on the module's own style rather than on the bar's, so a `collapsed` table says
+        // only what differs - which for most of them is the icon and nothing besides.
+        let collapsed_style = raw_module
+            .and_then(|m| m.collapsed.as_ref())
+            .map(|collapsed| {
+                let start = match &collapsed.style {
+                    Some(named) => styles
+                        .get(named)
+                        .cloned()
+                        .ok_or_else(|| anyhow!("unknown style {named:?}"))?,
+                    None => style.clone(),
+                };
+                start.overlay(&collapsed.overrides, palette)
+            })
+            .transpose()
+            .with_context(|| format!("in [module.{module_name}.collapsed]"))?;
+        let collapse_animation = raw_module
+            .and_then(|m| m.collapse_animation.as_deref())
+            .map(parse_duration)
+            .transpose()
+            .with_context(|| format!("in [module.{module_name}]: collapse_animation"))?;
+        let collapse = if collapsible {
+            // Folding a module with no icon leaves an empty box on the bar, and no way
+            // back: there would be nothing left to see or click.
+            let worn = collapsed_style.as_ref().unwrap_or(&style);
+            let Some(icon) = &worn.icon else {
+                bail!(
+                    "module {module_name:?} is collapsible but has no icon; folded down it \
+                     would leave nothing to see or click"
+                );
+            };
+            check_collapsed_icon(icon, worn, &format!("module {module_name:?}"))?;
+            if let Some(animation) = collapse_animation
+                && animation > LONGEST_ANIMATION
+            {
+                bail!(
+                    "[module.{module_name}]: collapse_animation is {animation:?}, longer \
+                     than {LONGEST_ANIMATION:?} - the module redraws at screen rate for \
+                     the whole of it"
+                );
+            }
+            Some(ModuleCollapse {
+                button: collapse_button,
+                style: collapsed_style,
+                animation: collapse_animation,
+            })
+        } else {
+            if collapse_animation.is_some() {
+                bail!("[module.{module_name}]: collapse_animation without collapsible");
+            }
+            if collapsed_style.is_some() {
+                bail!("[module.{module_name}.collapsed]: a collapsed style without collapsible");
+            }
+            None
+        };
 
         let controls = raw_module.and_then(|m| m.controls).unwrap_or(false);
         let control = match (scroll, controls) {
@@ -2454,9 +2527,6 @@ fn resolve_group(
         let alt_button = raw_module
             .and_then(|m| m.alt_button)
             .unwrap_or(Button::Left);
-        let collapse_button = raw_module
-            .and_then(|m| m.collapse_button)
-            .unwrap_or(Button::Right);
         // Muting is the volume's alone. A key naming a button on a module with nothing to
         // mute is a button that would be present, spelled correctly and ignored.
         if raw_module.and_then(|m| m.mute_button).is_some()
@@ -2499,9 +2569,8 @@ fn resolve_group(
             interval,
             signal,
             control,
-            collapsible,
+            collapse,
             alt_button,
-            collapse_button,
             refresh_button,
             // Carried only where there is something to mute, so a press on anything else
             // falls through to whatever the module was already forwarding it to.
@@ -2586,9 +2655,8 @@ fn resolve_group(
                 interval: None,
                 signal: None,
                 control: None,
-                collapsible: false,
+                collapse: None,
                 alt_button: Button::Left,
-                collapse_button: Button::Right,
                 refresh_button: None,
                 mute_button: None,
                 on_click: None,

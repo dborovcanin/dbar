@@ -110,6 +110,18 @@ padding = 4
 background = "#00000000" # default: transparent
 radius = 0               # default: 0
 min_width = 0            # default: 0
+# An icon is written one way everywhere one can be written, including a
+# workspace's and the one a fold leaves behind. `$name` is one of dbar's own
+# vector icons, drawn as geometry at `icon_size`; anything else is text, shaped
+# with the font in front of the wording, which is how an icon font's glyph or an
+# emoji gets onto the bar. `none` is no icon at all.
+#
+# A misspelled `$name` is a startup error. A glyph cannot be misspelled, so
+# there is nothing to check and nothing is claimed about it - if the font has no
+# such character, the font decides what to draw.
+#
+# `icon_size` and `icon_gap` place geometry and mean nothing to a glyph, which is
+# as big as the font makes it and is separated from the wording by a space.
 icon = "none"            # default: none
 icon_size = 20           # default: 1.6x the font size
 icon_gap = 5             # default: a quarter of the icon size
@@ -786,6 +798,18 @@ icon = "$brightness"
 # nothing left to see or click, and that is a startup error rather than a bar
 # with a hole in it.
 #
+# `collapse_animation` is how long that takes, and works the way a group's does:
+# leave it out and the fold happens in one redraw, which is the default and costs
+# nothing at idle. While one is on its way the module redraws at about the rate
+# the screen refreshes and stops the moment it arrives.
+#
+# `[module.*.collapsed]` is what the module wears folded, when that should differ
+# from what it wears open. It starts from the module's own style, so it says only
+# what changes - usually the icon, so the thing left on the bar can show what a
+# click will bring back. Leave the table out and a folded module keeps whatever it
+# would have worn, state rules included: a paused player stays paused-coloured
+# while it is a single icon.
+#
 # `alt_button` and `collapse_button` say which button does each of those, and
 # `on_click` gives a button a program of your own - see the clock at the end of
 # this file. Between them, `controls` and `scroll`, a module has three buttons to
@@ -795,6 +819,7 @@ icon = "$brightness"
 source = "media"
 controls = true
 collapsible = true
+collapse_animation = "150ms"
 format = " {$artist  }$title "
 format_alt = [" $album ", " $player "]
 # `controls` gives the left button to play and pause, so the further wordings are moved
@@ -810,6 +835,14 @@ field = "status"
 equals = "paused"
 foreground = "$subtext"
 icon = "$play"
+
+# Folded, the module is one icon, and this is the one. Written out because the
+# open module's icon is a button that says what a click will do, and a click on
+# the folded module unfolds it instead - so the icon has to say that and not
+# "pause". Everything else is inherited from the module itself.
+[module.media.collapsed]
+icon = "$play"
+foreground = "$subtext"
 
 # A disk module is pointed at a filesystem; without `path` it is the root. The
 # percentage leaves out the reserve only root may write into, so a disk with no

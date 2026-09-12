@@ -49,6 +49,11 @@ pub struct Inputs<'a> {
     /// that moves. One that has arrived is not in here at all, and `collapsed_groups` says
     /// which end it arrived at.
     pub folding: &'a std::collections::HashMap<String, f32>,
+    /// How far each module's own fold has got, on the same terms as `folding`.
+    ///
+    /// Kept apart from the islands': a module and the group holding it can be folding at
+    /// once, and they are two travels with two ends, not one shared number.
+    pub module_folding: &'a std::collections::HashMap<String, f32>,
     /// Command sources with a run on its way that has been out long enough to say so.
     ///
     /// Which run it is does not matter here, only that one is happening: a module waiting
@@ -1338,12 +1343,20 @@ fn size_group(
         // The i3bar protocol uses an empty `full_text` to mean "hide this block". A module
         // folded down is empty on purpose and stays, because its icon is still there, and
         // so does one whose spinner is the only thing it has to show.
-        let folded = module.collapsible && inputs.collapsed.contains(&module.name);
-        // Whether a click has this module between two wordings. Asked the way `folding`
-        // is: a bar with nothing travelling pays nothing for the question, not even the
-        // hash of a module's own name. A module folded down to its icon says the same
-        // thing in both wordings, so there is nothing for it to travel between.
-        let travelling = match inputs.switching.is_empty() || folded {
+        let shut = module.collapse.is_some() && inputs.collapsed.contains(&module.name);
+        // How far a fold has got, for a module still on its way between its two shapes.
+        // Asked the way a group's is: a bar with nothing folding pays nothing for the
+        // question, not even the hash of a module's own name.
+        let folding = match inputs.module_folding.is_empty() {
+            true => None,
+            false => inputs.module_folding.get(&module.name).copied(),
+        };
+        // Settled only once the travel has arrived; until then both shapes are wanted.
+        let folded = shut && folding.is_none();
+        // Whether a click has this module between two wordings. A module folded down to
+        // its icon says the same thing in both wordings, so there is nothing for it to
+        // travel between - and one that is folding has its width spoken for already.
+        let travelling = match inputs.switching.is_empty() || shut || folding.is_some() {
             true => None,
             false => inputs.switching.get(&module.name).copied(),
         };
@@ -1392,8 +1405,16 @@ fn size_group(
         // a rule can key on the text, so each wording resolves its own style, its own icon
         // and its own padding, and measuring the one being left behind in the style the
         // one arriving happens to wear is a first frame that jumps.
-        let fitted = |raw: String, text: &mut dyn Measure| -> Fitted {
-            let style = resolve(false, &raw);
+        let fitted = |raw: String, folded: bool, text: &mut dyn Measure| -> Fitted {
+            // What a folded module wears, for one that asked to wear something definite.
+            // Resolved before the rules so the table wins outright, the way a group's does.
+            let style = match (
+                folded,
+                module.collapse.as_ref().and_then(|c| c.style.as_ref()),
+            ) {
+                (true, Some(worn)) => worn.clone(),
+                _ => resolve(false, &raw),
+            };
             // A wording that renders empty hides the module, which is what the i3bar
             // protocol means by an empty `full_text`. A module with a picture to show is
             // not empty whatever its wording says: a tray item is its icon, and most of
@@ -1552,14 +1573,33 @@ fn size_group(
                 width,
             }
         };
-        let arriving = fitted(content, text);
-        // The width a module a click has set travelling is coming from. A wording that is
-        // not drawn is a width of nothing at either end of a travel rather than a module
-        // that is not there: travelled on to, the box shrinks away instead of being taken
-        // off between two frames, and travelled from, it grows out of nothing the way it
-        // went in.
-        let leaving = travelling
-            .map(|leaving| fitted(wording_at(module, leaving.from).render(&values), text));
+        // What the module is going to and what it is coming from. A wording that is not
+        // drawn is a width of nothing at either end of a travel rather than a module that
+        // is not there: travelled on to, the box shrinks away instead of being taken off
+        // between two frames, and travelled from, it grows out of nothing the way it went
+        // in.
+        //
+        // A fold is the same two ends, reached by fitting one wording twice rather than
+        // two wordings once. `at` is how shut it is whichever way it is heading, so the
+        // shape it is measured from is always the open one.
+        let (arriving, leaving) = match folding {
+            Some(_) => (
+                fitted(content.clone(), true, text),
+                Some(fitted(content, false, text)),
+            ),
+            None => (
+                fitted(content, folded, text),
+                travelling.map(|leaving| {
+                    fitted(
+                        wording_at(module, leaving.from).render(&values),
+                        folded,
+                        text,
+                    )
+                }),
+            ),
+        };
+        // One number for both kinds of travel, since a module is never on two at once.
+        let at = folding.or(travelling.map(|leaving| leaving.at));
         if !arriving.drawn && leaving.as_ref().is_none_or(|leaving| !leaving.drawn) {
             continue;
         }
@@ -1567,8 +1607,8 @@ fn size_group(
             .as_ref()
             .map_or(arriving.drawn, |leaving| leaving.drawn);
         let to_drawn = arriving.drawn;
-        let presence = match travelling {
-            Some(Leaving { at, .. }) => {
+        let presence = match at {
+            Some(at) => {
                 f32::from(u8::from(from_drawn))
                     + (f32::from(u8::from(to_drawn)) - f32::from(u8::from(from_drawn))) * at
             }
@@ -1588,8 +1628,8 @@ fn size_group(
         } = arriving;
         // What it draws eases from one wording's width to the other's, and what it charges
         // stays at the wider of them for the whole travel.
-        let (width, reserve) = match (travelling, was) {
-            (Some(Leaving { at, .. }), Some(was)) => (was + (width - was) * at, width.max(was)),
+        let (width, reserve) = match (at, was) {
+            (Some(at), Some(was)) => (was + (width - was) * at, width.max(was)),
             _ => (width, width),
         };
         // A module with nothing left to draw in is left out entirely, rather than drawn
@@ -1612,7 +1652,7 @@ fn size_group(
             // Cut at its own edge while it is travelling: the wording it is going to was
             // fitted to the width it lands at, which is not the width it is being drawn
             // in until it arrives.
-            clipped: travelling.is_some(),
+            clipped: at.is_some(),
             text_width,
             hover_style,
             icon_advance,
@@ -1627,8 +1667,11 @@ fn size_group(
             // How many views this module has in all, so a click knows where it wraps.
             alt: (!module.format_alt.is_empty()).then(|| module.format_alt.len() + 1),
             alt_button: module.alt_button,
-            collapsible: module.collapsible,
-            collapse_button: module.collapse_button,
+            collapsible: module.collapse.is_some(),
+            collapse_button: module
+                .collapse
+                .as_ref()
+                .map_or(Button::Right, |collapse| collapse.button),
             refresh: module.refresh_button,
             mute: module.mute_button,
             // Only where there is somewhere to scroll to: a command reporting on one
@@ -1637,7 +1680,7 @@ fn size_group(
             // Named only where something on the module answers to a gesture, so an
             // ordinary module costs no allocation on the path that runs every frame.
             name: (!module.format_alt.is_empty()
-                || module.collapsible
+                || module.collapse.is_some()
                 || module.refresh_button.is_some()
                 || pages > 1)
                 .then(|| module.name.clone()),

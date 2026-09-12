@@ -134,13 +134,14 @@ The current bar supports:
 - rounded bar, group and module backgrounds with transparency;
 - vector line, slant, chevron, notch, round and curve separators;
 - per-side group ends, joined groups, clipping and overlap control;
-- built-in vector icons, graded icons and themed tray artwork;
+- built-in vector icons, written glyphs, graded icons and themed tray artwork;
 - hover styles and state rules over typed fields;
 - direct brightness, volume and media controls;
 - user-supplied click commands;
 - provider click forwarding;
 - alternate wordings, module collapse and group collapse;
-- optional bounded animations for group collapse and wording changes; and
+- optional bounded animations for group collapse, module collapse and wording
+  changes; and
 - command progress spinners that exist only while a slow command is running.
 
 ## 5. Standalone configuration
@@ -230,6 +231,11 @@ The main configuration tables are:
 - `[group.*]` for modules, spacing, separators, ends and collapse;
 - `[module.*]` for a source, format, state rules and interaction; and
 - `[i3bar]` only when an external provider is used.
+
+An icon is written the same way in every slot that takes one, a workspace's and
+a fold's included: `$name` is one of the built-in vector icons, sized by
+`icon_size`, and any other string is text shaped with the font. A misspelled
+`$name` is a configuration error; a glyph makes no claim that can be checked.
 
 Unknown keys, invalid field references, incompatible options, conflicting
 button assignments, and impossible geometry are configuration errors. A key
@@ -483,7 +489,7 @@ features that claim the same button on one module. Supported actions include:
 - source refresh;
 - paging command results;
 - alternate wording selection;
-- module collapse; and
+- module collapse, with or without travel; and
 - group collapse.
 
 Hover is paint-only. It may change foreground, background and radius, but not
@@ -497,21 +503,28 @@ Users can request a shell explicitly when shell syntax is genuinely wanted.
 
 Animation is an accent, not a runtime mode.
 
-Two user-triggered changes currently support optional smooth travel:
+Three user-triggered changes currently support optional smooth travel:
 
-- `collapse_animation` moves a group between its expanded and collapsed widths;
+- `collapse_animation` on a group moves it between its expanded and collapsed
+  widths;
+- `collapse_animation` on a module moves it between its wording and its icon;
 - `alt_animation` moves a module between wording widths.
 
-Both are immediate by default. When enabled, they use a smoothstep progression,
+All three are immediate by default. When enabled, they use a smoothstep progression,
 are limited to ten seconds, and share one 16 ms timer. The timer is created only
 while at least one travel is active and is dropped on the frame the last travel
 arrives. Wayland frame callbacks cap actual presentation at the compositor's
 pace.
 
-A group fold can reverse while in flight without jumping back to an endpoint.
+A fold, at either level, can reverse while in flight without jumping back to an
+endpoint. Module folds and group folds are tracked separately, because a module
+and the group holding it can be travelling at the same time and their two ends
+are not the same two ends.
+
 A wording choice settles logically when clicked even while its visual width is
-still travelling. Both transitions reserve the wider affected width for their
-run, preventing neighbours from being truncated differently on every frame.
+still travelling, and so does a fold. Every transition reserves the wider
+affected width for its run, preventing neighbours from being truncated
+differently on every frame.
 
 A command spinner is a separate, deliberately slower animation. It appears only
 after a command has been outstanding for 400 ms, steps every 60 ms while needed,

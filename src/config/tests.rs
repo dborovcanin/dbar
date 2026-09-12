@@ -539,7 +539,16 @@ fn folding_answers_to_the_right_button_unless_told_otherwise() {
         "source = \"cpu\"\ncollapsible = true\nicon = \"$cpu\"",
     ))
     .expect("a module that folds");
-    assert_eq!(cfg.modules().next().unwrap().collapse_button, Button::Right);
+    assert_eq!(
+        cfg.modules()
+            .next()
+            .unwrap()
+            .collapse
+            .as_ref()
+            .unwrap()
+            .button,
+        Button::Right
+    );
 
     // Moved off the right, which then leaves the right free for something else.
     let moved = Config::parse(&one_module(
@@ -547,7 +556,7 @@ fn folding_answers_to_the_right_button_unless_told_otherwise() {
         ))
         .expect("nothing is claimed twice");
     let module = moved.modules().next().unwrap();
-    assert_eq!(module.collapse_button, Button::Middle);
+    assert_eq!(module.collapse.as_ref().unwrap().button, Button::Middle);
     assert!(module.on_click.is_some());
 }
 
@@ -1713,4 +1722,92 @@ fn group_collapse_defaults_requirements_and_style_cascade() {
     // Group reservation must not relax conflicting bindings inside the child.
     let error = Config::parse("[left]\ngroups = ['g']\n[group.g]\nmodules = ['m']\ncollapsible = true\ncollapse_button = 'left'\ncollapsed = { icon = '$cpu' }\n[module.m]\nformat_alt = 'alt'\non_click = { left = ['true'] }").unwrap_err();
     assert!(format!("{error:#}").contains("on_click.left"));
+}
+
+/// The module half of a fold answers to the same rules the group half does: the keys mean
+/// nothing without `collapsible`, the icon has to be there to click on, and an animation
+/// long enough to be felt as a hang is refused when the config is read.
+#[test]
+fn module_collapse_requires_an_icon_and_rejects_keys_that_mean_nothing() {
+    for (extra, message) in [
+        (
+            "source = \"cpu\"\ncollapsible = true",
+            "collapsible but has no icon",
+        ),
+        (
+            "source = \"cpu\"\ncollapse_animation = \"150ms\"",
+            "collapse_animation without collapsible",
+        ),
+        (
+            "source = \"cpu\"\ncollapsed = { icon = \"$cpu\" }",
+            "without collapsible",
+        ),
+        (
+            "source = \"cpu\"\ncollapsible = true\nicon = \"$cpu\"\ncollapse_animation = \"30s\"",
+            "longer than",
+        ),
+        (
+            "source = \"cpu\"\ncollapsible = true\ncollapsed = { icon = \"$bogus\" }",
+            "unknown native icon",
+        ),
+        (
+            "source = \"cpu\"\ncollapsible = true\ncollapsed = { style = \"missing\" }",
+            "unknown style",
+        ),
+        (
+            "source = \"cpu\"\ncollapsible = true\nicon = \"$cpu\"\nicon_size = 0",
+            "positive finite icon_size",
+        ),
+        (
+            "source = \"cpu\"\ncollapsible = true\ncollapsed = { icon = \"\" }",
+            "nothing to click",
+        ),
+    ] {
+        let error = format!("{:#}", Config::parse(&one_module(extra)).unwrap_err());
+        assert!(error.contains(message), "{extra:?} gave {error}");
+    }
+
+    // A collapsed table starts from the module's own style, so it says only what differs.
+    let cfg = Config::parse(&one_module(
+        "source = \"cpu\"\ncollapsible = true\nicon = \"$cpu\"\npadding = 7\ncollapse_animation = \"150ms\"\ncollapsed = { icon = \"$memory\" }",
+    ))
+    .expect("a module that folds into its own style");
+    let collapse = cfg.modules().next().unwrap().collapse.as_ref().unwrap();
+    assert_eq!(
+        collapse.animation,
+        Some(std::time::Duration::from_millis(150))
+    );
+    let worn = collapse.style.as_ref().expect("a collapsed style");
+    assert_eq!(worn.icon, Icon::parse("memory").map(IconSpec::Native));
+    assert_eq!(worn.padding, 7.0);
+
+    // Without the table there is nothing to wear but what it already had.
+    let plain = Config::parse(&one_module(
+        "source = \"cpu\"\ncollapsible = true\nicon = \"$cpu\"",
+    ))
+    .expect("a module that folds");
+    assert!(
+        plain
+            .modules()
+            .next()
+            .unwrap()
+            .collapse
+            .as_ref()
+            .unwrap()
+            .style
+            .is_none()
+    );
+}
+
+/// A glyph in the icon slot is enough to fold to, which a native icon's size rules are
+/// not asked about: there is no `icon_size` for text, and requiring one would refuse a
+/// module whose icon comes from the font.
+#[test]
+fn a_module_can_fold_to_a_written_icon_without_an_icon_size() {
+    let cfg = Config::parse(&one_module(
+        "source = \"cpu\"\ncollapsible = true\nicon = \"\u{f0e7}\"\nicon_size = 0",
+    ))
+    .expect("a glyph needs no icon_size");
+    let collapse = cfg.modules().next().unwrap().collapse.as_ref().unwrap();
+    assert_eq!(collapse.button, Button::Right);
 }
