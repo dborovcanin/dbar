@@ -38,7 +38,11 @@ signal-hook = { version = "0.4.4", default-features = false, features = [
   "iterator",
 ] }
 smithay-client-toolkit = "0.21.1"
-tiny-skia = "0.12.0"
+# Held at resvg's version deliberately: a mismatch puts two rasterisers, two path
+# crates and two PNG decoders in the binary, and dbar calls into both - icon.rs
+# decodes PNG through this one and renders SVG through resvg's. Move it only
+# together with resvg.
+tiny-skia = "0.11.4"
 toml = "1.1.5"
 wayland-client = "0.31.15"
 
