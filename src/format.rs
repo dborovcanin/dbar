@@ -338,6 +338,20 @@ impl<'a> Parser<'a> {
         Ok(Alt::Field { name, func })
     }
 
+    /// Step over spaces between the pieces of an argument list.
+    ///
+    /// Only inside `(...)`: a format is mostly literal text, where a space is the space it
+    /// says it is. Between an argument's name, its `:` and the comma after it, a space is
+    /// the ordinary way to write a list and was refused - `.n(d:1, w:4)` did not parse.
+    fn skip_space(&mut self) {
+        while let Some(c) = self.peek() {
+            if !c.is_ascii_whitespace() {
+                break;
+            }
+            self.pos += c.len_utf8();
+        }
+    }
+
     fn ident(&mut self) -> String {
         let start = self.pos;
         while let Some(c) = self.peek() {
@@ -385,14 +399,20 @@ impl<'a> Parser<'a> {
         if !self.eat('(') {
             bail!("format function .{name} is written .{name}(), with its parentheses");
         }
-        while !self.eat(')') {
+        loop {
+            self.skip_space();
+            if self.eat(')') {
+                break;
+            }
             let key = self.ident();
             if key.is_empty() {
                 bail!("expected an argument name in .{name}()");
             }
+            self.skip_space();
             if !self.eat(':') {
                 bail!("argument {key:?} in .{name}() needs a `:` and a value");
             }
+            self.skip_space();
             let value = if self.peek() == Some('\'') {
                 self.quoted()?
             } else {
@@ -406,7 +426,9 @@ impl<'a> Parser<'a> {
                 self.input[start..self.pos].trim().to_string()
             };
             args.push((key, value));
+            self.skip_space();
             if self.eat(',') {
+                self.skip_space();
                 if self.peek() == Some(')') {
                     bail!("trailing comma in .{name}() arguments");
                 }
@@ -1289,10 +1311,33 @@ mod tests {
         }
     }
 
+    /// A space between the pieces of an argument list is the ordinary way to write one.
+    ///
+    /// The grammar never said otherwise, and the parser refused every one of these.
+    #[test]
+    fn an_argument_list_may_be_written_with_spaces() {
+        for written in [
+            "$a.n(d:1,w:4)",
+            "$a.n(d:1, w:4)",
+            "$a.n( d:1 )",
+            "$a.n(d:1 , w:4)",
+            "$a.n( )",
+            "$a.time(f:'%H:%M')",
+            "$a.time( f:'%H:%M' )",
+        ] {
+            Format::parse(written).unwrap_or_else(|e| panic!("{written} should parse: {e:#}"));
+        }
+    }
+
     /// The parser and the published grammar have one spelling for an argument list.
     #[test]
     fn a_function_argument_list_has_no_trailing_comma() {
-        for written in ["$a.n(d:1,)", "$a.n(d:1,w:4,)"] {
+        for written in [
+            "$a.n(d:1,)",
+            "$a.n(d:1,w:4,)",
+            "$a.n(d:1, )",
+            "$a.n(d:1 , )",
+        ] {
             let refused = Format::parse(written)
                 .err()
                 .unwrap_or_else(|| panic!("{written} should be refused"));
