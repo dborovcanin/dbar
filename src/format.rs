@@ -23,7 +23,7 @@
 //! item        ::= literal | placeholder | group
 //! placeholder ::= ( '$' name | '${' name '}' ) ( '.' func )? ( '|' alternative )*
 //! group       ::= '{' item* '}'
-//! func        ::= ident '(' arg ( ',' arg )* ')'
+//! func        ::= ident '(' ( arg ( ',' arg )* )? ')'
 //! arg         ::= ident ':' ( number | ident | quoted )
 //! escape      ::= '$$' | '{{' | '}}'
 //! ```
@@ -375,37 +375,44 @@ impl<'a> Parser<'a> {
 
     fn func(&mut self) -> Result<Func> {
         let name = self.ident();
+        if name.is_empty() {
+            bail!("expected a format function after `.`");
+        }
         let mut args: Vec<(String, String)> = Vec::new();
-        if self.eat('(') {
-            while !self.eat(')') {
-                let key = self.ident();
-                if key.is_empty() {
-                    bail!("expected an argument name in .{name}()");
-                }
-                if !self.eat(':') {
-                    bail!("argument {key:?} in .{name}() needs a `:` and a value");
-                }
-                let value = if self.peek() == Some('\'') {
-                    self.quoted()?
-                } else {
-                    let start = self.pos;
-                    while let Some(c) = self.peek() {
-                        if c == ',' || c == ')' {
-                            break;
-                        }
-                        self.pos += c.len_utf8();
-                    }
-                    self.input[start..self.pos].trim().to_string()
-                };
-                args.push((key, value));
-                if self.eat(',') {
-                    continue;
-                }
-                if !self.eat(')') {
-                    bail!("unclosed `(` in .{name}()");
-                }
-                break;
+        // Required, including for the functions that take nothing. `.up` was accepted
+        // alongside `.up()` and meant the same thing, which is one spelling more than the
+        // grammar has ever described and one more than the documentation teaches.
+        if !self.eat('(') {
+            bail!("format function .{name} is written .{name}(), with its parentheses");
+        }
+        while !self.eat(')') {
+            let key = self.ident();
+            if key.is_empty() {
+                bail!("expected an argument name in .{name}()");
             }
+            if !self.eat(':') {
+                bail!("argument {key:?} in .{name}() needs a `:` and a value");
+            }
+            let value = if self.peek() == Some('\'') {
+                self.quoted()?
+            } else {
+                let start = self.pos;
+                while let Some(c) = self.peek() {
+                    if c == ',' || c == ')' {
+                        break;
+                    }
+                    self.pos += c.len_utf8();
+                }
+                self.input[start..self.pos].trim().to_string()
+            };
+            args.push((key, value));
+            if self.eat(',') {
+                continue;
+            }
+            if !self.eat(')') {
+                bail!("unclosed `(` in .{name}()");
+            }
+            break;
         }
         build_func(&name, &args)
     }
@@ -1250,5 +1257,66 @@ mod tests {
         }];
         assert!(Format::parse("{$nope}").unwrap().check(&spec).is_err());
         assert!(Format::parse("$text|$nope").unwrap().check(&spec).is_err());
+    }
+
+    /// A format function is written with its parentheses, whether or not it takes anything.
+    ///
+    /// The grammar has always said so; the parser used to accept the bare name as well, so
+    /// `.up` and `.up()` were two spellings of one thing and only one of them was taught.
+    #[test]
+    fn a_function_is_written_with_its_parentheses() {
+        for written in [
+            "$a.up()",
+            "$a.low()",
+            "$a.n()",
+            "$a.n(d:1)",
+            "$a.n(d:1,w:4)",
+        ] {
+            Format::parse(written).unwrap_or_else(|e| panic!("{written} should parse: {e:#}"));
+        }
+        for written in ["$a.up", "$a.low", "$a.n"] {
+            let refused = Format::parse(written)
+                .err()
+                .unwrap_or_else(|| panic!("{written} should be refused"));
+            let error = format!("{refused:#}");
+            assert!(
+                error.contains("with its parentheses"),
+                "{written} gave {error}"
+            );
+        }
+    }
+
+    /// One function to a placeholder: what follows a complete call is ordinary text.
+    ///
+    /// `.up` after `.n(d:1)` is not a second function and not an error - the placeholder
+    /// ended at the `)`, and a bar that wanted to say ".up" out loud may.
+    #[test]
+    fn what_follows_a_finished_call_is_literal() {
+        let format = Format::parse("$a.n(d:1).up").expect("a call and then some text");
+        let mut fields = crate::status::Fields::default();
+        fields.set(
+            "a",
+            Value::Num {
+                v: 2.0,
+                unit: Unit::None,
+            },
+        );
+        assert_eq!(format.render(&fields), "2.0.up");
+    }
+
+    /// The `.` has to be followed by something, and says so rather than complaining about
+    /// a function whose name is empty.
+    #[test]
+    fn a_dot_with_no_function_after_it_says_so() {
+        let error = format!("{:#}", Format::parse("$a.").expect_err("refused"));
+        assert!(error.contains("expected a format function"), "{error}");
+    }
+
+    /// Taking no arguments is not the same as taking any: the grammar once required at
+    /// least one, which excluded the two functions documented as taking none.
+    #[test]
+    fn the_functions_that_take_nothing_still_refuse_arguments() {
+        let error = format!("{:#}", Format::parse("$a.up(d:1)").expect_err("refused"));
+        assert!(error.contains("takes no arguments"), "{error}");
     }
 }

@@ -429,7 +429,13 @@ format      ::= item*
 item        ::= literal | placeholder | group
 placeholder ::= ('$' name | '${' name '}') ('.' function)? ('|' alternative)*
 group       ::= '{' item* '}'
+function    ::= ident '(' (arg (',' arg)*)? ')'
+arg         ::= ident ':' (number | ident | quoted)
 ```
+
+A function is written with its parentheses whether or not it takes arguments, so
+`.up()` and not `.up`. One spelling, and one function to a placeholder: what
+follows a finished call is ordinary text.
 
 - A brace group disappears when a directly contained value is absent.
 - A fallback chain selects the first available field or quoted literal.
