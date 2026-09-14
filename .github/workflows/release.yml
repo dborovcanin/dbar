@@ -10,6 +10,15 @@ on:
 permissions:
   contents: write
 
+# One release at a time per tag. Two runs for the same tag each compile their
+# own binary, and a Rust release build is not byte-for-byte reproducible, so
+# the second overwrites the asset the first published and any checksum taken
+# from the first stops matching. Queueing rather than cancelling, because a run
+# that has already pushed to the AUR should be allowed to finish.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 

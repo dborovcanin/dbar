@@ -2,8 +2,11 @@
 
 # Brings the AUR packages up to a released version.
 #
-#   scripts/aur-publish.sh 0.5.0            update the PKGBUILDs and push both
-#   scripts/aur-publish.sh --no-push 0.5.0  update them and stop, for review
+#   scripts/aur-publish.sh 0.5.0             update the PKGBUILDs and push both
+#   scripts/aur-publish.sh --no-push 0.5.0   update them and stop, for review
+#   scripts/aur-publish.sh --pkgrel 2 0.5.0  republish a version whose packaging
+#                                            changed but whose source did not
+#   scripts/aur-publish.sh --only dbar-bin 0.5.0   leave the other package alone
 #
 # The checksums come from the files themselves rather than from anything typed
 # here, so the release has to exist before this runs: `dbar` needs the tag
@@ -21,14 +24,85 @@ die() {
     exit 1
 }
 
+# Checks every release asset against the checksum the release itself publishes.
+#
+# updpkgsums learns a sum by downloading, so it records whatever was being
+# served at that moment. A release built twice - two workflow runs for one tag,
+# an asset replaced by hand - serves two different binaries, and the sum can
+# end up naming one that is no longer there. The release publishes a .sha256
+# beside each asset; disagreeing with it means the download raced something,
+# and publishing that would hand every user a package that cannot install.
+verify_release_assets() {
+    srcinfo=$1
+    sources=$(sed -n 's/^\tsource = //p' "$srcinfo")
+    sums=$(sed -n 's/^\tsha256sums = //p' "$srcinfo")
+
+    line=0
+    while [ "$line" -lt "$(printf '%s\n' "$sources" | wc -l)" ]; do
+        line=$((line + 1))
+        source=$(printf '%s\n' "$sources" | sed -n "${line}p")
+        sum=$(printf '%s\n' "$sums" | sed -n "${line}p")
+
+        url=${source#*::}
+        case $url in
+        *"/releases/download/"*) ;;
+        *) continue ;;
+        esac
+
+        published=$(curl -fsSL "$url.sha256" 2>/dev/null | awk '{print $1}') || published=
+        if [ -z "$published" ]; then
+            printf 'no %s.sha256 to check against; trusting the download\n' \
+                "${url##*/}" >&2
+            continue
+        fi
+
+        [ "$sum" = "$published" ] || die "$(
+            printf '%s\n' \
+                "the checksum for ${url##*/} does not match the one the release publishes." \
+                "  downloaded now: $sum" \
+                "  release says:   $published" \
+                "Something replaced the asset after it was published - most often a" \
+                "second workflow run for the same tag. Nothing was pushed."
+        )"
+        printf 'checked %s against its published sha256\n' "${url##*/}"
+    done
+}
+
 push=yes
-if [ "${1-}" = --no-push ]; then
-    push=no
-    shift
-fi
+pkgrel=1
+only=
+while :; do
+    case ${1-} in
+    --no-push)
+        push=no
+        shift
+        ;;
+    # A released version whose packaging has to change - a checksum corrected,
+    # a dependency fixed - keeps its pkgver and counts up here instead, which
+    # is what tells everyone's helper that there is something new to take.
+    --pkgrel)
+        pkgrel=${2-}
+        case $pkgrel in
+        '' | *[!0-9]*) die "--pkgrel wants a number (got '${2-}')" ;;
+        esac
+        shift 2
+        ;;
+    # Repairing one package should not touch the other: a corrected checksum in
+    # dbar-bin is no reason for everyone building dbar from source to rebuild it.
+    --only)
+        only=${2-}
+        case $only in
+        dbar | dbar-bin) ;;
+        *) die "--only wants dbar or dbar-bin (got '${2-}')" ;;
+        esac
+        shift 2
+        ;;
+    *) break ;;
+    esac
+done
 
 version=${1-}
-[ -n "$version" ] || die "usage: $0 [--no-push] <version>"
+[ -n "$version" ] || die "usage: $0 [--no-push] [--pkgrel N] [--only PKG] <version>"
 case $version in
 v*) die "give the version without the leading v (got $version)" ;;
 esac
@@ -63,15 +137,15 @@ fi
 export GIT_SSH_COMMAND=$ssh_command
 
 for pkgname in dbar dbar-bin; do
+    [ -z "$only" ] || [ "$only" = "$pkgname" ] || continue
     dir=$root/packaging/aur/$pkgname
     [ -f "$dir/PKGBUILD" ] || die "missing $dir/PKGBUILD"
 
     printf '\n== %s %s ==\n' "$pkgname" "$version"
 
-    # pkgrel counts rebuilds of one version, so a new version starts it over.
     sed -i \
         -e "s/^pkgver=.*/pkgver=$version/" \
-        -e "s/^pkgrel=.*/pkgrel=1/" \
+        -e "s/^pkgrel=.*/pkgrel=$pkgrel/" \
         "$dir/PKGBUILD"
 
     # updpkgsums downloads every source and writes the real sums back, which is
@@ -86,6 +160,8 @@ for pkgname in dbar dbar-bin; do
     if grep -q 'sha256sums = SKIP' "$dir/.SRCINFO"; then
         die "$pkgname still has a SKIP checksum; updpkgsums did not run"
     fi
+
+    verify_release_assets "$dir/.SRCINFO"
 
     [ "$push" = yes ] || continue
 
@@ -104,7 +180,7 @@ for pkgname in dbar dbar-bin; do
     fi
 
     git -C "$checkout" add PKGBUILD .SRCINFO
-    git -C "$checkout" commit --quiet -m "Update to $version"
+    git -C "$checkout" commit --quiet -m "Update to $version-$pkgrel"
     # HEAD:master rather than master, because a clone of a package that does not
     # exist yet starts on whatever init.defaultBranch says, and the AUR wants
     # master either way.
