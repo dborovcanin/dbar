@@ -4,9 +4,15 @@
 #
 #   scripts/aur-publish.sh 0.5.0             update the PKGBUILDs and push both
 #   scripts/aur-publish.sh --no-push 0.5.0   update them and stop, for review
-#   scripts/aur-publish.sh --pkgrel 2 0.5.0  republish a version whose packaging
-#                                            changed but whose source did not
 #   scripts/aur-publish.sh --only dbar-bin 0.5.0   leave the other package alone
+#   scripts/aur-publish.sh --pkgrel 3 0.5.0  force a release number by hand
+#
+# The release number looks after itself. A version the AUR does not have yet
+# starts at 1; a version it already has keeps its number when nothing changed,
+# and counts up when something did. That counting is not cosmetic: a helper
+# decides whether to fetch by comparing version strings, so a corrected
+# checksum published under the number everyone already cached is a fix nobody
+# can see.
 #
 # The checksums come from the files themselves rather than from anything typed
 # here, so the release has to exist before this runs: `dbar` needs the tag
@@ -69,7 +75,7 @@ verify_release_assets() {
 }
 
 push=yes
-pkgrel=1
+pkgrel=
 only=
 while :; do
     case ${1-} in
@@ -77,9 +83,7 @@ while :; do
         push=no
         shift
         ;;
-    # A released version whose packaging has to change - a checksum corrected,
-    # a dependency fixed - keeps its pkgver and counts up here instead, which
-    # is what tells everyone's helper that there is something new to take.
+    # Only for overriding what the release number would work out to on its own.
     --pkgrel)
         pkgrel=${2-}
         case $pkgrel in
@@ -136,16 +140,14 @@ if [ -n "${AUR_SSH_KEY-}" ]; then
 fi
 export GIT_SSH_COMMAND=$ssh_command
 
-for pkgname in dbar dbar-bin; do
-    [ -z "$only" ] || [ "$only" = "$pkgname" ] || continue
-    dir=$root/packaging/aur/$pkgname
-    [ -f "$dir/PKGBUILD" ] || die "missing $dir/PKGBUILD"
-
-    printf '\n== %s %s ==\n' "$pkgname" "$version"
+# Rewrites one package's PKGBUILD at a version and release, and regenerates
+# everything that follows from it.
+regenerate() {
+    dir=$1 version=$2 release=$3
 
     sed -i \
         -e "s/^pkgver=.*/pkgver=$version/" \
-        -e "s/^pkgrel=.*/pkgrel=$pkgrel/" \
+        -e "s/^pkgrel=.*/pkgrel=$release/" \
         "$dir/PKGBUILD"
 
     # updpkgsums downloads every source and writes the real sums back, which is
@@ -154,6 +156,56 @@ for pkgname in dbar dbar-bin; do
     (cd "$dir" && updpkgsums)
     (cd "$dir" && makepkg --printsrcinfo >.SRCINFO)
     find "$dir" -mindepth 1 -not -name PKGBUILD -not -name .SRCINFO -delete
+}
+
+for pkgname in dbar dbar-bin; do
+    [ -z "$only" ] || [ "$only" = "$pkgname" ] || continue
+    dir=$root/packaging/aur/$pkgname
+    [ -f "$dir/PKGBUILD" ] || die "missing $dir/PKGBUILD"
+
+    printf '\n== %s %s ==\n' "$pkgname" "$version"
+
+    checkout=$(mktemp -d)
+    trap 'rm -rf "$checkout"' EXIT
+
+    # Read over https so that reviewing a release needs no credentials at all;
+    # pushing later swaps the remote for the one the key can write to. A package
+    # that is not on the AUR yet has nothing to clone and starts from nothing.
+    if git clone --quiet "https://aur.archlinux.org/$pkgname.git" "$checkout" 2>/dev/null &&
+        [ -f "$checkout/.SRCINFO" ]; then
+        published_version=$(sed -n 's/^\tpkgver = //p' "$checkout/.SRCINFO")
+        published_release=$(sed -n 's/^\tpkgrel = //p' "$checkout/.SRCINFO")
+    else
+        rm -rf "$checkout"
+        checkout=$(mktemp -d)
+        git init --quiet "$checkout"
+        published_version=
+        published_release=
+    fi
+
+    if [ -n "$pkgrel" ]; then
+        release=$pkgrel
+    elif [ "$published_version" = "$version" ]; then
+        release=${published_release:-1}
+    else
+        release=1
+    fi
+
+    regenerate "$dir" "$version" "$release"
+
+    # A version already on the AUR whose packaging has changed has to count the
+    # release up, because every helper decides whether to fetch by comparing
+    # version strings. Leaving pkgrel alone would publish a fix that nobody's
+    # cache can see - which is how a corrected checksum stayed invisible once
+    # already.
+    if [ -z "$pkgrel" ] && [ "$published_version" = "$version" ] &&
+        ! cmp -s "$dir/PKGBUILD" "$checkout/PKGBUILD"; then
+        release=$((${published_release:-1} + 1))
+        sed -i "s/^pkgrel=.*/pkgrel=$release/" "$dir/PKGBUILD"
+        (cd "$dir" && makepkg --printsrcinfo >.SRCINFO)
+        printf '%s %s is on the AUR already and this differs from it; pkgrel is now %s\n' \
+            "$pkgname" "$version" "$release"
+    fi
 
     grep -q "^	pkgver = $version$" "$dir/.SRCINFO" ||
         die "$pkgname/.SRCINFO does not say $version after the rewrite"
@@ -163,29 +215,32 @@ for pkgname in dbar dbar-bin; do
 
     verify_release_assets "$dir/.SRCINFO"
 
-    [ "$push" = yes ] || continue
-
-    checkout=$(mktemp -d)
-    trap 'rm -rf "$checkout"' EXIT
-    git clone --quiet "ssh://aur@aur.archlinux.org/$pkgname.git" "$checkout"
-
-    cp "$dir/PKGBUILD" "$dir/.SRCINFO" "$checkout/"
-    # --porcelain rather than `diff`, because the first push to a package that
-    # does not exist yet has no tracked files for a diff to find.
-    if [ -z "$(git -C "$checkout" status --porcelain)" ]; then
-        printf '%s is already at %s on the AUR\n' "$pkgname" "$version"
+    if [ "$push" != yes ]; then
+        printf 'would publish %s %s-%s\n' "$pkgname" "$version" "$release"
         rm -rf "$checkout"
         trap - EXIT
         continue
     fi
 
+    cp "$dir/PKGBUILD" "$dir/.SRCINFO" "$checkout/"
+    # --porcelain rather than `diff`, because the first push to a package that
+    # does not exist yet has no tracked files for a diff to find.
+    if [ -z "$(git -C "$checkout" status --porcelain)" ]; then
+        printf '%s is already at %s-%s on the AUR\n' "$pkgname" "$version" "$release"
+        rm -rf "$checkout"
+        trap - EXIT
+        continue
+    fi
+
+    git -C "$checkout" remote remove origin 2>/dev/null || true
+    git -C "$checkout" remote add origin "ssh://aur@aur.archlinux.org/$pkgname.git"
     git -C "$checkout" add PKGBUILD .SRCINFO
-    git -C "$checkout" commit --quiet -m "Update to $version-$pkgrel"
+    git -C "$checkout" commit --quiet -m "Update to $version-$release"
     # HEAD:master rather than master, because a clone of a package that does not
     # exist yet starts on whatever init.defaultBranch says, and the AUR wants
     # master either way.
     git -C "$checkout" push --quiet origin HEAD:master
-    printf 'Pushed %s %s to the AUR\n' "$pkgname" "$version"
+    printf 'Pushed %s %s-%s to the AUR\n' "$pkgname" "$version" "$release"
 
     rm -rf "$checkout"
     trap - EXIT
