@@ -48,6 +48,25 @@ pub fn send_byte(pipe: &OwnedFd, byte: u8) -> std::io::Result<()> {
     }
 }
 
+/// Read the bytes currently in a command pipe without ever waiting for more.
+///
+/// Interrupted syscalls are retried here so every worker gets the same policy. An empty
+/// pipe still returns `WouldBlock`, and zero still means every writer has gone away.
+pub fn read_bytes(pipe: &OwnedFd, buffer: &mut [u8]) -> std::io::Result<usize> {
+    loop {
+        // SAFETY: the descriptor and the writable buffer remain valid for the call.
+        let read =
+            unsafe { libc::read(pipe.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
+        if read >= 0 {
+            return Ok(read as usize);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
 /// Fill a command pipe without letting a regression turn a test into a blocking write.
 #[cfg(test)]
 pub(crate) fn fill_pipe(pipe: &OwnedFd) -> usize {
@@ -94,5 +113,27 @@ pub fn forever(what: &str, mut work: impl FnMut() -> Result<()>, mut empty: impl
         }
         std::thread::sleep(wait);
         wait = (wait * 2).min(LONGEST_WAIT);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_pipe_is_nonblocking_and_reports_when_its_writer_has_gone() {
+        let (read, write) = pipe().unwrap();
+        let mut bytes = [0; 2];
+        assert_eq!(
+            read_bytes(&read, &mut bytes).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        send_byte(&write, 7).unwrap();
+        assert_eq!(read_bytes(&read, &mut bytes).unwrap(), 1);
+        assert_eq!(bytes[0], 7);
+
+        drop(write);
+        assert_eq!(read_bytes(&read, &mut bytes).unwrap(), 0);
     }
 }

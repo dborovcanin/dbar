@@ -68,6 +68,10 @@ genuinely is all the protocol carries.
 Keep the renderer swappable. A GPU backend must be possible without rewriting layout, which
 means `Frame`, icons and separator geometry stay free of `tiny-skia` types.
 
+Animation state and timestamps live in `app/animation.rs`. The event loop owns its one shared
+timer, and layout sees only the current fold and wording positions; do not put clocks or timer
+ownership into layout.
+
 No async runtime. The event loop is `calloop`; cheap reads happen on the main thread, and
 anything that genuinely blocks gets a worker thread feeding a `calloop` channel, the way
 Sway, i3bar, PipeWire, MPRIS and the tray already do. Workers are conditional on the resolved

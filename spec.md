@@ -352,6 +352,10 @@ without reducing runtime work.
 Sway state, tray state, interaction state and active transitions. Collection
 happens once for the session.
 
+The transition mechanics are isolated in `app/animation.rs`. `App` schedules
+their one shared timer, while layout receives only the current fold and wording
+positions and remains independent of clocks.
+
 Each `Bar` owns output-specific state: its Wayland surface, dimensions, scale,
 shared-memory pool, clipping storage, pointer position and last presented
 `Frame`. Layout and presentation happen per output because width, scale,

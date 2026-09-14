@@ -100,8 +100,6 @@ mod tests {
             })
             .unwrap();
 
-        // This status belongs to a provider/command worker and must remain waitable.
-        let mut unrelated = Command::new("sh").args(["-c", "exit 23"]).spawn().unwrap();
         let running = Command::new("sh")
             .args(["-c", "read line"])
             .stdin(Stdio::piped())
@@ -125,6 +123,10 @@ mod tests {
                 .unwrap();
         }
         assert!(children[0].try_wait().unwrap().is_none());
+
+        // A provider/command worker's status remains waitable: the event-loop callback
+        // visits only the click-child handles it owns rather than calling waitpid(-1).
+        let mut unrelated = Command::new("sh").args(["-c", "exit 23"]).spawn().unwrap();
         assert_eq!(unrelated.wait().unwrap().code(), Some(23));
         for pid in exited {
             let mut status = 0;

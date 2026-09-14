@@ -46,6 +46,10 @@ use crate::status::{
 use crate::sway::{self, SwayEvent, SwayState};
 use crate::text::TextRenderer;
 
+mod animation;
+
+use animation::Travels;
+
 /// How the i3bar protocol numbers a wheel notch, which is what click dispatch speaks.
 const SCROLL_UP: u32 = 4;
 const SCROLL_DOWN: u32 = 5;
@@ -87,239 +91,6 @@ const SUBMENU_OPEN_AFTER: std::time::Duration = std::time::Duration::from_millis
 /// the branch briefly gives that enter time to cancel the close, while still dismissing a
 /// branch when the pointer really left the menu stack.
 const SUBMENU_LEAVE_AFTER: std::time::Duration = std::time::Duration::from_millis(300);
-
-/// A group on its way between open and shut.
-///
-/// The settled state is flipped the moment the click lands; this only says how the island
-/// gets from the width it had to the width it is owed, and stops existing when it arrives.
-struct Fold {
-    /// Where the island was when the click landed, 0.0 open and 1.0 shut.
-    from: f32,
-    /// Which of those it is going to.
-    to: f32,
-    started: std::time::Instant,
-    over: std::time::Duration,
-}
-
-impl Fold {
-    /// Where the fold has got to, eased so it leaves and arrives slowly.
-    ///
-    /// Smoothstep rather than anything configurable: an easing curve is a knob, and the
-    /// difference between this and a linear ramp is the whole of what a fold is for.
-    fn at(&self, now: std::time::Instant) -> f32 {
-        let over = self.over.as_secs_f32();
-        let gone = now.saturating_duration_since(self.started).as_secs_f32();
-        let linear = match over > 0.0 {
-            true => (gone / over).clamp(0.0, 1.0),
-            false => 1.0,
-        };
-        let eased = linear * linear * (3.0 - 2.0 * linear);
-        self.from + (self.to - self.from) * eased
-    }
-
-    fn arrived(&self, now: std::time::Instant) -> bool {
-        now.saturating_duration_since(self.started) >= self.over
-    }
-}
-
-/// Every island on its way between open and shut, and whether anything is stepping them.
-///
-/// Kept apart from the settled state, which flips the moment a click lands: this is only
-/// how an island gets from the width it had to the width it is owed.
-#[derive(Default)]
-struct Folds {
-    /// Where each travelling group is heading, by name.
-    travelling: std::collections::HashMap<String, Fold>,
-    /// How far each of them has got, which is the only part layout is shown.
-    ///
-    /// Kept beside the folds rather than worked out while laying out, so that a frame is a
-    /// function of what it is given and the clock stays up here where the timer is.
-    at: std::collections::HashMap<String, f32>,
-}
-
-impl Folds {
-    /// Send one group off towards `to`, from wherever it had got to.
-    ///
-    /// Turning around half way carries on from there rather than jumping to the end it was
-    /// leaving, and it is given the time the distance is worth rather than the whole
-    /// configured span: a fold turned around ten milliseconds in has two per cent of its
-    /// range left, and a quarter of a second to cover it is an island that looks stuck.
-    fn turn(&mut self, name: String, to: f32, over: std::time::Duration) {
-        let from = self.at.get(&name).copied().unwrap_or(1.0 - to);
-        let span = (from - to).abs();
-        // A whole travel is the configured length exactly: scaling by one would round it
-        // through an f32 and hand back something a nanosecond either side of it.
-        let over = match span < 1.0 {
-            true => over.mul_f32(span),
-            false => over,
-        };
-        self.travelling.insert(
-            name.clone(),
-            Fold {
-                from,
-                to,
-                started: std::time::Instant::now(),
-                over,
-            },
-        );
-        self.at.insert(name, from);
-    }
-
-    /// Forget a group's travel, for one whose config no longer asks for any.
-    fn settle(&mut self, name: &str) {
-        self.travelling.remove(name);
-        self.at.remove(name);
-    }
-
-    /// Move every fold along, and say whether any is still travelling and whether the bar
-    /// has to be drawn again.
-    ///
-    /// Those are two questions: the frame a fold arrives on is as much a change as any it
-    /// moved through, and it is the frame nothing is travelling any more.
-    fn step(&mut self, now: std::time::Instant) -> (bool, bool) {
-        let was = self.travelling.len();
-        let Folds { travelling, at, .. } = self;
-        // Arriving takes a group out of here entirely, and layout reads the settled state
-        // again - which is what brings back the fast path that never formats a shut
-        // group's children.
-        travelling.retain(|_, fold| !fold.arrived(now));
-        at.retain(|name, _| travelling.contains_key(name));
-        for (name, fold) in travelling.iter() {
-            // Put there by `turn` alongside the fold itself, so this only ever writes over
-            // a number and never allocates a name.
-            if let Some(at) = at.get_mut(name) {
-                *at = fold.at(now);
-            }
-        }
-        let going = !self.travelling.is_empty();
-        (going, going || was > 0)
-    }
-
-    fn idle(&self) -> bool {
-        self.travelling.is_empty()
-    }
-}
-
-/// Every module on its way from one wording to the next.
-///
-/// The wording a click chose is settled the moment it lands, the same way a fold's end is:
-/// this is only how the module gets from the width the wording it is leaving asked for to
-/// the width the one it is going to wants.
-#[derive(Default)]
-struct Wordings {
-    /// The ramp each travelling module is riding, by name.
-    travelling: std::collections::HashMap<String, Fold>,
-    /// Which wording each is coming from and how far it has got, which is the only part
-    /// layout is shown.
-    at: std::collections::HashMap<String, crate::layout::Leaving>,
-}
-
-impl Wordings {
-    /// Send a module off from the wording it was showing to the one it has just been given.
-    ///
-    /// Always a whole travel from a standing start, which is where this differs from a
-    /// fold: a fold has two ends and can be turned around between them, while a click here
-    /// picks the next of however many wordings, and the width it is leaving is the one it
-    /// had arrived at rather than a point half way along.
-    fn start(&mut self, name: String, from: usize, over: std::time::Duration) {
-        self.travelling.insert(
-            name.clone(),
-            Fold {
-                from: 0.0,
-                to: 1.0,
-                started: std::time::Instant::now(),
-                over,
-            },
-        );
-        self.at
-            .insert(name, crate::layout::Leaving { from, at: 0.0 });
-    }
-
-    /// Forget a module's travel, for one whose config no longer asks for any.
-    fn settle(&mut self, name: &str) {
-        self.travelling.remove(name);
-        self.at.remove(name);
-    }
-
-    /// Move every wording along, and say whether any is still travelling and whether the
-    /// bar has to be drawn again.
-    fn step(&mut self, now: std::time::Instant) -> (bool, bool) {
-        let was = self.travelling.len();
-        let Wordings { travelling, at } = self;
-        // Arriving takes a module out of here entirely, and layout reads the settled
-        // wording again - which is what takes the wording it left behind off the frame's
-        // work, and its own edge out of the clip.
-        travelling.retain(|_, ramp| !ramp.arrived(now));
-        at.retain(|name, _| travelling.contains_key(name));
-        for (name, ramp) in travelling.iter() {
-            // Put there by `start` alongside the ramp itself, so this only ever writes
-            // over a number and never allocates a name.
-            if let Some(leaving) = at.get_mut(name) {
-                leaving.at = ramp.at(now);
-            }
-        }
-        let going = !self.travelling.is_empty();
-        (going, going || was > 0)
-    }
-
-    fn idle(&self) -> bool {
-        self.travelling.is_empty()
-    }
-}
-
-/// Everything on the bar that is on its way somewhere, and whether anything is stepping it.
-///
-/// One timer moves them all: a second one would wake the bar twice a frame to work out the
-/// same positions, and the frame callback would throw one of the two redraws away.
-#[derive(Default)]
-struct Travels {
-    /// Islands between open and shut.
-    folds: Folds,
-    /// Modules between open and shut, which is the same travel one level down.
-    module_folds: Folds,
-    /// Modules between one wording and the next.
-    wordings: Wordings,
-    /// Whether a timer is already moving them along.
-    scheduled: bool,
-}
-
-impl Travels {
-    /// Move everything along, and say whether any is still going and whether the bar has
-    /// to be drawn again.
-    fn step(&mut self, now: std::time::Instant) -> (bool, bool) {
-        let (folding, folds_changed) = self.folds.step(now);
-        let (module_folding, module_folds_changed) = self.module_folds.step(now);
-        let (switching, wordings_changed) = self.wordings.step(now);
-        let going = folding || module_folding || switching;
-        self.scheduled = going;
-        (
-            going,
-            folds_changed || module_folds_changed || wordings_changed,
-        )
-    }
-
-    /// Whether a travel has started that nothing is moving along yet.
-    ///
-    /// Says so once and then claims the job, the way a command starting claims the
-    /// spinner: two timers on one travel would step it twice as fast.
-    fn claim(&mut self) -> bool {
-        if self.scheduled || (self.folds.idle() && self.module_folds.idle() && self.wordings.idle())
-        {
-            return false;
-        }
-        self.scheduled = true;
-        true
-    }
-
-    /// Give the job back, for a caller that claimed it and then could not start the timer.
-    ///
-    /// Without this a failed insert would leave the claim standing for the life of the
-    /// process: nothing else drains a travel, so every island afterwards would sit at the
-    /// width it was caught at with its contents cut off, and no click would settle it.
-    fn release(&mut self) {
-        self.scheduled = false;
-    }
-}
 
 /// What a menu hangs from.
 enum Anchor2 {
@@ -598,8 +369,7 @@ pub struct App {
     collapsed: std::collections::HashSet<String>,
     /// Group state is shared by all outputs and independent of child gestures.
     collapsed_groups: std::collections::HashSet<String>,
-    /// Groups still travelling towards that state, and modules still travelling between
-    /// two of their wordings.
+    /// Groups and modules still folding, and modules still travelling between wordings.
     travels: Travels,
     /// Which sources each realtime signal reads again.
     signals: std::collections::HashMap<i32, Vec<Which>>,
@@ -1633,12 +1403,11 @@ impl App {
         let Some(over) = self.fold_time(&name) else {
             // Nothing to unwind: a group whose config never asked for a fold cannot have
             // one in flight, but one whose config changed under a reload could.
-            self.travels.folds.settle(&name);
+            self.travels.settle_group(&name);
             return;
         };
         self.travels
-            .folds
-            .turn(name, f32::from(u8::from(shut)), over);
+            .turn_group(name, f32::from(u8::from(shut)), over);
     }
 
     /// Turn a module's fold around, and set it travelling if the config asked for that.
@@ -1654,12 +1423,11 @@ impl App {
         let Some(over) = self.module_fold_time(&name) else {
             // Nothing to unwind for a module whose config asks for no travel, but one
             // whose config changed under a reload could still have one in flight.
-            self.travels.module_folds.settle(&name);
+            self.travels.settle_module(&name);
             return;
         };
         self.travels
-            .module_folds
-            .turn(name, f32::from(u8::from(shut)), over);
+            .turn_module(name, f32::from(u8::from(shut)), over);
     }
 
     /// How long this module's fold is meant to take, if it takes any time at all.
@@ -1914,9 +1682,9 @@ impl App {
             pages,
             collapsed,
             collapsed_groups,
-            switching: &travels.wordings.at,
-            folding: &travels.folds.at,
-            module_folding: &travels.module_folds.at,
+            switching: travels.switching(),
+            folding: travels.folding(),
+            module_folding: travels.module_folding(),
             waiting,
             spin: *spin,
             tray,
@@ -2131,11 +1899,11 @@ impl App {
                 // click is never lost and a module caught part way still knows what it is
                 // showing.
                 match self.alt_time(&name) {
-                    Some(over) => self.travels.wordings.start(name, from, over),
+                    Some(over) => self.travels.start_wording(name, from, over),
                     // Nothing to unwind: a module whose config never asked for a travel
                     // cannot have one in flight, but one whose config changed under a
                     // reload could.
-                    None => self.travels.wordings.settle(&name),
+                    None => self.travels.settle_wording(&name),
                 }
                 self.invalidate();
             }

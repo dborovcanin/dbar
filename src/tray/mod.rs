@@ -509,13 +509,7 @@ fn run(
         }
         if fds[1].revents != 0 {
             let mut buffer = [0u8; 64];
-            // SAFETY: the buffer is owned here and the length is its own.
-            let read =
-                unsafe { libc::read(wake.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
-            let notification = match read {
-                -1 => Err(std::io::Error::last_os_error()),
-                read => Ok(read as usize),
-            };
+            let notification = crate::worker::read_bytes(wake, &mut buffer);
             if !drain_orders(notification, orders, |command| {
                 act(&mut bus, &tray, sender, &command)
             })? {

@@ -59,6 +59,14 @@ pub enum Command {
 }
 
 impl Command {
+    fn byte(self) -> u8 {
+        match self {
+            Command::PlayPause => 0,
+            Command::Next => 1,
+            Command::Previous => 2,
+        }
+    }
+
     /// The MPRIS method that does it.
     fn member(self) -> &'static str {
         match self {
@@ -89,13 +97,8 @@ pub struct Commands {
 
 impl Commands {
     pub fn send(&self, command: Command) {
-        let byte = match command {
-            Command::PlayPause => 0u8,
-            Command::Next => 1,
-            Command::Previous => 2,
-        };
         // A full pipe drops this command; waiting here would stop Wayland dispatch too.
-        if let Err(e) = crate::worker::send_byte(&self.pipe, byte) {
+        if let Err(e) = crate::worker::send_byte(&self.pipe, command.byte()) {
             log::debug!("the media command was dropped: {e}");
         }
     }
@@ -246,26 +249,15 @@ fn run(sender: &calloop::channel::Sender<Reading>, commands: &OwnedFd) -> Result
 
         if fds[1].revents != 0 {
             let mut byte = [0u8; 8];
-            // SAFETY: the buffer is owned here and the length is its own.
-            let read =
-                unsafe { libc::read(commands.as_raw_fd(), byte.as_mut_ptr().cast(), byte.len()) };
-            if read < 0 {
-                let error = std::io::Error::last_os_error();
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                ) {
-                    continue;
-                }
-                return Err(error).context("reading media commands");
-            }
+            let read = match crate::worker::read_bytes(commands, &mut byte) {
+                Ok(read) => read,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => return Err(e).context("reading media commands"),
+            };
             if read == 0 {
                 return Ok(());
             }
-            for command in byte[..read as usize]
-                .iter()
-                .filter_map(|b| Command::from_byte(*b))
-            {
+            for command in byte[..read].iter().filter_map(|b| Command::from_byte(*b)) {
                 act(&mut bus, name.as_deref(), command);
             }
         }
@@ -518,12 +510,7 @@ mod tests {
     #[test]
     fn every_command_survives_the_pipe() {
         for command in [Command::PlayPause, Command::Next, Command::Previous] {
-            let byte = match command {
-                Command::PlayPause => 0,
-                Command::Next => 1,
-                Command::Previous => 2,
-            };
-            assert_eq!(Command::from_byte(byte), Some(command));
+            assert_eq!(Command::from_byte(command.byte()), Some(command));
         }
         assert_eq!(Command::from_byte(9), None);
     }
