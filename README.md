@@ -48,7 +48,16 @@ opt-in, and a bar that does not name one never starts one.
 
 ## Quick start
 
-Download the latest prebuilt Arch Linux binary (x86-64):
+On Arch Linux, from the AUR — [`dbar`](https://aur.archlinux.org/packages/dbar)
+builds the tagged source, [`dbar-bin`](https://aur.archlinux.org/packages/dbar-bin)
+installs the same release's prebuilt binary:
+
+```sh
+paru -S dbar        # or: yay -S dbar
+paru -S dbar-bin    # the prebuilt one, no compile
+```
+
+Or download the prebuilt binary directly (x86-64):
 
 ```sh
 curl -LO https://github.com/dborovcanin/dbar/releases/latest/download/dbar-linux-x86_64

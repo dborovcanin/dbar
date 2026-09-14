@@ -19,3 +19,11 @@ target
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# What makepkg leaves beside a PKGBUILD when the AUR packages are built by hand.
+# scripts/aur-publish.sh cleans up after itself; a manual `makepkg` does not.
+packaging/aur/*/src/
+packaging/aur/*/pkg/
+packaging/aur/*/*.pkg.tar.*
+packaging/aur/*/*.tar.gz
+packaging/aur/*/dbar-*-linux-*

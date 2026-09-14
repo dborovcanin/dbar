@@ -66,3 +66,65 @@ jobs:
         with:
           files: dbar-linux-x86_64*
           generate_release_notes: true
+
+  # The AUR packages point at the release by checksum, so this cannot run until
+  # the assets are downloadable: `dbar` needs the tag archive and `dbar-bin`
+  # needs the binary the job above just published.
+  #
+  # Skipped entirely when AUR_SSH_PRIVATE_KEY is not configured, so a fork that
+  # tags a release publishes to GitHub and stops there.
+  aur:
+    needs: release
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    timeout-minutes: 30
+    steps:
+      - name: Install what publishing needs
+        run: |
+          pacman -Syu --noconfirm --needed git openssh pacman-contrib
+
+      - uses: actions/checkout@v5
+
+      # makepkg reads the PKGBUILD and refuses to do it as root, so the whole
+      # publish runs as an ordinary user that owns the checkout.
+      - name: Make a build user
+        run: |
+          useradd -m builder
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          git config --system --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Nothing a tag or an account name carries reaches this script as script:
+      # the values arrive through the environment and are read as variables, so
+      # a tag named with a quote in it is a bad version string rather than a
+      # command running next to the AUR key.
+      - name: Publish to the AUR
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          if [ -z "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "AUR_SSH_PRIVATE_KEY is not set; nothing to publish to."
+            exit 0
+          fi
+
+          # Created empty at its final mode first: writing it and chmod-ing
+          # afterwards leaves the key readable for as long as that takes.
+          install -d -m700 -o builder -g builder /home/builder/.ssh
+          install -m600 -o builder -g builder /dev/null /home/builder/.ssh/aur
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" >/home/builder/.ssh/aur
+
+          # The host keys are pinned in the repository rather than scanned here,
+          # so a push never trusts whatever answers on the day.
+          runuser -u builder -- env \
+            HOME=/home/builder \
+            AUR_SSH_KEY=/home/builder/.ssh/aur \
+            WORKSPACE="$GITHUB_WORKSPACE" \
+            VERSION="${GITHUB_REF_NAME#v}" \
+            ACTOR="$ACTOR" \
+            bash -c '
+              set -eu
+              git config --global user.name "dbar release"
+              git config --global user.email "$ACTOR@users.noreply.github.com"
+              cd "$WORKSPACE"
+              scripts/aur-publish.sh "$VERSION"
+            '

@@ -6,7 +6,9 @@ BIN   := dbar
 PREFIX ?= /usr
 DESTDIR ?=
 
-.PHONY: all prod run check test bench fmt clippy clean install uninstall release-bundle release
+VERSION := $(shell sed -n 's/^version *= *"\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+
+.PHONY: all prod run check test bench fmt clippy clean install uninstall release-bundle release aur aur-check
 
 # Fast iteration build.
 all:
@@ -63,6 +65,17 @@ release-bundle:
 	@echo "Bundled target/release-assets/$(BIN)-linux-x86_64"
 
 # Tag the version in Cargo.toml and push it. GitHub Actions builds and
-# publishes the release from that tag.
+# publishes the release from that tag, and then updates the AUR packages.
 release:
 	sh scripts/release.sh
+
+# Bring packaging/aur up to the released version without publishing anything,
+# which is how to see what the AUR would be given. Needs the release to exist:
+# the checksums are taken from the files themselves.
+aur-check:
+	scripts/aur-publish.sh --no-push $(VERSION)
+
+# The same, and push both packages to the AUR. Normally the Release workflow
+# does this; run it by hand when a push has to be repeated.
+aur:
+	scripts/aur-publish.sh $(VERSION)
