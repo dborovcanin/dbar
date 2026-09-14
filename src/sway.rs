@@ -96,7 +96,7 @@ pub const LANGUAGE_FIELDS: &[FieldSpec] = &[
 ];
 
 /// One entry of the workspace list.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
 pub struct Workspace {
     pub name: String,
     /// The screen it is on, named the way the compositor names it: "DP-1". A bar on one
@@ -122,7 +122,7 @@ pub struct Layout {
 }
 
 /// Everything dbar tracks from the compositor.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SwayState {
     pub workspaces: Vec<Workspace>,
     /// The title each screen has focused, by the name of that screen.
@@ -544,6 +544,7 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
             None
         });
     }
+    let mut shown = state.clone();
     let _ = sender.send(SwayEvent::State(Box::new(state.clone())));
 
     std::thread::Builder::new()
@@ -555,29 +556,20 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
                 // workspace, the window that came with it, sometimes a mode - and reading
                 // the desktop once for the lot is the difference between one redraw and
                 // four that nobody can see apart.
-                let mut news = false;
                 let mut desktop = false;
                 loop {
                     match recv(&mut events) {
-                        Ok((EVENT_MODE, body)) => {
-                            state.mode = mode_change(&body);
-                            news = true;
-                        }
-                        // Most input events say nothing about the layout, and a redraw for
-                        // one would be a wake-up spent on nothing.
+                        Ok((EVENT_MODE, body)) => state.mode = mode_change(&body),
+                        // Most input events say nothing about the layout.
                         Ok((EVENT_INPUT, body)) => {
                             if let Some(layout) = layout_change(&body) {
                                 state.layout = Some(layout);
-                                news = true;
                             }
                         }
                         // Any workspace or window event can change either half, and the
                         // queries are cheap next to a redraw, so both are re-read rather
                         // than patched.
-                        Ok(_) => {
-                            desktop = true;
-                            news = true;
-                        }
+                        Ok(_) => desktop = true,
                         Err(e) => {
                             let _ = sender.send(SwayEvent::Stopped(e.to_string()));
                             return;
@@ -592,10 +584,16 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
                     let _ = sender.send(SwayEvent::Stopped(e.to_string()));
                     return;
                 }
-                if news
-                    && sender
-                        .send(SwayEvent::State(Box::new(state.clone())))
-                        .is_err()
+                // Sway reports a title change for every window, including ones no screen is
+                // showing, and a bar handed the same state still lays out every screen to
+                // find that nothing moved. Only what the bar would draw differently is sent.
+                if state == shown {
+                    continue;
+                }
+                shown.clone_from(&state);
+                if sender
+                    .send(SwayEvent::State(Box::new(state.clone())))
+                    .is_err()
                 {
                     return;
                 }
@@ -668,6 +666,22 @@ mod tests {
             windows.get("HDMI-A-1").map(|w| w.title.as_str()),
             Some("a page")
         );
+    }
+
+    /// The worker sends only a state that differs from the last one, so a title changing
+    /// behind the window a screen shows has to leave the state exactly as it was.
+    #[test]
+    fn a_window_nobody_is_looking_at_changes_nothing_on_the_bar() {
+        let before: serde_json::Value = serde_json::from_str(TREE).expect("a tree parses");
+        let after: serde_json::Value =
+            serde_json::from_str(&TREE.replace("\"mail\"", "\"mail (1)\"")).expect("a tree parses");
+        assert_ne!(before, after, "the tree itself did change");
+        assert_eq!(windows_by_output(&before), windows_by_output(&after));
+
+        let focused: serde_json::Value =
+            serde_json::from_str(&TREE.replace("\"vim\"", "\"vim - notes\""))
+                .expect("a tree parses");
+        assert_ne!(windows_by_output(&before), windows_by_output(&focused));
     }
 
     /// A title changes every time a tab does; what the window *is* does not. A rule that
