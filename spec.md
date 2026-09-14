@@ -367,12 +367,34 @@ There is no async runtime. `calloop` multiplexes Wayland, timers and channels.
 - Cheap sampled reads happen on the main thread when the shared collector
   scheduler says they are due.
 - Blocking or connection-owning integrations run on focused worker threads and
-  feed bounded state changes into the loop.
+  feed state changes into the loop through channels.
 - Wayland frame callbacks prevent presentation from outrunning the compositor.
 - Source updates are collected and invalidated together before drawing.
 
 A thread is acceptable when it isolates genuinely blocking work or owns an
 external connection. A thread per displayed module is not.
+
+dbar itself starts workers only for features the resolved configuration needs:
+
+- one PipeWire worker for audio, one session-bus worker for MPRIS, and one
+  session-bus worker for the tray;
+- one Sway subscription worker, plus a command worker when an interaction can
+  send Sway commands;
+- one reader for an i3bar provider, plus a writer when it accepts clicks;
+- one shared kernel-watch worker for watchable sources;
+- one worker per command source, and one per sampled source whose read can
+  block indefinitely; and
+- one shared signal listener when realtime refresh signals or click commands
+  are configured. It forwards `SIGCHLD` so the event loop can reap only the
+  click-launched children it owns.
+
+The signal listener is independent of the tray. Enabling a tray still starts
+one tray worker, regardless of the number of tray items or menus.
+
+Commands sent from the event loop to the MPRIS and tray workers use nonblocking
+pipes. The tray's command queue is bounded. If a worker stalls, excess input is
+dropped and logged rather than stopping Wayland dispatch; a rejected menu
+request is not recorded as pending, so a later pointer action can retry it.
 
 ### 7.3 Layer boundaries
 

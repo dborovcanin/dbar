@@ -37,23 +37,25 @@ in either as a bug.
   and `toml` (config), `serde_json` (the i3bar protocol), `jiff` (local time, which needs a
   tz database), `resvg` (icon themes ship their artwork as SVG, and a tray draws whatever an
   application points at; text and raster images are turned off), `signal-hook` and `libc`
-  (realtime signals), `anyhow`, `log`, `env_logger`.
+  (realtime signals, child-exit notifications and low-level Unix I/O), `anyhow`, `log`,
+  `env_logger`.
 
-Known and accepted: a redraw repaints the whole surface and re-shapes all text, so an update
-costs the same whichever module changed. Damage tracking and a measurement cache are the fix
-when it becomes worth it.
+Known and accepted: a changed frame repaints the whole shm buffer, although compositor damage
+is limited to changed groups. Layout runs again, while shaped and rasterised text is reused
+from bounded caches. CPU partial repaint needs retained-buffer history and is only worth that
+machinery if measurement shows a material cost.
 
 ## 2. The architecture is layered, and the layers do not leak
 
 ```text
-config -> sources -> typed fields -> formatter -> StatusItem -> layout -> Frame -> backend
+config -> source state -> typed fields -> formatter -> layout -> Frame -> backend
 ```
 
 Two rules hold the whole design together:
 
-- **Nothing below `StatusItem` knows where data came from.** The i3bar protocol, sway IPC and
-  the native collectors all converge on it. `I3BarBlock` lives in `status/i3bar.rs` and gets
-  no further.
+- **Protocol parsing ends at the source boundary.** i3bar blocks become `StatusItem`s, native
+  collectors publish `Reading`s, and Sway and tray keep their own typed state. Layout receives
+  those current states through `Inputs`; no protocol object or I/O operation reaches geometry.
 - **Nothing below `Frame` knows about config, formats or protocols.** `Frame` is positioned
   geometry and colour, so the renderer can be replaced without touching anything above it.
 
@@ -68,7 +70,11 @@ means `Frame`, icons and separator geometry stay free of `tiny-skia` types.
 
 No async runtime. The event loop is `calloop`; cheap reads happen on the main thread, and
 anything that genuinely blocks gets a worker thread feeding a `calloop` channel, the way
-`sway.rs`, `status/i3bar.rs` and `signal.rs` already do.
+Sway, i3bar, PipeWire, MPRIS and the tray already do. Workers are conditional on the resolved
+configuration. The single signal listener is also conditional: it exists for realtime refresh
+signals or click commands, whose children it wakes the event loop to reap. It is not part of
+the tray. Commands from the event loop must use bounded or nonblocking delivery so a stalled
+worker cannot stall Wayland dispatch.
 
 ## 3. Both ways of getting data are first-class
 

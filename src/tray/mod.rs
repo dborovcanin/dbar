@@ -185,7 +185,8 @@ pub struct Commands {
 const QUEUED_COMMANDS: usize = 16;
 
 impl Commands {
-    /// Whether the command was accepted. A menu must not wait for a request we dropped.
+    /// Whether the worker was notified to handle the command. A menu must not wait for a
+    /// request whose worker has gone.
     pub fn send(&self, command: Command) -> bool {
         if let Err(e) = self.queue.try_send(command) {
             log::debug!("the tray command was dropped: {e}");
@@ -193,8 +194,11 @@ impl Commands {
         }
         if let Err(e) = crate::worker::send_byte(&self.pipe, 0) {
             // A full wake pipe already makes poll readable. The queued command is safe:
-            // the worker drains its orders after consuming a notification.
+            // the worker drains its orders whenever it handles a readable notification.
             if e.kind() != std::io::ErrorKind::WouldBlock {
+                // The queue accepted the command just before its reader closed. It cannot
+                // be taken back through SyncSender, but the receiver is going away with
+                // the worker and will discard it. Report that no answer can be expected.
                 log::debug!("the tray thread did not wake: {e}");
                 return false;
             }
@@ -232,6 +236,32 @@ pub fn spawn(
         })
         .context("spawning the tray thread")?;
     Ok(Commands { pipe: write, queue })
+}
+
+/// Drain every command once `poll()` says the notification pipe is readable.
+///
+/// A transient read failure consumes no notification, but it must not strand commands
+/// already accepted by the queue: the full-pipe send path relies on any existing wakeup
+/// draining all orders. A leftover byte merely produces one harmless empty drain later.
+fn drain_orders(
+    notification: std::io::Result<usize>,
+    orders: &mpsc::Receiver<Command>,
+    mut handle: impl FnMut(Command),
+) -> Result<bool> {
+    match notification {
+        Ok(0) => return Ok(false),
+        Ok(_) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) => {}
+        Err(e) => return Err(e).context("reading tray notifications"),
+    }
+    while let Ok(command) = orders.try_recv() {
+        handle(command);
+    }
+    Ok(true)
 }
 
 /// One registered application, and everything read about it.
@@ -482,21 +512,14 @@ fn run(
             // SAFETY: the buffer is owned here and the length is its own.
             let read =
                 unsafe { libc::read(wake.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
-            if read < 0 {
-                let error = std::io::Error::last_os_error();
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-                ) {
-                    continue;
-                }
-                return Err(error).context("reading tray notifications");
-            }
-            if read == 0 {
+            let notification = match read {
+                -1 => Err(std::io::Error::last_os_error()),
+                read => Ok(read as usize),
+            };
+            if !drain_orders(notification, orders, |command| {
+                act(&mut bus, &tray, sender, &command)
+            })? {
                 return Ok(());
-            }
-            while let Ok(command) = orders.try_recv() {
-                act(&mut bus, &tray, sender, &command);
             }
         }
         if !in_hand && fds[0].revents == 0 {
@@ -1033,8 +1056,11 @@ fn read_properties(bus: &mut Connection, tray: &mut Tray, at: usize) -> Option<b
     Some(true)
 }
 
-/// A cheap summary of a pixmap bundle, for telling one icon from another without keeping
-/// the bytes of both.
+/// A linear summary of a pixmap bundle, for telling one icon from another without retaining
+/// the bytes of both. It runs only when a tray property is read, on the tray worker rather
+/// than the frame path. One pass over bytes already received from D-Bus avoids decoding and
+/// scaling an unchanged icon, while reading every byte keeps small badge or colour changes
+/// from being mistaken for the previous icon.
 fn fingerprint(value: &Value) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325u64;
     let mut eat = |byte: u8| {
@@ -1568,6 +1594,29 @@ mod tests {
             orders.try_recv(),
             Ok(Command::Menu { request: 43, .. })
         ));
+    }
+
+    #[test]
+    fn a_transient_notification_read_still_drains_queued_commands() {
+        for kind in [
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::Interrupted,
+        ] {
+            let (queue, orders) = mpsc::sync_channel(1);
+            queue.send(menu_request(42)).unwrap();
+            let mut handled = Vec::new();
+            assert!(
+                drain_orders(Err(std::io::Error::from(kind)), &orders, |command| {
+                    let Command::Menu { request, .. } = command else {
+                        panic!("expected menu request")
+                    };
+                    handled.push(request);
+                })
+                .unwrap()
+            );
+            assert_eq!(handled, [42]);
+            assert!(orders.try_recv().is_err());
+        }
     }
 
     #[test]

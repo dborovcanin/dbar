@@ -32,8 +32,8 @@ struct Shaped {
     scale: f32,
     /// Logical widths, keyed by scale-independent text.
     widths: Generations<f32>,
-    /// Rasterised runs, keyed the same way. `None` marks a string that must not be cached
-    /// because it draws colour glyphs, so the discovery is not repeated every frame.
+    /// Rasterised runs, keyed the same way. `None` caches the fact that a string produced
+    /// no pixels, so the failed rasterisation is not repeated every frame.
     runs: Generations<Option<TextRun>>,
     /// Shaped buffers, keyed the same way.
     ///

@@ -185,9 +185,15 @@ time, on the same screen, showing the same things:
 
 | idle                  | resident  | heap       | CPU        | processes | threads |
 | --------------------- | --------- | ---------- | ---------- | --------- | ------- |
-| **dbar**              | **21 MB** | **4.6 MB** | **0.21 %** | **1**     | 10      |
+| **dbar**              | **21 MB** | **4.6 MB** | **0.21 %** | **1**     | 10¹     |
 | swaybar + i3status-rs | 62 MB     | 14.4 MB    | 0.51 %     | 2         | 9       |
 | Waybar                | 76 MB     | 17.9 MB    | 0.75 %     | 1         | 25      |
+
+¹ This is the thread count of the measured build. The same configuration now
+starts 11: its `on_click` command enables one shared signal listener so exited
+click programs are reaped even while the bar is otherwise idle. This listener
+also carries configured realtime refresh signals. It is started only when one
+of those features is present; the tray still owns one worker thread.
 
 CPU is a share of one core, averaged over three consecutive two-minute windows;
 the spread across those windows was 0.19–0.23 % for dbar, 0.49–0.53 % for

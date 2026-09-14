@@ -1,8 +1,9 @@
 //! The protocol-neutral status model.
 //!
-//! Everything that produces data converts into a `StatusItem`: the i3bar backend today,
-//! native collectors next. Layout and rendering see nothing else, so no protocol detail
-//! reaches the code that draws, and no drawing concern reaches the code that collects.
+//! An i3bar provider converts its presentation-oriented blocks into `StatusItem`s here.
+//! Native collectors retain their typed `Reading`s, while Sway and the tray retain their
+//! own domain state; layout combines those sources without letting protocol messages reach
+//! geometry, and rendering sees only the resulting `Frame`.
 //!
 //! The point of the model is that values survive as values. A source publishes typed
 //! fields; formatting turns them into text without consuming them, so thresholds and
@@ -250,7 +251,7 @@ pub struct StatusItem {
     /// The name a config selects this item by.
     ///
     /// Optional because the i3bar protocol lets a provider leave its blocks unnamed, in
-    /// which case nothing can select them by name. Native sources always have one.
+    /// which case nothing can select them by name.
     pub id: Option<String>,
     /// What the source measured. The text to draw is the module's format applied to these,
     /// so a value is never recovered from a string that was written to be looked at.

@@ -249,8 +249,8 @@ impl Connection {
 
     /// Call a method and wait for its answer.
     ///
-    /// Signals that arrive first are dropped: this is used while setting up, before
-    /// anything is watching for them.
+    /// Messages that arrive before the matching reply are held in arrival order for
+    /// `receive`; method calls made during normal operation therefore do not lose signals.
     pub fn call(
         &mut self,
         destination: &str,

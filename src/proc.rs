@@ -28,7 +28,10 @@ pub fn reap(children: &mut Vec<Child>) {
         Ok(None) => true,
         Err(e) => {
             log::warn!("could not reap click child {}: {e}", child.id());
-            true
+            // There is no useful retry for an owned handle the OS says cannot be waited
+            // on. Keeping it would leak the entry and repeat this warning on every later
+            // child exit; dropping Child does not signal a process.
+            false
         }
     });
 }
@@ -257,6 +260,20 @@ mod tests {
             slot.store(0, std::sync::atomic::Ordering::Release);
         }
         held
+    }
+
+    #[test]
+    fn a_child_reaped_elsewhere_is_forgotten_after_the_error() {
+        let _alone = alone();
+        let child = std::process::Command::new("true").spawn().unwrap();
+        let pid = child.id() as i32;
+        let mut status = 0;
+        // SAFETY: this is the test's child and the status has storage for waitpid's result.
+        assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+
+        let mut children = vec![child];
+        super::reap(&mut children);
+        assert!(children.is_empty());
     }
 
     /// The stopping is not instant, and the threads that run programs do not stop with it.
