@@ -12,7 +12,9 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
-use crate::desktop::{Command, Desktop, DesktopEvent, Layout, Watching, Window, Workspace};
+use crate::desktop::{
+    Command, Desktop, DesktopEvent, Layout, Publisher, Watching, Window, Workspace,
+};
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
 
@@ -338,7 +340,7 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
     // workspace events; only a window module has any use for a title changing, which is
     // the noisiest thing the compositor reports.
     let mut wanted = Vec::new();
-    if watching.desktop() {
+    if watching.follows_workspaces() {
         wanted.push("\"workspace\"");
     }
     if watching.windows {
@@ -359,7 +361,7 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
     );
 
     let mut state = Desktop::default();
-    if watching.desktop() {
+    if watching.follows_workspaces() {
         read_desktop(&mut queries, &mut state, watching.windows)?;
     }
     if watching.mode {
@@ -379,8 +381,8 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
             None
         });
     }
-    let mut shown = state.clone();
-    let _ = sender.send(DesktopEvent::State(Box::new(state.clone())));
+    let mut publisher = Publisher::new(sender);
+    publisher.publish(&state);
 
     std::thread::Builder::new()
         .name("sway-ipc".to_string())
@@ -406,7 +408,7 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
                         // than patched.
                         Ok(_) => desktop = true,
                         Err(e) => {
-                            let _ = sender.send(DesktopEvent::Stopped(e.to_string()));
+                            publisher.stop(e.to_string());
                             return;
                         }
                     }
@@ -416,20 +418,10 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
                 }
                 if desktop && let Err(e) = read_desktop(&mut queries, &mut state, watching.windows)
                 {
-                    let _ = sender.send(DesktopEvent::Stopped(e.to_string()));
+                    publisher.stop(e.to_string());
                     return;
                 }
-                // Sway reports a title change for every window, including ones no screen is
-                // showing, and a bar handed the same state still lays out every screen to
-                // find that nothing moved. Only what the bar would draw differently is sent.
-                if state == shown {
-                    continue;
-                }
-                shown.clone_from(&state);
-                if sender
-                    .send(DesktopEvent::State(Box::new(state.clone())))
-                    .is_err()
-                {
+                if !publisher.publish(&state) {
                     return;
                 }
             }

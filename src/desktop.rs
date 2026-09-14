@@ -121,6 +121,43 @@ pub enum DesktopEvent {
     Stopped(String),
 }
 
+/// The way a backend hands the bar its state: only when what the bar would draw has changed.
+///
+/// A compositor reports far more than a bar shows - a title change for every window, among
+/// them ones no screen is showing - and a bar handed an identical state still lays out every
+/// screen to find that nothing moved. Keeping the rule here means a new backend cannot
+/// forget it.
+pub struct Publisher {
+    sender: calloop::channel::Sender<DesktopEvent>,
+    shown: Option<Desktop>,
+}
+
+impl Publisher {
+    pub fn new(sender: calloop::channel::Sender<DesktopEvent>) -> Publisher {
+        Publisher {
+            sender,
+            shown: None,
+        }
+    }
+
+    /// Hand the bar this state unless it already has it. False once the bar has gone, which
+    /// is a backend's cue to stop.
+    pub fn publish(&mut self, state: &Desktop) -> bool {
+        if self.shown.as_ref() == Some(state) {
+            return true;
+        }
+        self.shown = Some(state.clone());
+        self.sender
+            .send(DesktopEvent::State(Box::new(state.clone())))
+            .is_ok()
+    }
+
+    /// Tell the bar the compositor can no longer be followed.
+    pub fn stop(&self, reason: String) {
+        let _ = self.sender.send(DesktopEvent::Stopped(reason));
+    }
+}
+
 /// Something a click asks the compositor to do, in the bar's terms.
 ///
 /// Each backend writes it in its own compositor's language, so layout can say what a click
@@ -172,9 +209,9 @@ impl Commands {
 
 /// What the bar has asked the compositor for.
 ///
-/// Each of these costs a subscription and a question at startup, and the desktop ones
-/// cost a workspace list - and, for windows, a whole tree - every time the desktop moves.
-/// A bar that draws none of them never connects at all.
+/// Each of these is something a backend has to subscribe to and ask about at startup, and
+/// windows are the noisiest thing a compositor reports. A bar that draws none of them never
+/// connects at all.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Watching {
     pub language: bool,
@@ -190,7 +227,7 @@ impl Watching {
     }
 
     /// Whether the workspace list and the windows on it have to be followed.
-    pub fn desktop(self) -> bool {
+    pub fn follows_workspaces(self) -> bool {
         self.windows || self.workspaces
     }
 }
@@ -273,24 +310,60 @@ mod tests {
     #[test]
     fn nothing_from_the_compositor_means_nothing_to_ask_it() {
         assert!(!Watching::default().anything());
-        assert!(!Watching::default().desktop());
+        assert!(!Watching::default().follows_workspaces());
 
         let language = Watching {
             language: true,
             ..Watching::default()
         };
         assert!(language.anything(), "a layout still needs a connection");
-        assert!(!language.desktop(), "but not the workspaces or the tree");
+        assert!(
+            !language.follows_workspaces(),
+            "but not the workspaces or the windows"
+        );
 
         let workspaces = Watching {
             workspaces: true,
             ..Watching::default()
         };
-        assert!(workspaces.desktop());
+        assert!(workspaces.follows_workspaces());
         assert!(
             !workspaces.windows,
-            "and no tree, which is the expensive half"
+            "and no windows, which are the noisy half"
         );
+    }
+
+    /// A burst of compositor events that changed nothing the bar draws must cost the bar
+    /// nothing, and a backend must hear when there is no bar left to tell.
+    #[test]
+    fn a_state_the_bar_already_has_is_not_handed_over_again() {
+        let (sender, channel) = calloop::channel::channel();
+        let mut publisher = Publisher::new(sender);
+        let mut state = Desktop::default();
+        assert!(publisher.publish(&state), "the first state always goes");
+        assert!(publisher.publish(&state));
+        state.mode = Some("resize".to_string());
+        assert!(publisher.publish(&state));
+
+        let mut event_loop = calloop::EventLoop::<Vec<Desktop>>::try_new().expect("an event loop");
+        event_loop
+            .handle()
+            .insert_source(channel, |event, _, got: &mut Vec<Desktop>| {
+                if let calloop::channel::Event::Msg(DesktopEvent::State(state)) = event {
+                    got.push(*state);
+                }
+            })
+            .expect("a channel is an event source");
+        let mut got = Vec::new();
+        event_loop
+            .dispatch(Some(std::time::Duration::ZERO), &mut got)
+            .expect("dispatching");
+        assert_eq!(got.len(), 2, "the repeat was not sent");
+        assert_eq!(got[1].mode.as_deref(), Some("resize"));
+
+        drop(event_loop);
+        state.mode = None;
+        assert!(!publisher.publish(&state), "a bar that has gone says so");
     }
 
     #[test]
