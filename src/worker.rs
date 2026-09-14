@@ -15,9 +15,56 @@
 //! moment after the bar should be picked up a moment later; one that is never coming should
 //! be asked about once a minute, not once a second, for as long as the machine is on.
 
+use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::time::Duration;
 
 use anyhow::Result;
+
+/// A command pipe that never waits for room. The reader still sleeps in `poll()` until
+/// data arrives; nonblocking I/O only changes what happens when the pipe is full or empty.
+pub fn pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    let mut ends = [0; 2];
+    // SAFETY: the array holds exactly the two descriptors pipe2 writes.
+    if unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: both descriptors were just created and have no other owner.
+    Ok(unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) })
+}
+
+/// Send one command byte, or report that the reader is not keeping up. Only an interrupted
+/// syscall is retried; a full pipe is never polled or waited on here.
+pub fn send_byte(pipe: &OwnedFd, byte: u8) -> std::io::Result<()> {
+    loop {
+        // SAFETY: the descriptor and the single byte remain valid for the call.
+        let written = unsafe { libc::write(pipe.as_raw_fd(), (&byte as *const u8).cast(), 1) };
+        if written == 1 {
+            return Ok(());
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// Fill a command pipe without letting a regression turn a test into a blocking write.
+#[cfg(test)]
+pub(crate) fn fill_pipe(pipe: &OwnedFd) -> usize {
+    // SAFETY: F_GETFL inspects this owned descriptor without modifying it.
+    let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+    assert!(flags >= 0 && flags & libc::O_NONBLOCK != 0);
+    let mut sent = 0;
+    loop {
+        match send_byte(pipe, 0) {
+            Ok(()) => sent += 1,
+            Err(e) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::WouldBlock);
+                return sent;
+            }
+        }
+    }
+}
 
 /// How long to wait before trying again, and the longest that wait becomes.
 const FIRST_WAIT: Duration = Duration::from_secs(1);

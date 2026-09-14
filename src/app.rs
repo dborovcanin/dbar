@@ -895,7 +895,6 @@ impl App {
 
     /// Read what is due and redraw, without touching the timer.
     fn collect(&mut self) -> Option<std::time::Instant> {
-        self.reap();
         if self.native.tick() {
             self.invalidate();
         }
@@ -1008,12 +1007,12 @@ impl App {
         self.menu_request = request;
         close_below(&mut self.menus, 0);
         self.menu_intent = None;
-        self.opening = Some((output, key.clone(), x, width, request));
-        commands.send(crate::tray::Command::Menu {
-            key,
+        let accepted = commands.send(crate::tray::Command::Menu {
+            key: key.clone(),
             parent: 0,
             request,
         });
+        self.opening = accepted.then_some((output, key, x, width, request));
     }
 
     /// Pass a click on a tray icon to the application it belongs to.
@@ -1029,7 +1028,9 @@ impl App {
             _ => return,
         };
         match &self.tray_commands {
-            Some(commands) => commands.send(command),
+            Some(commands) => {
+                commands.send(command);
+            }
             None => log::debug!("no tray thread to tell"),
         }
     }
@@ -1403,12 +1404,12 @@ impl App {
         if let Some(commands) = &self.tray_commands {
             let request = self.menu_request.wrapping_add(1);
             self.menu_request = request;
-            self.menus[level].awaiting = Some((request, row));
-            commands.send(crate::tray::Command::Menu {
+            let accepted = commands.send(crate::tray::Command::Menu {
                 key,
                 parent: row,
                 request,
             });
+            self.menus[level].awaiting = accepted.then_some((request, row));
         }
     }
 
@@ -1494,19 +1495,16 @@ impl App {
         }
     }
 
-    /// Run a module's program, and clear away any that have already finished.
+    /// Run a module's program, keeping its handle until the child-exit notification.
     ///
     /// The child is detached the moment it starts: a bar must not wait on a calendar the
     /// user is still reading, and it has nothing to say about what the program printed, so
     /// the three standard streams go nowhere.
     ///
-    /// Reaping is done by hand rather than through SIGCHLD, and deliberately. Setting the
-    /// signal to be ignored, or sweeping with `waitpid(-1)`, would take the exit status of
-    /// every child in the process - and the i3bar provider and the `command` sources wait
-    /// on theirs, which would then fail. Holding these handles reaps exactly what a click
-    /// started and leaves the rest alone.
+    /// SIGCHLD wakes the loop, which reaps only these handles. Ignoring the signal or
+    /// sweeping with `waitpid(-1)` would take exit statuses from the provider and command
+    /// workers, which wait on their own children.
     fn run(&mut self, argv: &[String]) {
-        self.reap();
         let Some((program, args)) = argv.split_first() else {
             return;
         };
@@ -1527,10 +1525,9 @@ impl App {
         }
     }
 
-    /// Collect the children that have exited, so a click does not leave a zombie behind.
-    fn reap(&mut self) {
-        self.children
-            .retain_mut(|child| !matches!(child.try_wait(), Ok(Some(_)) | Err(_)));
+    /// A child exited, even if no collector or click has anything else to do.
+    pub fn reap_children(&mut self) {
+        crate::proc::reap(&mut self.children);
     }
 
     /// Where to send what a click on a volume module asks for.

@@ -19,6 +19,20 @@ use std::time::Duration;
 
 use std::os::unix::process::CommandExt as _;
 
+/// Reap only the click-launched children the caller owns. SIGCHLD can describe several
+/// exits at once, including children whose status belongs to another worker, so check
+/// every held handle without waiting or collecting unrelated processes.
+pub fn reap(children: &mut Vec<Child>) {
+    children.retain_mut(|child| match child.try_wait() {
+        Ok(Some(_)) => false,
+        Ok(None) => true,
+        Err(e) => {
+            log::warn!("could not reap click child {}: {e}", child.id());
+            true
+        }
+    });
+}
+
 /// How many programs dbar can have running at once.
 ///
 /// A fixed number rather than a list that grows, because the place this most needs to be

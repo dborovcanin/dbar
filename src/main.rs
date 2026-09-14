@@ -312,6 +312,7 @@ fn main() -> Result<()> {
     // A signal brings a reading forward: after `brightnessctl set`, the bar should say so
     // now rather than when the interval next comes round.
     let offsets: Vec<i32> = config.signals().keys().copied().collect();
+    let click_programs = config.modules().any(|module| module.on_click.is_some());
     // Which sources a click or a signal can ask for another reading, so a command that
     // nothing can ask keeps no thread waiting to be asked.
     let askable = config.refreshable();
@@ -333,12 +334,15 @@ fn main() -> Result<()> {
     }
 
     let (signal_tx, signal_rx) = calloop::channel::channel();
-    crate::signal::spawn(&offsets, signal_tx)?;
-    if !offsets.is_empty() {
+    let _signals = crate::signal::spawn(&offsets, click_programs, signal_tx)?;
+    if _signals.is_some() {
         handle
             .insert_source(signal_rx, |event, _, app: &mut App| {
-                if let calloop::channel::Event::Msg(offset) = event {
-                    app.on_signal(offset);
+                if let calloop::channel::Event::Msg(event) = event {
+                    match event {
+                        crate::signal::Event::Refresh(offset) => app.on_signal(offset),
+                        crate::signal::Event::ChildExited => app.reap_children(),
+                    }
                 }
             })
             .map_err(|e| anyhow::anyhow!("inserting the signal source: {e}"))?;

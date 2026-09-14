@@ -89,23 +89,21 @@ pub struct Commands {
 
 impl Commands {
     pub fn send(&self, command: Command) {
-        let byte = [match command {
+        let byte = match command {
             Command::PlayPause => 0u8,
             Command::Next => 1,
             Command::Previous => 2,
-        }];
-        // SAFETY: a write of one byte from a buffer owned here, to a descriptor this
-        // struct owns.
-        let written = unsafe { libc::write(self.pipe.as_raw_fd(), byte.as_ptr().cast(), 1) };
-        if written != 1 {
-            log::debug!("the media thread is not listening");
+        };
+        // A full pipe drops this command; waiting here would stop Wayland dispatch too.
+        if let Err(e) = crate::worker::send_byte(&self.pipe, byte) {
+            log::debug!("the media command was dropped: {e}");
         }
     }
 }
 
 /// Start watching the session bus, and report what is playing as it changes.
 pub fn spawn(sender: calloop::channel::Sender<Reading>) -> Result<Commands> {
-    let (read, write) = pipe()?;
+    let (read, write) = crate::worker::pipe().context("making a pipe for media commands")?;
     std::thread::Builder::new()
         .name("media".to_string())
         .spawn(move || {
@@ -134,20 +132,6 @@ fn silence(
         fields,
         state: State::Idle,
     })
-}
-
-fn pipe() -> Result<(OwnedFd, OwnedFd)> {
-    let mut ends = [0 as libc::c_int; 2];
-    // SAFETY: the array is owned here and is the length the call requires.
-    let made = unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) };
-    if made < 0 {
-        return Err(std::io::Error::last_os_error()).context("making a pipe for media commands");
-    }
-    // SAFETY: both descriptors are fresh, checked, and owned by nothing else.
-    unsafe {
-        use std::os::fd::FromRawFd as _;
-        Ok((OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])))
-    }
 }
 
 /// What one player last said about itself.
@@ -265,7 +249,17 @@ fn run(sender: &calloop::channel::Sender<Reading>, commands: &OwnedFd) -> Result
             // SAFETY: the buffer is owned here and the length is its own.
             let read =
                 unsafe { libc::read(commands.as_raw_fd(), byte.as_mut_ptr().cast(), byte.len()) };
-            if read <= 0 {
+            if read < 0 {
+                let error = std::io::Error::last_os_error();
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) {
+                    continue;
+                }
+                return Err(error).context("reading media commands");
+            }
+            if read == 0 {
                 return Ok(());
             }
             for command in byte[..read as usize]
@@ -457,6 +451,39 @@ fn readable(fd: std::os::fd::RawFd) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_full_command_pipe_drops_input_and_recovers_when_drained() {
+        use std::io::Read as _;
+
+        let (read, write) = crate::worker::pipe().unwrap();
+        let filled = crate::worker::fill_pipe(&write);
+        let commands = Commands { pipe: write };
+        commands.send(Command::Next);
+
+        let mut read = std::fs::File::from(read);
+        let mut pending = vec![0; filled];
+        read.read_exact(&mut pending).unwrap();
+        assert!(pending.iter().all(|&byte| byte == 0));
+        let mut byte = [0];
+        assert_eq!(
+            read.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        for command in [Command::PlayPause, Command::Next, Command::Previous] {
+            commands.send(command);
+            read.read_exact(&mut byte).unwrap();
+            assert_eq!(Command::from_byte(byte[0]), Some(command));
+        }
+    }
+
+    #[test]
+    fn a_closed_command_pipe_does_not_stop_the_bar() {
+        let (read, write) = crate::worker::pipe().unwrap();
+        drop(read);
+        Commands { pipe: write }.send(Command::PlayPause);
+    }
 
     fn playing(status: &str, title: Option<&str>) -> Playing {
         Playing {

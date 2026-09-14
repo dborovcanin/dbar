@@ -178,21 +178,28 @@ pub enum Command {
 /// byte and `poll()` takes descriptors rather than channels.
 pub struct Commands {
     pipe: OwnedFd,
-    queue: mpsc::Sender<Command>,
+    queue: mpsc::SyncSender<Command>,
 }
 
+/// Bound what a stalled application can leave waiting on the UI's behalf.
+const QUEUED_COMMANDS: usize = 16;
+
 impl Commands {
-    pub fn send(&self, command: Command) {
-        if self.queue.send(command).is_err() {
-            log::debug!("the tray thread is not listening");
-            return;
+    /// Whether the command was accepted. A menu must not wait for a request we dropped.
+    pub fn send(&self, command: Command) -> bool {
+        if let Err(e) = self.queue.try_send(command) {
+            log::debug!("the tray command was dropped: {e}");
+            return false;
         }
-        // SAFETY: a write of one byte from a buffer owned here, to a descriptor this
-        // struct owns.
-        let written = unsafe { libc::write(self.pipe.as_raw_fd(), [0u8].as_ptr().cast(), 1) };
-        if written != 1 {
-            log::debug!("the tray thread did not wake");
+        if let Err(e) = crate::worker::send_byte(&self.pipe, 0) {
+            // A full wake pipe already makes poll readable. The queued command is safe:
+            // the worker drains its orders after consuming a notification.
+            if e.kind() != std::io::ErrorKind::WouldBlock {
+                log::debug!("the tray thread did not wake: {e}");
+                return false;
+            }
         }
+        true
     }
 }
 
@@ -202,8 +209,8 @@ pub fn spawn(
     size: u32,
     theme: String,
 ) -> Result<Commands> {
-    let (read, write) = pipe()?;
-    let (queue, orders) = mpsc::channel();
+    let (read, write) = crate::worker::pipe().context("making a pipe for tray commands")?;
+    let (queue, orders) = mpsc::sync_channel(QUEUED_COMMANDS);
     let report = sender.clone();
     std::thread::Builder::new()
         .name("tray".to_string())
@@ -225,20 +232,6 @@ pub fn spawn(
         })
         .context("spawning the tray thread")?;
     Ok(Commands { pipe: write, queue })
-}
-
-fn pipe() -> Result<(OwnedFd, OwnedFd)> {
-    let mut ends = [0 as libc::c_int; 2];
-    // SAFETY: the array is owned here and is the length the call requires.
-    let made = unsafe { libc::pipe2(ends.as_mut_ptr(), libc::O_CLOEXEC) };
-    if made < 0 {
-        return Err(std::io::Error::last_os_error()).context("making a pipe for tray commands");
-    }
-    // SAFETY: both descriptors are fresh, checked, and owned by nothing else.
-    unsafe {
-        use std::os::fd::FromRawFd as _;
-        Ok((OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])))
-    }
 }
 
 /// One registered application, and everything read about it.
@@ -489,7 +482,17 @@ fn run(
             // SAFETY: the buffer is owned here and the length is its own.
             let read =
                 unsafe { libc::read(wake.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len()) };
-            if read <= 0 {
+            if read < 0 {
+                let error = std::io::Error::last_os_error();
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) {
+                    continue;
+                }
+                return Err(error).context("reading tray notifications");
+            }
+            if read == 0 {
                 return Ok(());
             }
             while let Ok(command) = orders.try_recv() {
@@ -1043,10 +1046,10 @@ fn fingerprint(value: &Value) -> u64 {
             match part {
                 Value::Int(number) => number.to_le_bytes().iter().for_each(|b| eat(*b)),
                 Value::Bytes(bytes) => {
-                    // Every byte of a large icon is not worth hashing; a stride through it
-                    // separates one icon from another just as well.
+                    // Every byte can change a visible pixel, including a small badge or
+                    // one colour channel. Sampling would miss those changes entirely.
                     bytes.len().to_le_bytes().iter().for_each(|b| eat(*b));
-                    bytes.iter().step_by(7).for_each(|b| eat(*b));
+                    bytes.iter().for_each(|b| eat(*b));
                 }
                 _ => {}
             }
@@ -1478,6 +1481,93 @@ mod tests {
             Value::Bytes(vec![7; 32]),
         ])]);
         assert_ne!(fingerprint(&pixmap(7)), fingerprint(&taller));
+    }
+
+    #[test]
+    fn changing_any_pixel_byte_changes_the_icon_fingerprint() {
+        let original = pixmap(255);
+        let rendered = icon::from_pixmaps(&original, 2).unwrap();
+        for at in 0..16 {
+            let mut bytes = vec![255; 16];
+            bytes[at] = 0;
+            let changed = Value::Seq(vec![Value::Seq(vec![
+                Value::Int(2),
+                Value::Int(2),
+                Value::Bytes(bytes),
+            ])]);
+            assert_ne!(icon::from_pixmaps(&changed, 2).unwrap(), rendered);
+            assert_ne!(fingerprint(&original), fingerprint(&changed), "byte {at}");
+        }
+    }
+
+    fn menu_request(request: u64) -> Command {
+        Command::Menu {
+            key: "test".into(),
+            parent: 0,
+            request,
+        }
+    }
+
+    #[test]
+    fn a_full_command_queue_refuses_requests_and_recovers_in_order() {
+        use std::io::Read as _;
+
+        let (read, write) = crate::worker::pipe().unwrap();
+        let (queue, orders) = mpsc::sync_channel(QUEUED_COMMANDS);
+        let commands = Commands { pipe: write, queue };
+        for request in 0..QUEUED_COMMANDS as u64 {
+            assert!(commands.send(menu_request(request)));
+        }
+        assert!(!commands.send(menu_request(100)));
+
+        let mut read = std::fs::File::from(read);
+        read.read_exact(&mut [0; QUEUED_COMMANDS]).unwrap();
+        assert!(matches!(
+            orders.try_recv(),
+            Ok(Command::Menu { request: 0, .. })
+        ));
+        assert!(commands.send(menu_request(200)));
+        for expected in (1..QUEUED_COMMANDS as u64).chain([200]) {
+            let Command::Menu { request, .. } = orders.try_recv().unwrap() else {
+                panic!("expected menu request")
+            };
+            assert_eq!(request, expected);
+        }
+        assert!(orders.try_recv().is_err());
+        read.read_exact(&mut [0]).unwrap();
+        assert_eq!(
+            read.read(&mut [0]).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        drop(orders);
+        assert!(!commands.send(menu_request(300)));
+    }
+
+    #[test]
+    fn a_full_wake_pipe_still_delivers_an_accepted_command() {
+        use std::io::Read as _;
+
+        let (read, write) = crate::worker::pipe().unwrap();
+        let filled = crate::worker::fill_pipe(&write);
+        let (queue, orders) = mpsc::sync_channel(QUEUED_COMMANDS);
+        let commands = Commands { pipe: write, queue };
+        assert!(commands.send(menu_request(42)));
+
+        // The existing notification wakes the worker, which drains queued commands.
+        let mut read = std::fs::File::from(read);
+        read.read_exact(&mut vec![0; filled]).unwrap();
+        assert!(matches!(
+            orders.try_recv(),
+            Ok(Command::Menu { request: 42, .. })
+        ));
+        assert!(orders.try_recv().is_err());
+
+        assert!(commands.send(menu_request(43)));
+        read.read_exact(&mut [0]).unwrap();
+        assert!(matches!(
+            orders.try_recv(),
+            Ok(Command::Menu { request: 43, .. })
+        ));
     }
 
     #[test]
