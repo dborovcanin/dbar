@@ -3,10 +3,11 @@
 //!
 //! This is the compositor's state in the bar's own terms. A backend speaks its compositor's
 //! IPC on threads of its own and publishes a whole `Desktop`; layout reads that and never
-//! learns which compositor it came from, or how that compositor spells a command. Sway is
-//! the only backend so far.
+//! learns which compositor it came from, or how that compositor spells a command. Sway and
+//! niri are the backends so far.
 
 use std::collections::HashMap;
+use std::os::unix::net::UnixStream;
 
 use anyhow::{Result, bail};
 
@@ -75,6 +76,9 @@ pub const LANGUAGE_FIELDS: &[FieldSpec] = &[
 /// One entry of the workspace list.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Workspace {
+    /// What the compositor calls this workspace for as long as it exists. A name need not
+    /// be that: niri's workspaces are often unnamed, and their positions move.
+    pub id: u64,
     pub name: String,
     /// The screen it is on, named the way the compositor names it: "DP-1". A bar on one
     /// screen lists the workspaces of that screen, so this is what ties the two together.
@@ -164,7 +168,9 @@ impl Publisher {
 /// is for without knowing how any compositor quotes a workspace name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
-    FocusWorkspace(String),
+    /// Both ways of naming the workspace travel, and each backend uses the one its compositor
+    /// switches by: sway takes a name, and niri an id.
+    FocusWorkspace { id: u64, name: String },
 }
 
 /// How many commands may be waiting for the compositor at once.
@@ -232,9 +238,27 @@ impl Watching {
     }
 }
 
+/// Whether another message has already arrived on a compositor's socket, so a burst can be
+/// taken in one go.
+///
+/// This asks the kernel only: a reader with a buffer of its own has to look in that first.
+pub fn more_waiting(stream: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd as _;
+
+    let mut poll = libc::pollfd {
+        fd: stream.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one descriptor owned by the caller for the length of this call, a count
+    // that matches, and a timeout of zero, so nothing here waits.
+    unsafe { libc::poll(&mut poll, 1, 0) > 0 }
+}
+
 /// The compositors dbar can talk to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
+    Niri,
     Sway,
 }
 
@@ -242,10 +266,15 @@ impl Backend {
     /// The compositor this session is running, which each one says by the socket it puts
     /// in the environment.
     pub fn detect() -> Result<Backend> {
+        // niri first: it hands its socket to everything it starts, and a niri started inside
+        // a Sway session - which is how it is usually tried out - passes Sway's along too.
+        if std::env::var_os("NIRI_SOCKET").is_some() {
+            return Ok(Backend::Niri);
+        }
         if std::env::var_os("SWAYSOCK").is_some() {
             return Ok(Backend::Sway);
         }
-        bail!("SWAYSOCK is not set; is this a Sway session?")
+        bail!("neither NIRI_SOCKET nor SWAYSOCK is set; dbar follows niri and Sway")
     }
 
     /// Connect, read what the compositor has now, and forward its changes into the event
@@ -256,6 +285,7 @@ impl Backend {
         watching: Watching,
     ) -> Result<()> {
         match self {
+            Backend::Niri => crate::niri::spawn(sender, watching),
             Backend::Sway => crate::sway::spawn(sender, watching),
         }
     }
@@ -263,6 +293,7 @@ impl Backend {
     /// Start the thread that carries clicks to the compositor.
     pub fn commands(self) -> Commands {
         match self {
+            Backend::Niri => Commands::spawn("niri-commands", crate::niri::run_command),
             Backend::Sway => Commands::spawn("sway-commands", crate::sway::run_command),
         }
     }

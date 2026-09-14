@@ -36,6 +36,14 @@ pub fn capped<R: BufRead>(reader: R) -> Lines<R> {
     }
 }
 
+impl<R> Lines<R> {
+    /// The reader underneath, for a caller that has to know whether more has already
+    /// arrived before it waits for it.
+    pub fn reader(&self) -> &R {
+        &self.reader
+    }
+}
+
 impl<R: BufRead> Iterator for Lines<R> {
     type Item = std::io::Result<Line>;
 

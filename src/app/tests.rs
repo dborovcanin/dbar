@@ -261,7 +261,10 @@ fn group_button_precedes_every_child_gesture_and_forwarded_action() {
             instance: None,
         }),
         Some(ActionTarget::Desktop(
-            crate::desktop::Command::FocusWorkspace("1".into()),
+            crate::desktop::Command::FocusWorkspace {
+                id: 1,
+                name: "1".into(),
+            },
         )),
     ];
     let modules = [

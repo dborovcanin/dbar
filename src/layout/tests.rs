@@ -580,6 +580,9 @@ padding = 0
 fn two_screens() -> Desktop {
     let workspace =
         |name: &str, output: &str, focused: bool, visible: bool| crate::desktop::Workspace {
+            id: name
+                .parse()
+                .expect("a test workspace is named by its number"),
             name: name.to_string(),
             output: output.to_string(),
             focused,

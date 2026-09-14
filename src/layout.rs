@@ -1235,9 +1235,10 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         background: None,
                         pages: 1,
                         // Switching is what clicking a workspace is for.
-                        action: Some(ActionTarget::Desktop(Command::FocusWorkspace(
-                            workspace.name.clone(),
-                        ))),
+                        action: Some(ActionTarget::Desktop(Command::FocusWorkspace {
+                            id: workspace.id,
+                            name: workspace.name.clone(),
+                        })),
                     });
                 }
             }

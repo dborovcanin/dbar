@@ -13,7 +13,7 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
 use crate::desktop::{
-    Command, Desktop, DesktopEvent, Layout, Publisher, Watching, Window, Workspace,
+    Command, Desktop, DesktopEvent, Layout, Publisher, Watching, Window, Workspace, more_waiting,
 };
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
@@ -40,6 +40,7 @@ const DEFAULT_MODE: &str = "default";
 /// One entry of the workspace list, as sway writes it.
 #[derive(Deserialize)]
 struct SwayWorkspace {
+    id: u64,
     name: String,
     #[serde(default)]
     output: String,
@@ -58,6 +59,7 @@ fn workspaces_of(body: &[u8]) -> Result<Vec<Workspace>> {
     Ok(list
         .into_iter()
         .map(|w| Workspace {
+            id: w.id,
             name: w.name,
             output: w.output,
             focused: w.focused,
@@ -93,23 +95,6 @@ fn send(stream: &mut UnixStream, kind: u32, payload: &[u8]) -> Result<()> {
         .write_all(&header)
         .context("writing an IPC message")?;
     stream.flush().context("flushing an IPC message")
-}
-
-/// Whether another message has already arrived, so a burst can be taken in one go.
-///
-/// Messages are read straight off the socket rather than through a buffer, so asking the
-/// kernel is the whole of it: nothing can be waiting anywhere else.
-fn more_waiting(stream: &UnixStream) -> bool {
-    use std::os::fd::AsRawFd as _;
-
-    let mut poll = libc::pollfd {
-        fd: stream.as_raw_fd(),
-        events: libc::POLLIN,
-        revents: 0,
-    };
-    // SAFETY: one descriptor owned by the caller for the length of this call, a count
-    // that matches, and a timeout of zero, so nothing here waits.
-    unsafe { libc::poll(&mut poll, 1, 0) > 0 }
 }
 
 fn recv(stream: &mut UnixStream) -> Result<(u32, Vec<u8>)> {
@@ -304,7 +289,7 @@ fn read_mode(queries: &mut UnixStream) -> Result<Option<String>> {
 /// Run a command on its own connection, since the subscribed one cannot carry it.
 pub fn run_command(command: Command) {
     let command = match command {
-        Command::FocusWorkspace(name) => format!("workspace {}", quote(&name)),
+        Command::FocusWorkspace { name, .. } => format!("workspace {}", quote(&name)),
     };
     let result = (|| -> Result<()> {
         let mut stream = connect()?;
@@ -564,12 +549,13 @@ mod tests {
     #[test]
     fn a_workspace_says_which_screen_it_is_on() {
         let list = workspaces_of(
-            br#"[{"name":"1","output":"DP-1","focused":true,"visible":true},
-                {"name":"2","output":"HDMI-A-1","visible":true}]"#,
+            br#"[{"id":4,"name":"1","output":"DP-1","focused":true,"visible":true},
+                {"id":7,"name":"2","output":"HDMI-A-1","visible":true}]"#,
         )
         .expect("a workspace list parses");
         assert_eq!(list[0].output, "DP-1");
         assert_eq!(list[1].output, "HDMI-A-1");
+        assert_eq!(list[1].id, 7);
         assert!(!list[1].focused);
     }
 

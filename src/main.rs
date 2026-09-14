@@ -11,6 +11,7 @@ mod geometry;
 mod icon;
 mod layout;
 mod lines;
+mod niri;
 mod proc;
 mod render;
 mod signal;
