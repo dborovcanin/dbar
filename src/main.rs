@@ -5,6 +5,7 @@ mod collect;
 mod color;
 mod config;
 mod dbus;
+mod desktop;
 mod format;
 mod geometry;
 mod icon;
@@ -301,7 +302,7 @@ fn main() -> Result<()> {
 
     let config_collectors = config.collectors();
     // Read before the config is handed to the app, which is what owns it from here on.
-    let watching = crate::sway::Watching {
+    let watching = crate::desktop::Watching {
         language: config.needs_language(),
         mode: config.needs_mode(),
         windows: config.needs_windows(),
@@ -518,23 +519,25 @@ fn main() -> Result<()> {
     if !watching.anything() {
         log::info!("no module comes from the compositor, so it is not connected to");
     } else {
-        let (sway_tx, sway_rx) = calloop::channel::channel();
-        match crate::sway::spawn(sway_tx, watching) {
-            Ok(()) => {
+        let (desktop_tx, desktop_rx) = calloop::channel::channel();
+        let backend = crate::desktop::Backend::detect()
+            .and_then(|backend| backend.spawn(desktop_tx, watching).map(|()| backend));
+        match backend {
+            Ok(backend) => {
                 // Clicking a workspace is the only thing that sends the compositor a
                 // command, and it goes out on a thread of its own: a click must not wait
                 // on the compositor, because the thread it arrives on is the one that
                 // draws.
                 if watching.workspaces {
-                    app.set_sway_commands(crate::sway::commands());
+                    app.set_desktop_commands(backend.commands());
                 }
                 handle
-                    .insert_source(sway_rx, |event, _, app: &mut App| {
+                    .insert_source(desktop_rx, |event, _, app: &mut App| {
                         if let calloop::channel::Event::Msg(event) = event {
-                            app.on_sway(event);
+                            app.on_desktop(event);
                         }
                     })
-                    .map_err(|e| anyhow::anyhow!("inserting the sway source: {e}"))?;
+                    .map_err(|e| anyhow::anyhow!("inserting the compositor source: {e}"))?;
             }
             Err(e) => log::warn!("compositor integration unavailable: {e}"),
         }

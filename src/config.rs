@@ -53,13 +53,13 @@ pub enum Source {
     #[default]
     Provider,
     /// The title of the focused window, on this screen or in the session.
-    SwayWindow(Scope),
+    Window(Scope),
     /// One entry per workspace, expanded at layout time.
-    SwayWorkspaces(WorkspaceView),
+    Workspaces(WorkspaceView),
     /// The active keyboard layout, with the short forms the module gives its layouts.
-    SwayLanguage(BTreeMap<String, String>),
+    Language(BTreeMap<String, String>),
     /// The binding mode the compositor is in.
-    SwayMode,
+    Mode,
     /// One entry per application in the system tray, expanded at layout time.
     Tray(TrayView),
 }
@@ -152,10 +152,10 @@ impl Source {
         match self {
             Source::Native(which) => which.fields(),
             Source::Provider => crate::status::i3bar::FIELDS,
-            Source::SwayWindow(_) => crate::sway::WINDOW_FIELDS,
-            Source::SwayWorkspaces(_) => crate::sway::WORKSPACE_FIELDS,
-            Source::SwayLanguage(_) => crate::sway::LANGUAGE_FIELDS,
-            Source::SwayMode => crate::sway::MODE_FIELDS,
+            Source::Window(_) => crate::desktop::WINDOW_FIELDS,
+            Source::Workspaces(_) => crate::desktop::WORKSPACE_FIELDS,
+            Source::Language(_) => crate::desktop::LANGUAGE_FIELDS,
+            Source::Mode => crate::desktop::MODE_FIELDS,
             Source::Tray(_) => crate::tray::FIELDS,
         }
     }
@@ -168,10 +168,10 @@ impl Source {
         match self {
             Source::Native(which) => which.default_format(),
             Source::Provider => "$text",
-            Source::SwayWindow(_) => "$title",
-            Source::SwayWorkspaces(_) => "$name",
-            Source::SwayLanguage(_) => " $short ",
-            Source::SwayMode => " $mode ",
+            Source::Window(_) => "$title",
+            Source::Workspaces(_) => "$name",
+            Source::Language(_) => " $short ",
+            Source::Mode => " $mode ",
             // A tray item is its icon; the application's name beside every one of them
             // would be a row of words where a row of pictures was asked for.
             Source::Tray(_) => "",
@@ -1607,24 +1607,24 @@ impl Config {
     /// the answer, so a bar without a language module never asks.
     pub fn needs_language(&self) -> bool {
         self.modules()
-            .any(|m| matches!(m.source, Source::SwayLanguage(_)))
+            .any(|m| matches!(m.source, Source::Language(_)))
     }
 
     /// Whether anything on the bar draws the compositor's binding mode.
     pub fn needs_mode(&self) -> bool {
-        self.modules().any(|m| m.source == Source::SwayMode)
+        self.modules().any(|m| m.source == Source::Mode)
     }
 
     /// Whether anything on the bar draws the focused window.
     pub fn needs_windows(&self) -> bool {
         self.modules()
-            .any(|m| matches!(m.source, Source::SwayWindow(_)))
+            .any(|m| matches!(m.source, Source::Window(_)))
     }
 
     /// Whether anything on the bar draws the workspace list.
     pub fn needs_workspaces(&self) -> bool {
         self.modules()
-            .any(|m| matches!(m.source, Source::SwayWorkspaces(_)))
+            .any(|m| matches!(m.source, Source::Workspaces(_)))
     }
 
     /// Whether anything in this config comes from an external status provider.
@@ -1956,13 +1956,13 @@ pub fn sources() -> Vec<(&'static str, Source)> {
             })),
         ),
         ("provider", Source::Provider),
-        ("sway:window", Source::SwayWindow(Scope::Output)),
+        ("sway:window", Source::Window(Scope::Output)),
         (
             "sway:workspaces",
-            Source::SwayWorkspaces(WorkspaceView::default()),
+            Source::Workspaces(WorkspaceView::default()),
         ),
-        ("sway:language", Source::SwayLanguage(Default::default())),
-        ("sway:mode", Source::SwayMode),
+        ("sway:language", Source::Language(Default::default())),
+        ("sway:mode", Source::Mode),
         ("tray", Source::Tray(TrayView::default())),
     ]
 }
@@ -1976,7 +1976,7 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
     let name = raw.and_then(|m| m.source.as_deref()).unwrap_or("provider");
     let source = match name {
         "provider" => Source::Provider,
-        "sway:window" => Source::SwayWindow(raw.and_then(|m| m.scope).unwrap_or_default()),
+        "sway:window" => Source::Window(raw.and_then(|m| m.scope).unwrap_or_default()),
         "sway:workspaces" => {
             let mut icons = BTreeMap::new();
             if let Some(written) = raw.map(|m| &m.icons) {
@@ -1987,13 +1987,13 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
                     icons.insert(workspace.clone(), icon);
                 }
             }
-            Source::SwayWorkspaces(WorkspaceView {
+            Source::Workspaces(WorkspaceView {
                 scope: raw.and_then(|m| m.scope).unwrap_or_default(),
                 icons,
             })
         }
-        "sway:language" => Source::SwayLanguage(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
-        "sway:mode" => Source::SwayMode,
+        "sway:language" => Source::Language(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
+        "sway:mode" => Source::Mode,
         "tray" => Source::Tray(TrayView {
             show_passive: raw.and_then(|m| m.show_passive).unwrap_or(true),
             order: raw.map(|m| m.order.clone()).unwrap_or_default(),

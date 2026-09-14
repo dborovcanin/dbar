@@ -218,7 +218,7 @@ fn paint_costs_this_much_per_frame() {
                 let inputs = crate::layout::Inputs {
                     items: &items,
                     native: &native,
-                    sway: &Default::default(),
+                    desktop: &Default::default(),
                     alt: &Default::default(),
                     pages: &Default::default(),
                     collapsed_groups: &Default::default(),
@@ -358,7 +358,7 @@ icon = "$clock"
     let inputs = Inputs {
         items: &items,
         native: &native,
-        sway: &Default::default(),
+        desktop: &Default::default(),
         alt: &Default::default(),
         pages: &Default::default(),
         collapsed: &collapsed,
@@ -1375,7 +1375,7 @@ background = '#458588'
         let inputs = Inputs {
             items: &items,
             native: &native,
-            sway: &Default::default(),
+            desktop: &Default::default(),
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
@@ -1499,7 +1499,7 @@ background = '#458588'
             let inputs = Inputs {
                 items: &items,
                 native: &native,
-                sway: &Default::default(),
+                desktop: &Default::default(),
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed_groups: shut,
@@ -1581,7 +1581,7 @@ fn a_rounded_corner_survives_an_island_that_ends_between_pixels() {
     let inputs = Inputs {
         items: &items,
         native: &native,
-        sway: &Default::default(),
+        desktop: &Default::default(),
         alt: &Default::default(),
         pages: &Default::default(),
         collapsed_groups: &Default::default(),
@@ -1672,7 +1672,7 @@ fn a_fold_arrives_with_nothing_standing_in_the_lean_of_its_cap() {
         let inputs = Inputs {
             items: &items,
             native: &native,
-            sway: &Default::default(),
+            desktop: &Default::default(),
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: shut,
@@ -1765,7 +1765,7 @@ format = '$text'
         let inputs = Inputs {
             items,
             native: &native,
-            sway: &Default::default(),
+            desktop: &Default::default(),
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed: &Default::default(),
@@ -1888,7 +1888,7 @@ fn ribbon_frame(
     let inputs = crate::layout::Inputs {
         items,
         native: &crate::collect::Registry::new(&Default::default()),
-        sway: &Default::default(),
+        desktop: &Default::default(),
         alt: &Default::default(),
         pages: &Default::default(),
         collapsed_groups: &Default::default(),
@@ -2158,7 +2158,7 @@ fn fold_ribbon(at: f32, joined: bool) -> Frame {
     let inputs = Inputs {
         items: &items,
         native: &native,
-        sway: &Default::default(),
+        desktop: &Default::default(),
         alt: &Default::default(),
         pages: &Default::default(),
         collapsed_groups: &Default::default(),
@@ -2428,7 +2428,7 @@ fn a_folding_island_leaves_the_open_side_of_its_cap_alone() {
         let inputs = Inputs {
             items: &items,
             native: &native,
-            sway: &Default::default(),
+            desktop: &Default::default(),
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed: &Default::default(),
@@ -2568,7 +2568,7 @@ fn a_sliver_of_a_module_at_a_rounded_corner_stays_inside_it() {
         let inputs = Inputs {
             items: &items,
             native: &native,
-            sway: &Default::default(),
+            desktop: &Default::default(),
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed: &Default::default(),
@@ -2689,7 +2689,7 @@ fn a_folding_island_paints_nothing_outside_its_own_outline() {
         let inputs = Inputs {
             items: &items,
             native: &native,
-            sway: &Default::default(),
+            desktop: &Default::default(),
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed: &Default::default(),
@@ -2830,7 +2830,7 @@ fn collapsed_groups_keep_islands_caps_and_damage_every_changed_pixel() {
                     let inputs = Inputs {
                         items: &items,
                         native: &native,
-                        sway: &Default::default(),
+                        desktop: &Default::default(),
                         alt: &Default::default(),
                         pages: &Default::default(),
                         collapsed: &Default::default(),
@@ -2935,7 +2935,7 @@ foreground = "#ffffffff"
         let inputs = crate::layout::Inputs {
             items: &items,
             native: &native,
-            sway: &Default::default(),
+            desktop: &Default::default(),
             alt: &showing,
             pages: &Default::default(),
             collapsed: &Default::default(),
@@ -3031,7 +3031,7 @@ icon = "$cpu"
         let inputs = crate::layout::Inputs {
             items: &items,
             native: &native,
-            sway: &Default::default(),
+            desktop: &Default::default(),
             alt: &showing,
             pages: &Default::default(),
             collapsed: &Default::default(),
@@ -3182,7 +3182,7 @@ foreground = "#ffffffff"
             let inputs = Inputs {
                 items: &items,
                 native: &native,
-                sway: &Default::default(),
+                desktop: &Default::default(),
                 alt: &Default::default(),
                 pages: &Default::default(),
                 collapsed: shut,
@@ -3345,7 +3345,7 @@ foreground = "#ffffff"
         let inputs = Inputs {
             items: &items,
             native: &native,
-            sway: &Default::default(),
+            desktop: &Default::default(),
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed: modules,

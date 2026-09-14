@@ -690,7 +690,7 @@ source = "{source}"
 
     let parsed = Config::parse(&config("sway:language")).expect("parses");
     assert!(parsed.needs_language());
-    let Source::SwayLanguage(layouts) = &parsed.modules().next().expect("one module").source else {
+    let Source::Language(layouts) = &parsed.modules().next().expect("one module").source else {
         panic!("the module should read the compositor's keyboard layout");
     };
     assert_eq!(layouts["English (US)"], "EN");
@@ -1257,11 +1257,8 @@ scope = "session"
             .source
             .clone()
     };
-    assert_eq!(
-        source("ws"),
-        Source::SwayWorkspaces(WorkspaceView::default())
-    );
-    assert_eq!(source("win"), Source::SwayWindow(Scope::Session));
+    assert_eq!(source("ws"), Source::Workspaces(WorkspaceView::default()));
+    assert_eq!(source("win"), Source::Window(Scope::Session));
 }
 
 #[test]
@@ -1850,7 +1847,7 @@ fn none_means_no_icon_wherever_an_icon_is_written() {
          icons = { '1' = 'none', '2' = '$arch', '3' = 'x' }",
     )
     .unwrap();
-    let crate::config::Source::SwayWorkspaces(view) = &workspaces.modules().next().unwrap().source
+    let crate::config::Source::Workspaces(view) = &workspaces.modules().next().unwrap().source
     else {
         panic!("a workspaces module");
     };
@@ -1989,7 +1986,7 @@ fn no_shipped_example_writes_a_native_icon_as_text() {
                             found(&format!("{at}.collapsed"), suspect(&style.icon));
                         }
                     }
-                    if let Source::SwayWorkspaces(view) = &module.source {
+                    if let Source::Workspaces(view) = &module.source {
                         for (workspace, icon) in &view.icons {
                             found(&format!("{at} workspace {workspace:?}"), suspect(icon));
                         }

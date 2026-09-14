@@ -38,12 +38,12 @@ use wayland_client::{
 
 use crate::collect::{Registry, Which, watch};
 use crate::config::{BarLayer, Button, Config, Edge};
+use crate::desktop::{self, Desktop, DesktopEvent};
 use crate::layout::{self, Frame, Inputs, MenuFrame, PlacedModule};
 use crate::render;
 use crate::status::{
     ActionTarget, ClickEvent, Control, I3BarProvider, StatusEvent, StatusItem, i3bar,
 };
-use crate::sway::{self, SwayEvent, SwayState};
 use crate::text::TextRenderer;
 
 mod animation;
@@ -396,13 +396,13 @@ pub struct App {
     /// Whether a failed control has already been reported, so a scroll logs once.
     control_warned: bool,
     /// Workspaces and the focused window, when a compositor is talking to us.
-    sway: SwayState,
+    desktop: Desktop,
     /// What the system tray is showing, when a module asks for one.
     tray: crate::tray::TrayState,
     /// The way into the tray thread, when a click has to reach an application.
     tray_commands: Option<crate::tray::Commands>,
     /// The way to run a compositor command, when there is a compositor to run one.
-    sway_commands: Option<sway::Commands>,
+    desktop_commands: Option<desktop::Commands>,
     /// The menu a tray icon has open, and any submenus below it, outermost first.
     ///
     /// A stack rather than one surface, because a menu that opens another has to keep the
@@ -506,10 +506,10 @@ impl App {
             control_warned: false,
             provider,
             items: Vec::new(),
-            sway: SwayState::default(),
+            desktop: Desktop::default(),
             tray: crate::tray::TrayState::default(),
             tray_commands: None,
-            sway_commands: None,
+            desktop_commands: None,
             menu_request: 0,
             menus: Vec::new(),
             menu_intent: None,
@@ -555,16 +555,16 @@ impl App {
     }
 
     /// Handle one message from the compositor.
-    pub fn on_sway(&mut self, event: SwayEvent) {
+    pub fn on_desktop(&mut self, event: DesktopEvent) {
         match event {
-            SwayEvent::State(state) => {
-                self.sway = *state;
+            DesktopEvent::State(state) => {
+                self.desktop = *state;
                 self.invalidate();
             }
-            SwayEvent::Stopped(reason) => {
+            DesktopEvent::Stopped(reason) => {
                 // The bar keeps working without the compositor; only its modules go quiet.
-                log::warn!("sway IPC stopped: {reason}");
-                self.sway = SwayState::default();
+                log::warn!("compositor IPC stopped: {reason}");
+                self.desktop = Desktop::default();
                 self.invalidate();
             }
         }
@@ -741,8 +741,8 @@ impl App {
     }
 
     /// Where to send what a click on a workspace asks the compositor for.
-    pub fn set_sway_commands(&mut self, commands: sway::Commands) {
-        self.sway_commands = Some(commands);
+    pub fn set_desktop_commands(&mut self, commands: desktop::Commands) {
+        self.desktop_commands = Some(commands);
     }
 
     /// Take what the tray thread says is on the bus.
@@ -1657,7 +1657,7 @@ impl App {
             fault,
             items,
             native,
-            sway,
+            desktop,
             alt,
             pages,
             collapsed,
@@ -1677,7 +1677,7 @@ impl App {
         let inputs = Inputs {
             items,
             native,
-            sway,
+            desktop,
             alt,
             pages,
             collapsed,
@@ -1926,9 +1926,9 @@ impl App {
                 match action {
                     // A module backed by the compositor acts on its own rather than
                     // forwarding.
-                    ActionTarget::Sway(command) => {
+                    ActionTarget::Desktop(command) => {
                         if button == Button::Left.number() {
-                            match &self.sway_commands {
+                            match &self.desktop_commands {
                                 Some(commands) => commands.send(command),
                                 None => log::debug!("no compositor to run {command:?}"),
                             }

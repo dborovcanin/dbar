@@ -100,7 +100,7 @@ fn frame_waiting(
     let inputs = Inputs {
         items,
         native: &native,
-        sway: &SwayState::default(),
+        desktop: &Desktop::default(),
         alt,
         pages,
         collapsed,
@@ -147,12 +147,12 @@ padding = 0
 "English (US)" = "EN"
 "##;
     let cfg = Config::parse(config).expect("test config parses");
-    let mut sway = SwayState::default();
-    let render = |sway: &SwayState| {
+    let mut desktop = Desktop::default();
+    let render = |desktop: &Desktop| {
         let inputs = Inputs {
             items: &[],
             native: &Registry::new(&Default::default()),
-            sway,
+            desktop,
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
@@ -171,20 +171,20 @@ padding = 0
 
     // Nothing to show before the compositor has said anything, the same as a collector
     // that has not read yet.
-    assert_eq!(render(&sway), None);
+    assert_eq!(render(&desktop), None);
 
-    sway.layout = Some(crate::sway::Layout {
+    desktop.layout = Some(crate::desktop::Layout {
         name: "English (US)".to_string(),
         index: 0,
     });
-    assert_eq!(render(&sway).as_deref(), Some(" EN "));
+    assert_eq!(render(&desktop).as_deref(), Some(" EN "));
 
     // A layout the config does not name is abbreviated rather than left out.
-    sway.layout = Some(crate::sway::Layout {
+    desktop.layout = Some(crate::desktop::Layout {
         name: "Serbian".to_string(),
         index: 1,
     });
-    assert_eq!(render(&sway).as_deref(), Some(" SE "));
+    assert_eq!(render(&desktop).as_deref(), Some(" SE "));
 }
 
 /// A bar exists once per screen, so its workspace list is about that screen. Listing
@@ -204,12 +204,12 @@ source = "sway:workspaces"
 padding = 0
 "##;
     let cfg = Config::parse(config).expect("test config parses");
-    let sway = two_screens();
+    let desktop = two_screens();
     let on = |output: Option<&str>| {
         let inputs = Inputs {
             items: &[],
             native: &Registry::new(&Default::default()),
-            sway: &sway,
+            desktop: &desktop,
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
@@ -246,11 +246,11 @@ fn workspaces(
     collapsed: &std::collections::HashSet<String>,
 ) -> Frame {
     let cfg = Config::parse(config).expect("test config parses");
-    let sway = two_screens();
+    let desktop = two_screens();
     let inputs = Inputs {
         items: &[],
         native: &Registry::new(&Default::default()),
-        sway: &sway,
+        desktop: &desktop,
         alt: &Default::default(),
         pages: &Default::default(),
         collapsed_groups: &Default::default(),
@@ -330,7 +330,7 @@ icon_gap = 1
 padding = 0
 "##;
     let cfg = Config::parse(config).unwrap();
-    let sway = two_screens();
+    let desktop = two_screens();
     let native = Registry::new(&Default::default());
     let groups = ["g".to_string()].into();
     let moving = [("g".to_string(), 0.5)].into();
@@ -340,7 +340,7 @@ padding = 0
         let inputs = Inputs {
             items: &[],
             native: &native,
-            sway: &sway,
+            desktop: &desktop,
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed: &Default::default(),
@@ -505,11 +505,11 @@ scope = "session"
 padding = 0
 "##;
     let cfg = Config::parse(config).expect("test config parses");
-    let sway = two_screens();
+    let desktop = two_screens();
     let inputs = Inputs {
         items: &[],
         native: &Registry::new(&Default::default()),
-        sway: &sway,
+        desktop: &desktop,
         alt: &Default::default(),
         pages: &Default::default(),
         collapsed_groups: &Default::default(),
@@ -547,12 +547,12 @@ source = "sway:window"
 padding = 0
 "##;
     let cfg = Config::parse(config).expect("test config parses");
-    let sway = two_screens();
+    let desktop = two_screens();
     let on = |output: Option<&str>| {
         let inputs = Inputs {
             items: &[],
             native: &Registry::new(&Default::default()),
-            sway: &sway,
+            desktop: &desktop,
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
@@ -577,16 +577,16 @@ padding = 0
 
 /// Two screens, the keyboard on the first, and a workspace on each plus one more that
 /// is open but not on screen.
-fn two_screens() -> SwayState {
+fn two_screens() -> Desktop {
     let workspace =
-        |name: &str, output: &str, focused: bool, visible: bool| crate::sway::Workspace {
+        |name: &str, output: &str, focused: bool, visible: bool| crate::desktop::Workspace {
             name: name.to_string(),
             output: output.to_string(),
             focused,
             visible,
             urgent: false,
         };
-    SwayState {
+    Desktop {
         workspaces: vec![
             workspace("1", "DP-1", true, true),
             workspace("2", "HDMI-A-1", false, true),
@@ -597,7 +597,7 @@ fn two_screens() -> SwayState {
             .map(|(output, title, app_id)| {
                 (
                     output.to_string(),
-                    crate::sway::Window {
+                    crate::desktop::Window {
                         title: title.to_string(),
                         app_id: app_id.to_string(),
                         class: String::new(),
@@ -606,7 +606,7 @@ fn two_screens() -> SwayState {
             })
             .collect(),
         focused_output: Some("DP-1".to_string()),
-        ..SwayState::default()
+        ..Desktop::default()
     }
 }
 
@@ -627,11 +627,11 @@ source = "sway:window"
 format = "$app_id|$class|'?': $title"
 "##;
     let cfg = Config::parse(config).expect("test config parses");
-    let sway = two_screens();
+    let desktop = two_screens();
     let inputs = Inputs {
         items: &[],
         native: &Registry::new(&Default::default()),
-        sway: &sway,
+        desktop: &desktop,
         alt: &Default::default(),
         pages: &Default::default(),
         collapsed_groups: &Default::default(),
@@ -796,7 +796,7 @@ fn render_with(cfg: &Config, tray: &crate::tray::TrayState) -> Frame {
     let inputs = Inputs {
         items: &[],
         native: &Registry::new(&Default::default()),
-        sway: &SwayState::default(),
+        desktop: &Desktop::default(),
         alt: &Default::default(),
         pages: &Default::default(),
         collapsed_groups: &Default::default(),
@@ -1172,12 +1172,12 @@ source = "sway:mode"
 padding = 0
 "##;
     let cfg = Config::parse(config).expect("test config parses");
-    let mut sway = SwayState::default();
-    let render = |sway: &SwayState| {
+    let mut desktop = Desktop::default();
+    let render = |desktop: &Desktop| {
         let inputs = Inputs {
             items: &[],
             native: &Registry::new(&Default::default()),
-            sway,
+            desktop,
             alt: &Default::default(),
             pages: &Default::default(),
             collapsed_groups: &Default::default(),
@@ -1194,18 +1194,16 @@ padding = 0
         frame.groups.first().map(|g| g.modules[0].text.clone())
     };
 
-    // Before the compositor has answered, and while it is in the default mode, the
-    // module draws nothing and takes the group with it.
-    assert_eq!(render(&sway), None);
-    sway.mode = Some(crate::sway::DEFAULT_MODE.to_string());
-    assert_eq!(render(&sway), None);
+    // Before the compositor has answered, and while no mode is held, the module draws
+    // nothing and takes the group with it.
+    assert_eq!(render(&desktop), None);
 
-    sway.mode = Some("resize".to_string());
-    assert_eq!(render(&sway).as_deref(), Some(" resize "));
+    desktop.mode = Some("resize".to_string());
+    assert_eq!(render(&desktop).as_deref(), Some(" resize "));
 
     // And it goes away again when the mode is left.
-    sway.mode = Some(crate::sway::DEFAULT_MODE.to_string());
-    assert_eq!(render(&sway), None);
+    desktop.mode = None;
+    assert_eq!(render(&desktop), None);
 }
 
 #[test]
@@ -2206,7 +2204,7 @@ fn joined_frame(
     let inputs = Inputs {
         items,
         native: &Registry::new(&Default::default()),
-        sway: &SwayState::default(),
+        desktop: &Desktop::default(),
         alt: &Default::default(),
         pages: &Default::default(),
         collapsed_groups: &Default::default(),
@@ -2475,7 +2473,7 @@ fn group_inputs<'a>(
         std::sync::LazyLock::new(Default::default);
     static EMPTY_MAP: std::sync::LazyLock<std::collections::HashMap<String, usize>> =
         std::sync::LazyLock::new(Default::default);
-    static SWAY: std::sync::LazyLock<SwayState> = std::sync::LazyLock::new(Default::default);
+    static DESKTOP: std::sync::LazyLock<Desktop> = std::sync::LazyLock::new(Default::default);
     static TRAY: std::sync::LazyLock<crate::tray::TrayState> =
         std::sync::LazyLock::new(Default::default);
     static WAITING: std::sync::LazyLock<std::collections::HashSet<Which>> =
@@ -2487,7 +2485,7 @@ fn group_inputs<'a>(
     Inputs {
         items,
         native,
-        sway: &SWAY,
+        desktop: &DESKTOP,
         alt: &EMPTY_MAP,
         pages: &EMPTY_MAP,
         collapsed: &EMPTY_SET,

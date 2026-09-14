@@ -260,7 +260,9 @@ fn group_button_precedes_every_child_gesture_and_forwarded_action() {
             name: Some("block".into()),
             instance: None,
         }),
-        Some(ActionTarget::Sway("workspace 1".into())),
+        Some(ActionTarget::Desktop(
+            crate::desktop::Command::FocusWorkspace("1".into()),
+        )),
     ];
     let modules = [
         PlacedModule {

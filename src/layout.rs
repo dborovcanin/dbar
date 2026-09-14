@@ -15,8 +15,8 @@ use crate::icon::{self, Icon};
 use std::sync::Arc;
 
 use crate::config::{Button, ClickActions};
+use crate::desktop::{Command, Desktop};
 use crate::status::{ActionTarget, Fields, StatusItem, Unit, Value};
-use crate::sway::SwayState;
 
 /// Everything the bar currently knows, whoever it came from.
 ///
@@ -27,7 +27,8 @@ pub struct Inputs<'a> {
     pub items: &'a [StatusItem],
     /// The latest reading from each collector dbar runs itself.
     pub native: &'a Registry,
-    pub sway: &'a SwayState,
+    /// What the compositor has said: workspaces, windows, keyboard layout and mode.
+    pub desktop: &'a Desktop,
     /// Modules currently showing their second wording, by name.
     pub alt: &'a std::collections::HashMap<String, usize>,
     /// Which page each module is scrolled to, by name, for a source that published
@@ -95,13 +96,13 @@ impl<'a> Inputs<'a> {
 
     /// The window this bar is about: the one on its own screen, or whichever has the
     /// session's focus.
-    fn window(&self, scope: Scope) -> Option<&crate::sway::Window> {
-        let sway = self.sway;
+    fn window(&self, scope: Scope) -> Option<&crate::desktop::Window> {
+        let desktop = self.desktop;
         let output = match scope {
-            Scope::Output => self.output.or(sway.focused_output.as_deref()),
-            Scope::Session => sway.focused_output.as_deref(),
+            Scope::Output => self.output.or(desktop.focused_output.as_deref()),
+            Scope::Session => desktop.focused_output.as_deref(),
         }?;
-        sway.windows.get(output)
+        desktop.windows.get(output)
     }
 }
 
@@ -1074,7 +1075,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     }
                 }
             }
-            Source::SwayWindow(scope) => {
+            Source::Window(scope) => {
                 if let Some(window) = inputs.window(*scope) {
                     let mut fields = Fields::default();
                     fields.set("title", Value::Text(window.title.clone()));
@@ -1102,15 +1103,15 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     });
                 }
             }
-            Source::SwayLanguage(layouts) => {
-                if let Some(layout) = &inputs.sway.layout {
+            Source::Language(layouts) => {
+                if let Some(layout) = &inputs.desktop.layout {
                     let mut fields = Fields::default();
                     // What the module calls this layout if it says, and an abbreviation of
                     // xkb's own name if it does not.
                     let short = layouts
                         .get(&layout.name)
                         .cloned()
-                        .unwrap_or_else(|| crate::sway::abbreviate(&layout.name));
+                        .unwrap_or_else(|| crate::desktop::abbreviate(&layout.name));
                     fields.set("layout", Value::Text(layout.name.clone()));
                     fields.set("short", Value::Text(short));
                     fields.set(
@@ -1137,13 +1138,11 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     });
                 }
             }
-            Source::SwayMode => {
-                // Only while the compositor is in a mode worth mentioning: the default one
-                // is what a keyboard does anyway, so the module disappears rather than
-                // saying so, the way i3 and sway's own bars do.
-                if let Some(mode) = &inputs.sway.mode
-                    && mode != crate::sway::DEFAULT_MODE
-                {
+            Source::Mode => {
+                // Only while a mode is held: the ordinary one is what a keyboard does
+                // anyway, and a backend reports it as no mode at all, so the module
+                // disappears rather than saying so, the way i3 and sway's own bars do.
+                if let Some(mode) = &inputs.desktop.mode {
                     let mut fields = Fields::default();
                     fields.set("mode", Value::Text(mode.clone()));
                     out.push(Candidate {
@@ -1201,8 +1200,8 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                     });
                 }
             }
-            Source::SwayWorkspaces(view) => {
-                for workspace in &inputs.sway.workspaces {
+            Source::Workspaces(view) => {
+                for workspace in &inputs.desktop.workspaces {
                     if !inputs.on_this_screen(view.scope, &workspace.output) {
                         continue;
                     }
@@ -1236,9 +1235,8 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         background: None,
                         pages: 1,
                         // Switching is what clicking a workspace is for.
-                        action: Some(ActionTarget::Sway(format!(
-                            "workspace {}",
-                            quote(&workspace.name)
+                        action: Some(ActionTarget::Desktop(Command::FocusWorkspace(
+                            workspace.name.clone(),
                         ))),
                     });
                 }
@@ -1246,11 +1244,6 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
         }
     }
     out
-}
-
-/// Wrap a workspace name for the compositor's command parser.
-fn quote(name: &str) -> String {
-    format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 fn size_group(

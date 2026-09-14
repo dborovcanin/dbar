@@ -1,9 +1,9 @@
 //! The protocol-neutral status model.
 //!
 //! An i3bar provider converts its presentation-oriented blocks into `StatusItem`s here.
-//! Native collectors retain their typed `Reading`s, while Sway and the tray retain their
-//! own domain state; layout combines those sources without letting protocol messages reach
-//! geometry, and rendering sees only the resulting `Frame`.
+//! Native collectors retain their typed `Reading`s, while the compositor and the tray
+//! retain their own domain state; layout combines those sources without letting protocol
+//! messages reach geometry, and rendering sees only the resulting `Frame`.
 //!
 //! The point of the model is that values survive as values. A source publishes typed
 //! fields; formatting turns them into text without consuming them, so thresholds and
@@ -220,8 +220,8 @@ pub enum ActionTarget {
         name: Option<String>,
         instance: Option<String>,
     },
-    /// Run a compositor command.
-    Sway(String),
+    /// Ask the compositor to do something, in the bar's terms rather than its own.
+    Desktop(crate::desktop::Command),
     /// Change what the module is showing, by the step a scroll notch is worth.
     ///
     /// The bar is the control as well as the display: scrolling over the brightness is

@@ -1,4 +1,4 @@
-//! Sway IPC: the focused window, the workspace list and the active keyboard layout.
+//! The Sway backend: its IPC, read into a `Desktop` and written back as commands.
 //!
 //! The protocol is small enough to speak directly - a fixed header and a JSON body - so this
 //! costs no dependencies. Two connections are used: one stays subscribed to events, which
@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
-use crate::status::{FieldSpec, Kind, Unit};
+use crate::desktop::{Command, Desktop, DesktopEvent, Layout, Watching, Window, Workspace};
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
 
@@ -29,120 +29,45 @@ const EVENT_INPUT: u32 = 0x8000_0015;
 /// A binding-mode event, numbered the same way.
 const EVENT_MODE: u32 = 0x8000_0002;
 
-/// The mode a compositor is in when no binding mode is held.
+/// What sway calls the mode its keyboard is in when no binding mode is held.
 ///
-/// Sway names it this itself, and a bar has nothing to say about it: the point of a mode
-/// indicator is that it appears when the keyboard means something unusual.
-pub const DEFAULT_MODE: &str = "default";
+/// A bar has nothing to say about it: the point of a mode indicator is that it appears when
+/// the keyboard means something unusual, so this one is reported as no mode at all.
+const DEFAULT_MODE: &str = "default";
 
-/// What the focused-window module can offer a format.
-///
-/// The title is what a window says it is showing, and changes as it does. The other two
-/// are what it *is*: `app_id` for a Wayland client, `class` for an X11 one through
-/// Xwayland, and an application sets one or the other rather than both. Together they are
-/// what a state rule keys on to give one program its own colour without matching on a
-/// title that changes every time a tab does.
-pub const WINDOW_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        name: "title",
-        kind: Kind::Text,
-    },
-    FieldSpec {
-        name: "app_id",
-        kind: Kind::Text,
-    },
-    FieldSpec {
-        name: "class",
-        kind: Kind::Text,
-    },
-];
-
-/// A window, as much of it as a bar has any use for.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Window {
-    pub title: String,
-    /// What a Wayland client calls itself. Empty for an X11 one.
-    pub app_id: String,
-    /// What an X11 client calls itself, through Xwayland. Empty for a Wayland one.
-    pub class: String,
+/// One entry of the workspace list, as sway writes it.
+#[derive(Deserialize)]
+struct SwayWorkspace {
+    name: String,
+    #[serde(default)]
+    output: String,
+    #[serde(default)]
+    focused: bool,
+    #[serde(default)]
+    visible: bool,
+    #[serde(default)]
+    urgent: bool,
 }
 
-/// What one workspace can offer a format.
-pub const WORKSPACE_FIELDS: &[FieldSpec] = &[FieldSpec {
-    name: "name",
-    kind: Kind::Text,
-}];
-
-/// What the binding-mode module can offer a format.
-pub const MODE_FIELDS: &[FieldSpec] = &[FieldSpec {
-    name: "mode",
-    kind: Kind::Text,
-}];
-
-/// What the keyboard-layout module can offer a format.
-pub const LANGUAGE_FIELDS: &[FieldSpec] = &[
-    FieldSpec {
-        name: "layout",
-        kind: Kind::Text,
-    },
-    FieldSpec {
-        name: "short",
-        kind: Kind::Text,
-    },
-    FieldSpec {
-        name: "index",
-        kind: Kind::Num(Unit::None),
-    },
-];
-
-/// One entry of the workspace list.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
-pub struct Workspace {
-    pub name: String,
-    /// The screen it is on, named the way the compositor names it: "DP-1". A bar on one
-    /// screen lists the workspaces of that screen, so this is what ties the two together.
-    #[serde(default)]
-    pub output: String,
-    #[serde(default)]
-    pub focused: bool,
-    #[serde(default)]
-    pub visible: bool,
-    #[serde(default)]
-    pub urgent: bool,
+/// The workspace list a `GET_WORKSPACES` reply carries.
+fn workspaces_of(body: &[u8]) -> Result<Vec<Workspace>> {
+    let list: Vec<SwayWorkspace> =
+        serde_json::from_slice(body).context("parsing the workspace list")?;
+    Ok(list
+        .into_iter()
+        .map(|w| Workspace {
+            name: w.name,
+            output: w.output,
+            focused: w.focused,
+            visible: w.visible,
+            urgent: w.urgent,
+        })
+        .collect())
 }
 
-/// The keyboard layout the compositor has active.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Layout {
-    /// What xkb calls it, which is written for a person to read: "English (US)".
-    pub name: String,
-    /// Its place in the list the keyboard was configured with, which is the one part of a
-    /// layout's identity that does not depend on how xkb spells it.
-    pub index: u32,
-}
-
-/// Everything dbar tracks from the compositor.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct SwayState {
-    pub workspaces: Vec<Workspace>,
-    /// The title each screen has focused, by the name of that screen.
-    ///
-    /// One per output rather than one altogether, because only one window in the session
-    /// is focused and every other screen still has something on it: a bar that showed the
-    /// focused title on all of them would be wrong everywhere but where the pointer is.
-    pub windows: HashMap<String, Window>,
-    /// Which screen the compositor's focus is on, for a bar that does not know its own.
-    pub focused_output: Option<String>,
-    /// The layout of the keyboard last switched, or nothing while no module asks for one.
-    pub layout: Option<Layout>,
-    /// The binding mode the compositor is in, which is `default` unless one is held.
-    pub mode: Option<String>,
-}
-
-#[derive(Debug)]
-pub enum SwayEvent {
-    State(Box<SwayState>),
-    Stopped(String),
+/// A mode as the bar holds it, where sway's ordinary one is no mode at all.
+fn held(mode: String) -> Option<String> {
+    (mode != DEFAULT_MODE).then_some(mode)
 }
 
 fn socket_path() -> Result<PathBuf> {
@@ -292,12 +217,11 @@ fn window_of(node: &serde_json::Value) -> Option<Window> {
 }
 
 /// Re-read the two halves a workspace or window event can have changed.
-fn read_desktop(query_stream: &mut UnixStream, state: &mut SwayState, windows: bool) -> Result<()> {
+fn read_desktop(query_stream: &mut UnixStream, state: &mut Desktop, windows: bool) -> Result<()> {
     // The workspace list is read either way: it is where the focused screen comes from,
     // and a window module on one screen has to know which screen that is. The tree is the
     // expensive half, and only a window module has anything to do with it.
-    state.workspaces = serde_json::from_slice(&query(query_stream, GET_WORKSPACES)?)
-        .context("parsing the workspace list")?;
+    state.workspaces = workspaces_of(&query(query_stream, GET_WORKSPACES)?)?;
 
     if windows {
         let tree: serde_json::Value =
@@ -351,46 +275,15 @@ fn layout_change(body: &[u8]) -> Option<Layout> {
     layout_of(event.get("input")?)
 }
 
-/// A short form of a layout name, for a bar that has room for two letters.
-///
-/// xkb names a layout for a person to read - "English (US)" - and offers no code beside
-/// it, so the qualifier in brackets is taken where it is short enough to be one, and the
-/// initials of the words are taken where it is not. Two letters of one word would put
-/// "Serbian" and "Serbian (Latin)" both at "SE", and a layout that cannot be told from the
-/// one beside it is worse than a long name. A module that wants the exact wording gives
-/// its own with `layouts`.
-pub fn abbreviate(name: &str) -> String {
-    if let Some(open) = name.rfind('(')
-        && let Some(close) = name[open..].find(')')
-    {
-        let inner = name[open + 1..open + close].trim();
-        let letters = inner.chars().count();
-        if (1..=3).contains(&letters) && inner.chars().all(char::is_alphanumeric) {
-            return inner.to_uppercase();
-        }
-    }
-    let mut words = name
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| !word.is_empty());
-    let first = words.next().unwrap_or_default();
-    match words.next() {
-        Some(second) => first
-            .chars()
-            .take(1)
-            .chain(second.chars().take(1))
-            .collect::<String>()
-            .to_uppercase(),
-        None => first.chars().take(2).collect::<String>().to_uppercase(),
-    }
-}
-
-/// The binding mode named by a `mode` event.
+/// The binding mode a `mode` event switched to, or nothing for the ordinary one.
 fn mode_change(body: &[u8]) -> Option<String> {
     #[derive(Deserialize)]
     struct Event {
         change: String,
     }
-    serde_json::from_slice::<Event>(body).ok().map(|e| e.change)
+    serde_json::from_slice::<Event>(body)
+        .ok()
+        .and_then(|e| held(e.change))
 }
 
 /// The binding mode the compositor is in right now.
@@ -403,52 +296,14 @@ fn read_mode(queries: &mut UnixStream) -> Result<Option<String>> {
     let (_, reply) = recv(queries)?;
     let state: BindingState =
         serde_json::from_slice(&reply).context("reading the compositor's binding state")?;
-    Ok(Some(state.name))
+    Ok(held(state.name))
 }
 
-/// How many commands may be waiting for the compositor at once.
-///
-/// Clicking a workspace is one command, and a hand clicking as fast as it can is a few a
-/// second. Anything past this is a compositor that has stopped answering, and queueing
-/// for one of those only means switching to workspaces nobody wants any more.
-const QUEUED_COMMANDS: usize = 16;
-
-/// The way to run a Sway command without waiting for the compositor to answer.
-///
-/// Connecting, writing and reading a reply all block, and the thread a click arrives on
-/// is the one that draws: a compositor that is slow to answer would stop the bar
-/// redrawing and stop it dispatching Wayland, which is a bar that has frozen.
-pub struct Commands(std::sync::mpsc::SyncSender<String>);
-
-impl Commands {
-    pub fn send(&self, command: String) {
-        // A queue this full is a compositor that is not listening, and a click nobody is
-        // going to act on is better dropped than remembered.
-        if let Err(e) = self.0.try_send(command) {
-            log::debug!("the compositor is not keeping up with commands: {e}");
-        }
-    }
-}
-
-/// Start the thread that runs Sway commands, each on its own connection since the
-/// subscribed one cannot carry them.
-pub fn commands() -> Commands {
-    let (sender, receiver) = std::sync::mpsc::sync_channel::<String>(QUEUED_COMMANDS);
-    let started = std::thread::Builder::new()
-        .name("sway-commands".to_string())
-        .spawn(move || {
-            while let Ok(command) = receiver.recv() {
-                run_command(&command);
-            }
-        });
-    if let Err(e) = started {
-        log::warn!("no thread for compositor commands: {e}");
-    }
-    Commands(sender)
-}
-
-/// Run a Sway command on its own connection, since the subscribed one cannot carry it.
-fn run_command(command: &str) {
+/// Run a command on its own connection, since the subscribed one cannot carry it.
+pub fn run_command(command: Command) {
+    let command = match command {
+        Command::FocusWorkspace(name) => format!("workspace {}", quote(&name)),
+    };
     let result = (|| -> Result<()> {
         let mut stream = connect()?;
         send(&mut stream, RUN_COMMAND, command.as_bytes())?;
@@ -464,36 +319,16 @@ fn run_command(command: &str) {
     }
 }
 
+/// Wrap a workspace name for sway's command parser.
+fn quote(name: &str) -> String {
+    format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
 /// Subscribe to the compositor and forward its state into the event loop.
 ///
-/// What the bar has asked the compositor for.
-///
-/// Each of these costs a subscription and a question at startup, and the desktop ones
-/// cost a workspace list - and, for windows, a whole tree - every time the desktop moves.
-/// A bar that draws none of them never connects at all.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Watching {
-    pub language: bool,
-    pub mode: bool,
-    pub windows: bool,
-    pub workspaces: bool,
-}
-
-impl Watching {
-    /// Whether anything on the bar comes from the compositor.
-    pub fn anything(self) -> bool {
-        self.language || self.mode || self.windows || self.workspaces
-    }
-
-    /// Whether the workspace list and the windows on it have to be followed.
-    fn desktop(self) -> bool {
-        self.windows || self.workspaces
-    }
-}
-
 /// Input devices and binding modes are only subscribed to when something on the bar is
 /// going to draw them, so a bar without those modules pays nothing for the questions.
-pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) -> Result<()> {
+pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching) -> Result<()> {
     // Fail loudly here rather than on the helper thread, so a missing socket is reported
     // at startup instead of silently leaving the modules empty.
     let mut events = connect()?;
@@ -523,7 +358,7 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
         String::from_utf8_lossy(&reply)
     );
 
-    let mut state = SwayState::default();
+    let mut state = Desktop::default();
     if watching.desktop() {
         read_desktop(&mut queries, &mut state, watching.windows)?;
     }
@@ -545,7 +380,7 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
         });
     }
     let mut shown = state.clone();
-    let _ = sender.send(SwayEvent::State(Box::new(state.clone())));
+    let _ = sender.send(DesktopEvent::State(Box::new(state.clone())));
 
     std::thread::Builder::new()
         .name("sway-ipc".to_string())
@@ -571,7 +406,7 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
                         // than patched.
                         Ok(_) => desktop = true,
                         Err(e) => {
-                            let _ = sender.send(SwayEvent::Stopped(e.to_string()));
+                            let _ = sender.send(DesktopEvent::Stopped(e.to_string()));
                             return;
                         }
                     }
@@ -581,7 +416,7 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
                 }
                 if desktop && let Err(e) = read_desktop(&mut queries, &mut state, watching.windows)
                 {
-                    let _ = sender.send(SwayEvent::Stopped(e.to_string()));
+                    let _ = sender.send(DesktopEvent::Stopped(e.to_string()));
                     return;
                 }
                 // Sway reports a title change for every window, including ones no screen is
@@ -592,7 +427,7 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
                 }
                 shown.clone_from(&state);
                 if sender
-                    .send(SwayEvent::State(Box::new(state.clone())))
+                    .send(DesktopEvent::State(Box::new(state.clone())))
                     .is_err()
                 {
                     return;
@@ -606,31 +441,6 @@ pub fn spawn(sender: calloop::channel::Sender<SwayEvent>, watching: Watching) ->
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// What the bar asks for decides what it subscribes to and what it re-reads, so this
-    /// is the switch that keeps a clock-only bar off the compositor entirely.
-    #[test]
-    fn nothing_from_the_compositor_means_nothing_to_ask_it() {
-        assert!(!Watching::default().anything());
-        assert!(!Watching::default().desktop());
-
-        let language = Watching {
-            language: true,
-            ..Watching::default()
-        };
-        assert!(language.anything(), "a layout still needs a connection");
-        assert!(!language.desktop(), "but not the workspaces or the tree");
-
-        let workspaces = Watching {
-            workspaces: true,
-            ..Watching::default()
-        };
-        assert!(workspaces.desktop());
-        assert!(
-            !workspaces.windows,
-            "and no tree, which is the expensive half"
-        );
-    }
 
     /// The tree as sway reports it with two screens: the keyboard is on the left one, and
     /// the right one is still showing what it was last used for.
@@ -761,8 +571,8 @@ mod tests {
     /// Sway names the screen each workspace is on, which is what lets a bar list its own.
     #[test]
     fn a_workspace_says_which_screen_it_is_on() {
-        let list: Vec<Workspace> = serde_json::from_str(
-            r#"[{"name":"1","output":"DP-1","focused":true,"visible":true},
+        let list = workspaces_of(
+            br#"[{"name":"1","output":"DP-1","focused":true,"visible":true},
                 {"name":"2","output":"HDMI-A-1","visible":true}]"#,
         )
         .expect("a workspace list parses");
@@ -777,12 +587,12 @@ mod tests {
         assert_eq!(mode_change(body), Some("resize".to_string()));
     }
 
-    /// Leaving a mode is reported the same way, as a switch back to `default` - which is
-    /// what the bar reads to know the module should disappear again.
+    /// Leaving a mode is reported the same way, as a switch back to `default`. The bar is
+    /// told there is no mode at all, which is what makes the module disappear again.
     #[test]
-    fn leaving_a_mode_is_a_switch_to_the_default_one() {
+    fn leaving_a_mode_is_no_mode_at_all() {
         let body = br#"{"change":"default","pango_markup":false}"#;
-        assert_eq!(mode_change(body).as_deref(), Some(DEFAULT_MODE));
+        assert_eq!(mode_change(body), None);
     }
 
     #[test]
@@ -817,18 +627,5 @@ mod tests {
     fn a_device_with_no_layout_is_not_a_keyboard() {
         let pointer = serde_json::json!({"identifier": "2:2:mouse", "type": "pointer"});
         assert_eq!(layout_of(&pointer), None);
-    }
-
-    #[test]
-    fn a_short_form_prefers_the_qualifier_xkb_put_in_brackets() {
-        assert_eq!(abbreviate("English (US)"), "US");
-        assert_eq!(abbreviate("English (UK)"), "UK");
-        // A longer qualifier is a description rather than a code, so the initials are
-        // taken - and they are what keeps these two apart, which is the whole point of
-        // showing a layout at all.
-        assert_eq!(abbreviate("Serbian (Latin)"), "SL");
-        assert_eq!(abbreviate("Serbian"), "SE");
-        assert_eq!(abbreviate("German (Neo 2)"), "GN");
-        assert_eq!(abbreviate(""), "");
     }
 }
