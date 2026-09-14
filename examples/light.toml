@@ -166,7 +166,7 @@ right = "none"
 # ---------------------------------------------------------------------------
 
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 style = "dim"
 min_width = 28
 
@@ -183,7 +183,7 @@ urgent = true
 style = "critical"
 
 [module.title]
-source = "sway:window"
+source = "window"
 style = "plain"
 max_width = 420
 

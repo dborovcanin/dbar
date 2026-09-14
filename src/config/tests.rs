@@ -220,7 +220,7 @@ fn a_config_says_which_halves_of_the_compositor_it_needs() {
 
     let desktop = Config::parse(
         "[bar]\nheight = 30\n\n[right]\ngroups = [\"g\"]\n\n\
-             [group.g]\nmodules = [\"ws\"]\n\n[module.ws]\nsource = \"sway:workspaces\"\n",
+             [group.g]\nmodules = [\"ws\"]\n\n[module.ws]\nsource = \"workspaces\"\n",
     )
     .expect("a workspace config");
     // A workspace list is not a window title: the tree is what costs, and nothing here
@@ -660,7 +660,7 @@ groups = ["g"]
 modules = ["win"]
 
 [module.win]
-source = "sway:window"
+source = "window"
 format = "$text"
 "##;
     // `$text` is the provider's field; the window module publishes `$title`.
@@ -688,7 +688,7 @@ source = "{source}"
         )
     };
 
-    let parsed = Config::parse(&config("sway:language")).expect("parses");
+    let parsed = Config::parse(&config("language")).expect("parses");
     assert!(parsed.needs_language());
     let Source::Language(layouts) = &parsed.modules().next().expect("one module").source else {
         panic!("the module should read the compositor's keyboard layout");
@@ -711,7 +711,7 @@ groups = ["g"]
 modules = ["ws"]
 
 [module.ws]
-source = "sway:workspaces"
+source = "workspaces"
 icons = { "1" = "$not-an-icon" }
 "##;
     let error = format!(
@@ -735,7 +735,7 @@ groups = ["g"]
 modules = ["win"]
 
 [module.win]
-source = "sway:window"
+source = "window"
 "##;
     assert!(!Config::parse(config).expect("parses").needs_language());
 }
@@ -1230,7 +1230,7 @@ scope = "session"
     let e = Config::parse(config).expect_err("scope means nothing to a cpu module");
     let message = format!("{e:#}");
     assert!(message.contains("scope"), "{message}");
-    assert!(message.contains("sway:window"), "{message}");
+    assert!(message.contains("window or workspaces"), "{message}");
 }
 
 #[test]
@@ -1243,10 +1243,10 @@ groups = ["g"]
 modules = ["ws", "win"]
 
 [module.ws]
-source = "sway:workspaces"
+source = "workspaces"
 
 [module.win]
-source = "sway:window"
+source = "window"
 scope = "session"
 "##;
     let cfg = Config::parse(config).expect("parses");
@@ -1259,6 +1259,28 @@ scope = "session"
     };
     assert_eq!(source("ws"), Source::Workspaces(WorkspaceView::default()));
     assert_eq!(source("win"), Source::Window(Scope::Session));
+}
+
+/// The compositor sources were named for Sway until they followed niri as well. A config
+/// still using an old name is refused, and told the name to use instead.
+#[test]
+fn a_compositor_source_under_its_old_name_says_what_it_is_called_now() {
+    for (old, new) in [
+        ("sway:window", "window"),
+        ("sway:workspaces", "workspaces"),
+        ("sway:language", "language"),
+        ("sway:mode", "mode"),
+    ] {
+        let config = format!(
+            "[left]\ngroups = [\"g\"]\n\n[group.g]\nmodules = [\"m\"]\n\n[module.m]\nsource = \"{old}\"\n"
+        );
+        let e = Config::parse(&config).expect_err("an old source name is refused");
+        let message = format!("{e:#}");
+        assert!(
+            message.contains(&format!("now called \"{new}\"")),
+            "{message}"
+        );
+    }
 }
 
 #[test]
@@ -1843,7 +1865,7 @@ fn none_means_no_icon_wherever_an_icon_is_written() {
 
     let workspaces = Config::parse(
         "[left]\ngroups = ['g']\n[group.g]\nmodules = ['w']\n\
-         [module.w]\nsource = 'sway:workspaces'\n\
+         [module.w]\nsource = 'workspaces'\n\
          icons = { '1' = 'none', '2' = '$arch', '3' = 'x' }",
     )
     .unwrap();

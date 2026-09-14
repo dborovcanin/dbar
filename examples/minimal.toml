@@ -40,7 +40,7 @@ foreground = "$dim"
 padding = 6
 
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 style = "dim"
 min_width = 22
 
@@ -49,7 +49,7 @@ focused = true
 foreground = "$accent"
 
 [module.title]
-source = "sway:window"
+source = "window"
 style = "dim"
 max_width = 460
 

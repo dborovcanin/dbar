@@ -39,8 +39,8 @@ font = "sans-serif 15"
 icon_size = 20
 exclusive = true       # default: true; reserve the space so windows do not sit under the bar
 # Which screens to appear on, named the way the compositor names them - `swaymsg
-# -t get_outputs` lists them. Left out, or a single "*", is every screen there
-# is and every one plugged in later, each getting a bar of its own.
+# -t get_outputs` or `niri msg outputs` lists them. Left out, or a single "*", is
+# every screen there is and every one plugged in later, each getting a bar of its own.
 # outputs = ["DP-1", "HDMI-A-1"]
 # Which icon theme a tray item's named icon is looked for in. An application
 # usually ships its own into `hicolor`, which is where dbar looks when the theme
@@ -392,9 +392,9 @@ overlap = 1
 # Every key a [style.*] takes is also valid directly on a module, plus:
 #
 #   style      name of a [style.*] to start from        default: built-in defaults
-#   source     "provider" | "command" | "tray" | "sway:window" |
-#              "sway:mode" | "sway:workspaces" |
-#              "sway:language"                          default: "provider"
+#   source     "provider" | "command" | "tray" | "window" |
+#              "mode" | "workspaces" |
+#              "language"                               default: "provider"
 #   command    argv of a command module, run directly
 #   fields     what that command publishes: number, percent
 #              or text, keyed by field name
@@ -402,14 +402,14 @@ overlap = 1
 #              stopped: "10s". Only for a command with an
 #              `interval`, since a streaming one is meant to
 #              keep running                            default: 30s
-#   layouts    what a sway:language module calls each
+#   layouts    what a language module calls each
 #              layout, keyed by xkb's name for it
-#   icons      decorations after sway workspace names, keyed by
+#   icons      decorations after workspace names, keyed by
 #              name; `$icon` is native, other values are text,
 #              and `default` is the fallback. A workspace named
 #              by none of them gets nothing, `icon` included
-#   scope      how much of the session a sway:workspaces or
-#              sway:window module is about: "output", the
+#   scope      how much of the session a workspaces or
+#              window module is about: "output", the
 #              screen its bar is on, or "session"  default: "output"
 #   show_passive  whether a tray module draws the items whose
 #              applications say they are passive     default: true
@@ -464,7 +464,7 @@ overlap = 1
 # puts every workspace on every bar instead, and makes the title follow the
 # keyboard rather than the screen.
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 scope = "output"
 style = "plain"
 padding = 9
@@ -484,7 +484,7 @@ style = "warning"
 # wanted. `$index` is its place in the list the keyboard was configured with,
 # which is what a state rule keys on to avoid depending on xkb's spelling.
 [module.language]
-source = "sway:language"
+source = "language"
 format = " $short "
 format_alt = " $layout "
 style = "plain"
@@ -651,7 +651,7 @@ max_width = 360
 # The compositor's binding mode. Nothing is drawn while it is `default`, so the
 # module is on the bar exactly while a mode is being held.
 [module.mode]
-source = "sway:mode"
+source = "mode"
 format = " $mode "
 
 # The window this screen is showing, which on one screen is the focused window
@@ -663,7 +663,7 @@ format = " $mode "
 # through Xwayland - and a window has one or the other, never both. A state rule
 # that wants one program its own colour keys on those rather than on the title.
 [module.title]
-source = "sway:window"
+source = "window"
 style = "plain"
 max_width = 320
 
@@ -683,10 +683,10 @@ foreground = "$warning"
 #   media             $title $artist $album $status $player
 #   time              $now
 #   provider          $text $percent
-#   sway:window       $title $app_id $class
-#   sway:workspaces   $name
-#   sway:language     $layout $short $index
-#   sway:mode         $mode
+#   window            $title $app_id $class
+#   workspaces        $name
+#   language          $layout $short $index
+#   mode              $mode
 #   tray              $title $id $status
 #   command           $text, or whatever `fields` declares
 #

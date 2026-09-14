@@ -1,6 +1,6 @@
 # dbar
 
-A small, event-driven Wayland status bar for Sway/SwayFX. It reads what it shows from
+A small, event-driven Wayland status bar for Sway, SwayFX and niri. It reads what it shows from
 `/proc` and `/sys`, renders with `tiny-skia` on a `wlr-layer-shell` surface, and can also
 take data from any i3bar-protocol provider.
 
@@ -54,7 +54,7 @@ config -> source state -> typed fields -> formatter -> layout -> Frame -> backen
 Two rules hold the whole design together:
 
 - **Protocol parsing ends at the source boundary.** i3bar blocks become `StatusItem`s, native
-  collectors publish `Reading`s, and Sway and tray keep their own typed state. Layout receives
+  collectors publish `Reading`s, and the compositor and tray keep their own typed state. Layout receives
   those current states through `Inputs`; no protocol object or I/O operation reaches geometry.
 - **Nothing below `Frame` knows about config, formats or protocols.** `Frame` is positioned
   geometry and colour, so the renderer can be replaced without touching anything above it.
@@ -74,7 +74,7 @@ ownership into layout.
 
 No async runtime. The event loop is `calloop`; cheap reads happen on the main thread, and
 anything that genuinely blocks gets a worker thread feeding a `calloop` channel, the way
-Sway, i3bar, PipeWire, MPRIS and the tray already do. Workers are conditional on the resolved
+Sway, niri, i3bar, PipeWire, MPRIS and the tray already do. Workers are conditional on the resolved
 configuration. The single signal listener is also conditional: it exists for realtime refresh
 signals or click commands, whose children it wakes the event loop to reap. It is not part of
 the tray. Commands from the event loop must use bounded or nonblocking delivery so a stalled

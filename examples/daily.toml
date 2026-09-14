@@ -208,7 +208,7 @@ right = "round"
 # Three states, so a glance says which workspace is here, which is on the other
 # screen and which is asking for attention. Everything else is a quiet number.
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 style = "dim"
 min_width = 34
 
@@ -247,7 +247,7 @@ foreground = "$subtext"
 icon = "$play"
 
 [module.title]
-source = "sway:window"
+source = "window"
 style = "panel"
 max_width = 420
 
@@ -301,7 +301,7 @@ style = "critical"
 # The compositor says which layout is active, and says so again the moment it is
 # switched, so this is never read on a timer. A click shows the full name.
 [module.language]
-source = "sway:language"
+source = "language"
 format = " $short "
 format_alt = " $layout "
 style = "panel"

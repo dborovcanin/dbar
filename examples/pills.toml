@@ -152,7 +152,7 @@ radius = 17
 # ---------------------------------------------------------------------------
 
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 style = "dim"
 min_width = 30
 
@@ -170,7 +170,7 @@ style = "critical"
 radius = 14
 
 [module.title]
-source = "sway:window"
+source = "window"
 style = "pill"
 max_width = 360
 

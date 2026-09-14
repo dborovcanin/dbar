@@ -172,7 +172,7 @@ style = "hovered"
 # Workspaces carry their own flags. `focused` is the one with focus, `visible`
 # is shown on some other output, `urgent` is asking for attention.
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 style = "dim"
 min_width = 32
 

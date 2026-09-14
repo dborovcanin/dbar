@@ -140,7 +140,7 @@ groups = ["g"]
 modules = ["lang"]
 
 [module.lang]
-source = "sway:language"
+source = "language"
 padding = 0
 
 [module.lang.layouts]
@@ -200,7 +200,7 @@ groups = ["g"]
 modules = ["ws"]
 
 [module.ws]
-source = "sway:workspaces"
+source = "workspaces"
 padding = 0
 "##;
     let cfg = Config::parse(config).expect("test config parses");
@@ -238,7 +238,7 @@ padding = 0
     assert_eq!(on(None), ["1", "2", "3"]);
 }
 
-/// One frame of a bar whose only module is `sway:workspaces`, on the two screens the
+/// One frame of a bar whose only module is `workspaces`, on the two screens the
 /// other compositor tests use.
 fn workspaces(
     config: &str,
@@ -284,7 +284,7 @@ groups = ["g"]
 modules = ["ws"]
 
 [module.ws]
-source = "sway:workspaces"
+source = "workspaces"
 format = "$name"
 icons = { "1" = "$slack", "2" = "󰘦", "3" = "$chrome" }
 padding = 0
@@ -322,7 +322,7 @@ collapse_animation = "150ms"
 collapsed = { icon = "$cpu", icon_size = 4, padding = 3 }
 
 [module.ws]
-source = "sway:workspaces"
+source = "workspaces"
 format = "$name"
 icons = { "1" = "$slack" }
 icon_size = 4
@@ -387,7 +387,7 @@ groups = ["g"]
 modules = ["ws"]
 
 [module.ws]
-source = "sway:workspaces"
+source = "workspaces"
 format = ""
 icons = { "1" = "X", "2" = "$slack" }
 padding = 0
@@ -423,7 +423,7 @@ groups = ["g"]
 modules = ["ws"]
 
 [module.ws]
-source = "sway:workspaces"
+source = "workspaces"
 format = "$name"
 format_alt = "w$name"
 icons = { "1" = "XX" }
@@ -451,7 +451,7 @@ groups = ["g"]
 modules = ["ws"]
 
 [module.ws]
-source = "sway:workspaces"
+source = "workspaces"
 format = "$name"
 icons = { "1" = "$slack", "2" = "XX" }
 icon = "$cpu"
@@ -500,7 +500,7 @@ groups = ["g"]
 modules = ["ws"]
 
 [module.ws]
-source = "sway:workspaces"
+source = "workspaces"
 scope = "session"
 padding = 0
 "##;
@@ -543,7 +543,7 @@ groups = ["g"]
 modules = ["win"]
 
 [module.win]
-source = "sway:window"
+source = "window"
 padding = 0
 "##;
     let cfg = Config::parse(config).expect("test config parses");
@@ -626,7 +626,7 @@ groups = ["g"]
 modules = ["title"]
 
 [module.title]
-source = "sway:window"
+source = "window"
 format = "$app_id|$class|'?': $title"
 "##;
     let cfg = Config::parse(config).expect("test config parses");
@@ -1171,7 +1171,7 @@ groups = ["g"]
 modules = ["mode"]
 
 [module.mode]
-source = "sway:mode"
+source = "mode"
 padding = 0
 "##;
     let cfg = Config::parse(config).expect("test config parses");

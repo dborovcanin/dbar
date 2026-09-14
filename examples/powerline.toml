@@ -105,7 +105,7 @@ foreground = "$text"
 # ---------------------------------------------------------------------------
 
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 style = "dim"
 min_width = 30
 
@@ -125,7 +125,7 @@ background = "$critical"
 foreground = "$ink"
 
 [module.title]
-source = "sway:window"
+source = "window"
 style = "block_alt"
 # A title has no length of its own, so it is capped rather than allowed to push
 # the rest of the bar off the screen.

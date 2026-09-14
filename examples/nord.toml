@@ -161,7 +161,7 @@ overlap = 1
 # ---------------------------------------------------------------------------
 
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 style = "dim"
 min_width = 30
 
@@ -179,7 +179,7 @@ style = "critical"
 radius = 6
 
 [module.title]
-source = "sway:window"
+source = "window"
 style = "plain"
 max_width = 380
 
@@ -221,7 +221,7 @@ state = "critical"
 style = "critical"
 
 [module.language]
-source = "sway:language"
+source = "language"
 format = "$short"
 format_alt = "$layout"
 style = "tile"

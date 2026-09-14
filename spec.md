@@ -10,7 +10,7 @@ behaviour.
 
 ## 1. Product definition
 
-dbar is a minimal, standalone Wayland status bar for Sway and SwayFX. It should
+dbar is a minimal, standalone Wayland status bar for Sway, SwayFX and niri. It should
 be cheap enough to forget about, configurable enough to keep, and understandable
 enough that a user can own the whole setup in one TOML file.
 
@@ -68,8 +68,10 @@ Two short rules summarize the product:
 ## 3. Supported environment
 
 dbar targets Linux compositors that implement `wlr-layer-shell`, specifically
-Sway and SwayFX today. The compositor owns output discovery, workspace and
-window state, keyboard layout, positioning, and frame pacing.
+Sway, SwayFX and niri today. The compositor owns output discovery, workspace and
+window state, keyboard layout, positioning, and frame pacing. Another layer-shell
+compositor shows the bar, but its compositor modules stay empty: dbar reads that
+state only from Sway's IPC or niri's event stream.
 
 The current presentation stack is:
 
@@ -101,12 +103,13 @@ configured subset, and follows outputs as they are added and removed.
 | `time` | system clock and time-zone database | aligned timer |
 | `command` | an argv supplied by the user | streaming, periodic, or once/on demand |
 
-Sway integrations are built into the same process and read compositor IPC:
+Compositor integrations are built into the same process and read Sway's IPC or
+niri's event stream, whichever dbar runs under:
 
-- `sway:workspaces`;
-- `sway:window`;
-- `sway:language`; and
-- `sway:mode`.
+- `workspaces`;
+- `window`;
+- `language`; and
+- `mode`, which stays empty under niri, since niri has no binding modes.
 
 The `tray` source implements StatusNotifierItem discovery, icons, activation,
 menus, passive-item filtering, and configured ordering.
@@ -175,10 +178,10 @@ spacing = 6
 modules = ["time"]
 
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 
 [module.language]
-source = "sway:language"
+source = "language"
 
 [module.cpu]
 source = "cpu"
@@ -305,7 +308,7 @@ The provider boundary must preserve:
 - provider foreground, background and urgency;
 - Pango-markup stripping for text dbar draws itself;
 - click names, instances, coordinates and button numbers; and
-- coexistence with native, Sway, command and tray modules in the same groups.
+- coexistence with native, compositor, command and tray modules in the same groups.
 
 Provider compatibility does not include parsing an i3status-rust configuration
 file or generating one on the user's behalf.
@@ -321,7 +324,7 @@ file or generating one on the user's behalf.
           ┌────────────────────────┼────────────────────────┐
           ▼                        ▼                        ▼
   native collectors          pushed services          external inputs
- /proc /sys / netlink     PipeWire / MPRIS / Sway    command / i3bar / tray
+ /proc /sys / netlink     PipeWire/MPRIS/Sway/niri   command / i3bar / tray
           │                        │                        │
           └────────────────────────┴────────────────────────┘
                                    │
@@ -349,7 +352,7 @@ without reducing runtime work.
 ### 7.1 Runtime ownership
 
 `App` owns session-wide state: configuration, source readings, provider state,
-Sway state, tray state, interaction state and active transitions. Collection
+compositor state, tray state, interaction state and active transitions. Collection
 happens once for the session.
 
 The transition mechanics are isolated in `app/animation.rs`. `App` schedules
@@ -382,8 +385,8 @@ dbar itself starts workers only for features the resolved configuration needs:
 
 - one PipeWire worker for audio, one session-bus worker for MPRIS, and one
   session-bus worker for the tray;
-- one Sway subscription worker, plus a command worker when an interaction can
-  send Sway commands;
+- one compositor worker, following Sway's subscription or niri's event stream,
+  plus a command worker when a click can switch workspaces;
 - one reader for an i3bar provider, plus a writer when it accepts clicks;
 - one shared kernel-watch worker for watchable sources;
 - one worker per command source, and one per sampled source whose read can

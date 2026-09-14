@@ -58,7 +58,7 @@ padding = 10
 radius = 12
 
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 style = "dim"
 min_width = 34
 
@@ -71,7 +71,7 @@ visible = true
 style = "pill"
 
 [module.title]
-source = "sway:window"
+source = "window"
 style = "plain"
 max_width = 420
 

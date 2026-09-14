@@ -1,6 +1,6 @@
 <h1>dbar <img src="docs/gallery/logo.png" alt="dbar logo" width="144"></h1>
 
-A small, event-driven Wayland status bar for Sway/SwayFX. It renders with
+A small, event-driven Wayland status bar for Sway, SwayFX and Niri. It renders with
 `tiny-skia` on a `wlr-layer-shell` surface and reads what it shows itself, from
 `/proc`, `/sys` and PipeWire. Any i3bar-compatible provider can supply the rest.
 
@@ -28,7 +28,7 @@ This is the **V0** milestone from [spec.md](spec.md), and it is licensed under
 ## What it deliberately does not have
 
 - **No helper processes for status.** The readings come from dbar itself, out
-  of `/proc`, `/sys`, netlink, PipeWire and Sway's own IPC. There is no script
+  of `/proc`, `/sys`, netlink, PipeWire and the compositor's own IPC. There is no script
   on a timer, no `pactl` shelled out to for the volume, no `iw` for the
   wireless. A config built from native modules starts no child process at all.
 - **No CSS, and no styling language.** Styles are a small cascade of named
@@ -76,9 +76,11 @@ sudo make install                                  # keep it: /usr/bin/dbar
 
 ### What it needs
 
-A compositor with `wlr-layer-shell` — Sway or SwayFX. The initial downloaded
-binary targets current Arch Linux and uses its system xkbcommon, Wayland and
-PipeWire libraries, which are normally already present with Sway. Building from
+Sway, SwayFX or niri. Any compositor with `wlr-layer-shell` can show the bar,
+but its workspaces, window title, keyboard layout and binding mode are read from
+Sway's IPC or niri's event stream. The initial downloaded binary targets current
+Arch Linux and uses its system xkbcommon, Wayland and PipeWire libraries, which
+are normally already present on a Sway or niri desktop. Building from
 source additionally needs Rust 1.89 or newer and `clang` to generate the
 PipeWire bindings:
 
@@ -91,14 +93,14 @@ sudo apt install rustc cargo clang pkg-config \
     libxkbcommon-dev libwayland-dev libpipewire-0.3-dev
 ```
 
-On a machine already running Sway most of these are present; `clang` and the
+On a machine already running Sway or niri most of these are present; `clang` and the
 `-dev` packages usually are not.
 
 PipeWire and D-Bus are only *used* if a config asks for the volume or the media
 module, and are ignored if it does not — but the PipeWire headers are needed to
 build either way.
 
-Once you like one, keep it as your own and let Sway start it:
+Once you like one, keep it as your own and let the compositor start it:
 
 ```sh
 mkdir -p ~/.config/dbar
@@ -108,6 +110,11 @@ cp examples/gruvbox-islands.toml ~/.config/dbar/config.toml
 ```sh
 # in ~/.config/sway/config, replacing the bar { ... } block
 exec_always pkill -x dbar; dbar
+```
+
+```kdl
+// or in ~/.config/niri/config.kdl
+spawn-at-startup "dbar"
 ```
 
 `dbar` with no arguments reads `~/.config/dbar/config.toml`, and falls back to
@@ -556,12 +563,12 @@ icon size to the font size. dbar's own icons are independent of both.
 
 ### Workspaces, the focused window and the keyboard layout
 
-These come from the compositor rather than the status provider, so their modules
-say where they are from:
+These come from the compositor rather than the status provider: from Sway's IPC
+or from niri's event stream, whichever dbar is running under.
 
 ```toml
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 style = "plain"
 
 [module.workspaces.icons]
@@ -579,19 +586,19 @@ urgent = true
 style = "warning"
 
 [module.title]
-source = "sway:window"
+source = "window"
 style = "plain"
 ```
 
-A `sway:workspaces` module expands into one rectangle per workspace, each with
+A `workspaces` module expands into one rectangle per workspace, each with
 its own state and its own click target - clicking switches to that workspace.
 `focused` and `visible` join `urgent` as state conditions. `icons` maps the
 workspace name to something drawn after it; `default` can supply a fallback.
 A value beginning with `$` names a native dbar icon, while any other value is
 ordinary text, including emoji and icon-font glyphs. A native icon is drawn like
 any other icon, `gap` away from the name; text is shaped as part of the name,
-one space after it. This keeps display icons in dbar's config, so Sway workspace
-names can remain plain.
+one space after it. This keeps display icons in dbar's config, so the workspace
+names in the compositor's own config can remain plain.
 
 A workspace `icons` says nothing about gets nothing: no icon, no extra gap, and
 not the module's own `icon` either, which would otherwise appear on exactly the
@@ -604,7 +611,7 @@ it is switched, so it costs no interval:
 
 ```toml
 [module.language]
-source = "sway:language"
+source = "language"
 format = " $short "     # "US", from xkb's "English (US)"
 format_alt = " $layout "
 
@@ -622,7 +629,7 @@ The binding mode comes from there too, and is on the bar only while one is held:
 
 ```toml
 [module.mode]
-source = "sway:mode"
+source = "mode"
 format = " $mode "      # "resize", while that mode is on
 ```
 
@@ -635,13 +642,25 @@ dbar speaks the compositor's IPC directly, so this costs no dependencies. It is
 optional: without a compositor to talk to, these modules simply show nothing and
 the rest of the bar is unaffected.
 
+Under niri the same modules follow its event stream, with differences that are
+niri's rather than dbar's. It has no binding modes, so a `mode` module stays
+empty. Its workspaces are often unnamed, and an unnamed one is called by its
+position on its screen, so `$name` is `1`, `2` and so on. It always keeps one
+empty workspace below the last one in use, and that one is left off the list
+until a screen is showing it. X11 programs reach niri as Wayland clients, so
+`$class` stays empty there.
+
+These sources were called `sway:workspaces`, `sway:window`, `sway:language` and
+`sway:mode` before they followed niri as well. A config that still uses those
+names is refused at startup, and the message names the source to use instead.
+
 A centred group is centred between its neighbours rather than on the bar, so a
 wide right-hand run pushes it aside instead of being drawn over it. Cap a module
 that has no length limit of its own:
 
 ```toml
 [module.title]
-source = "sway:window"
+source = "window"
 max_width = 320         # logical pixels; 0, the default, is unbounded
 ```
 
@@ -1013,10 +1032,10 @@ bus:
 | `network`         | `$down` `$up` `$device` `$state` `$ssid` `$signal` `$dbm` `$received` `$sent`       |
 | `time`            | `$now`                                                                              |
 | `command`         | `$text`, or whatever the module declares                                            |
-| `sway:window`     | `$title`                                                                            |
-| `sway:workspaces` | `$name`                                                                             |
-| `sway:language`   | `$layout` `$short` `$index`                                                         |
-| `sway:mode`       | `$mode`                                                                             |
+| `window`          | `$title` `$app_id` `$class`                                                         |
+| `workspaces`      | `$name`                                                                             |
+| `language`        | `$layout` `$short` `$index`                                                         |
+| `mode`            | `$mode`                                                                             |
 
 Three of them are pointed at something, and take that from a key of their own:
 
@@ -1080,7 +1099,7 @@ where the realtime range starts is decided by the C library — the first few ar
 reserved for the threading implementation — so an absolute number is not
 portable even between two Linux machines.
 
-`sway:window`, `sway:workspaces`, `sway:language` and `sway:mode` come from the
+`window`, `workspaces`, `language` and `mode` come from the
 compositor.
 Everything else comes from an external i3bar-protocol provider, which is the default when a
 module names no source at all.
@@ -1181,9 +1200,9 @@ is showing — so one command asked about three places is one module, one fetch 
 one wording, rather than three of each.
 
 ```
-icon=☁	weather=Clouds	location=Novi Sad	temp=21
-icon=☀	weather=Clear	location=Beograd	temp=23
-icon=🌧	weather=Rain	location=Sokolac	temp=17
+icon=☁ weather=Clouds location=Novi Sad temp=21
+icon=☀ weather=Clear location=Beograd temp=23
+icon=🌧 weather=Rain location=Sokolac temp=17
 ```
 
 It is opt-in because the alternative would turn a script that logs its progress
@@ -1210,8 +1229,8 @@ style = "warning"
 and print tab-separated pairs:
 
 ```
-branch=main	pending=3
-branch=main	pending=0	disk=87%
+branch=main pending=3
+branch=main pending=0 disk=87%
 ```
 
 A value parses as the kind its module declared, a percentage may carry its `%`,

@@ -293,7 +293,7 @@ highlight_foreground = "$text"
 # Modules: formats, actions, state thresholds and source options come from gruvbox-islands.toml.
 
 [module.workspaces]
-source = "sway:workspaces"
+source = "workspaces"
 style = "dim"
 min_width = 27
 
@@ -336,7 +336,7 @@ foreground = "$subtext"
 icon = "$play"
 
 [module.mode]
-source = "sway:mode"
+source = "mode"
 format = "$mode"
 style = "panel"
 foreground = "$ink"
@@ -344,7 +344,7 @@ icon = "$keyboard"
 background = "$warning"
 
 [module.title]
-source = "sway:window"
+source = "window"
 style = "panel"
 max_width = 170
 
@@ -395,7 +395,7 @@ state = "critical"
 style = "critical"
 
 [module.language]
-source = "sway:language"
+source = "language"
 format = "$short"
 format_alt = "$layout"
 style = "panel"

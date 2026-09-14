@@ -989,7 +989,7 @@ enum Decoration<'g> {
 
 /// Everything a group shows, in the order the group asks for.
 ///
-/// A module drawn from the compositor expands here: `sway:workspaces` becomes one candidate
+/// A module drawn from the compositor expands here: `workspaces` becomes one candidate
 /// per workspace, so each is its own rectangle with its own state and click target.
 fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
     #[cfg(test)]

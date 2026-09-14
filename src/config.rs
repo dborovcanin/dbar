@@ -595,11 +595,11 @@ struct RawModule {
     interface: Option<String>,
     /// Which hwmon chip a `temperature` module reads. Defaults to the processor's own.
     chip: Option<String>,
-    /// What a `sway:language` module calls each layout, keyed by the name xkb gives it.
+    /// What a `language` module calls each layout, keyed by the name xkb gives it.
     /// A layout named here is what `$short` says; anything else is abbreviated.
     #[serde(default)]
     layouts: BTreeMap<String, String>,
-    /// Native or textual icons for `sway:workspaces`, keyed by name, with optional default.
+    /// Native or textual icons for `workspaces`, keyed by name, with optional default.
     #[serde(default)]
     icons: BTreeMap<String, String>,
     /// How much of the session a compositor module is about: `output`, which is the screen
@@ -1956,13 +1956,10 @@ pub fn sources() -> Vec<(&'static str, Source)> {
             })),
         ),
         ("provider", Source::Provider),
-        ("sway:window", Source::Window(Scope::Output)),
-        (
-            "sway:workspaces",
-            Source::Workspaces(WorkspaceView::default()),
-        ),
-        ("sway:language", Source::Language(Default::default())),
-        ("sway:mode", Source::Mode),
+        ("window", Source::Window(Scope::Output)),
+        ("workspaces", Source::Workspaces(WorkspaceView::default())),
+        ("language", Source::Language(Default::default())),
+        ("mode", Source::Mode),
         ("tray", Source::Tray(TrayView::default())),
     ]
 }
@@ -1976,8 +1973,8 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
     let name = raw.and_then(|m| m.source.as_deref()).unwrap_or("provider");
     let source = match name {
         "provider" => Source::Provider,
-        "sway:window" => Source::Window(raw.and_then(|m| m.scope).unwrap_or_default()),
-        "sway:workspaces" => {
+        "window" => Source::Window(raw.and_then(|m| m.scope).unwrap_or_default()),
+        "workspaces" => {
             let mut icons = BTreeMap::new();
             if let Some(written) = raw.map(|m| &m.icons) {
                 for (workspace, name) in written {
@@ -1992,8 +1989,15 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
                 icons,
             })
         }
-        "sway:language" => Source::Language(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
-        "sway:mode" => Source::Mode,
+        "language" => Source::Language(raw.map(|m| m.layouts.clone()).unwrap_or_default()),
+        "mode" => Source::Mode,
+        // Named for Sway until they followed niri as well. An old name is refused like any
+        // other mistake, but the message says what the source is called now.
+        old @ ("sway:window" | "sway:workspaces" | "sway:language" | "sway:mode") => bail!(
+            "module {module_name:?} has source {old:?}, which is now called {:?}: it follows \
+             niri as well as Sway",
+            &old["sway:".len()..]
+        ),
         "tray" => Source::Tray(TrayView {
             show_passive: raw.and_then(|m| m.show_passive).unwrap_or(true),
             order: raw.map(|m| m.order.clone()).unwrap_or_default(),
@@ -2079,9 +2083,12 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         )),
         "network" => Source::Native(Which::Network(raw.and_then(|m| m.interface.clone()))),
         other => bail!(
-            "module {module_name:?} has unknown source {other:?}; expected one of cpu, \
-             memory, battery, backlight, load, temperature, disk, network, time, provider, \
-             tray, sway:window, sway:workspaces or sway:language"
+            "module {module_name:?} has unknown source {other:?}; expected one of {}",
+            sources()
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     };
 
@@ -2119,12 +2126,12 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         (
             "layouts",
             raw.is_some_and(|m| !m.layouts.is_empty()),
-            "sway:language",
+            "language",
         ),
         (
             "icons",
             raw.is_some_and(|m| !m.icons.is_empty()),
-            "sway:workspaces",
+            "workspaces",
         ),
         (
             "show_passive",
@@ -2139,11 +2146,9 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         }
     }
     // `scope` is the one key two sources share, since both are about what is on a screen.
-    if raw.is_some_and(|m| m.scope.is_some()) && !matches!(name, "sway:window" | "sway:workspaces")
-    {
+    if raw.is_some_and(|m| m.scope.is_some()) && !matches!(name, "window" | "workspaces") {
         bail!(
-            "module {module_name:?} sets `scope`, which only a sway:window or \
-             sway:workspaces module reads"
+            "module {module_name:?} sets `scope`, which only a window or workspaces module reads"
         );
     }
     Ok(source)
