@@ -387,6 +387,7 @@ centre where the eye finds it without looking.
 | --------------------------------------------- | -------------------------------------------------------- |
 | [daily.toml](examples/daily.toml)             | an everyday bar, every module read by dbar itself        |
 | [islands.toml](examples/islands.toml)         | translucent rounded panels floating over the wallpaper   |
+| [dusk.toml](examples/dusk.toml)               | one translucent strip, workspace dots and glyph buttons  |
 | [minimal.toml](examples/minimal.toml)         | text and hairlines, along the bottom of the screen       |
 | [states.toml](examples/states.toml)           | modules that restyle themselves as values move           |
 | [separators.toml](examples/separators.toml)   | all seven separator shapes, side by side                 |

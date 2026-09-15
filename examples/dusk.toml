@@ -1,0 +1,285 @@
+# Dusk.
+#
+#   dbar -c examples/dusk.toml
+#
+# One translucent strip with round ends, floating off the top of the screen, and
+# everything on it quiet: numbered dots for the workspaces, bare glyph buttons,
+# a short clock, the weather alone in the middle, and the tray and connections
+# along the right. Colour is spent in one place - the workspace you are on.
+#
+# The strip is the bar's own background rather than a group's: a group only
+# spans its own position, and this is meant to read as one object from the
+# first workspace to the power button, with the gaps between the three runs
+# still part of it. `width` keeps it to the middle of the screen, `margin` lifts
+# it off the top, and the radius, half the height, turns the ends into
+# semicircles.
+#
+# The buttons are Nerd Font glyphs, so they want `Symbols Nerd Font` (or any
+# patched family) installed; dbar finds it on its own. Each one runs a program
+# that is only a suggestion - grim, slurp, wl-copy, qalculate-gtk, swaync and
+# wlogout - and a click on one that is missing does nothing else. The weather
+# runs examples/weather.sh, which wants curl, jq and a key in
+# ~/.config/dbar/owm.key; without one it shows a question mark and a middle
+# click asks again.
+
+[bar]
+height = 36
+position = "top"
+layer = "bottom"
+margin = 8
+width = "60%"
+gap = 10
+font = "DejaVu Sans Mono 15"
+icon_size = 18
+
+[bar.background]
+# A neutral grey at alpha 88, a little over half, so the wallpaper and SwayFX
+# blur carry most of the strip's colour.
+color = "#2e2e3288"
+radius = 18
+
+[colors]
+text = "#cad3f5"
+subtext = "#a5adcb"
+dot = "#b8c0e0"
+accent = "#b7bdf8"
+raised = "#363a4f"
+ink = "#181926"
+critical = "#ed8796"
+
+[left]
+groups = ["desktop", "capture", "time"]
+
+[center]
+groups = ["world"]
+
+[right]
+groups = ["tools", "tray", "session"]
+
+# ---------------------------------------------------------------------------
+# Styles
+#
+# Nothing below has a background at rest. The strip is the only surface, and a
+# module that painted its own would break it into tiles.
+# ---------------------------------------------------------------------------
+
+[style.plain]
+foreground = "$text"
+padding = 5
+icon_gap = 5
+
+# A button is its glyph and nothing else, so it wants less room than a reading.
+[style.button]
+foreground = "$text"
+padding = 5
+
+# A workspace is a dot with its number in it. The width matches the height the
+# group leaves it, so an idle one is a circle rather than a stadium.
+[style.dot]
+background = "$dot"
+foreground = "$ink"
+padding = 0
+min_width = 18
+radius = 9
+
+# The one you are on stretches into a pill instead of changing colour alone,
+# which still reads for someone who cannot tell lavender from grey.
+[style.focused]
+background = "$accent"
+foreground = "$ink"
+padding = 0
+min_width = 38
+radius = 9
+
+[style.hovered]
+background = "$raised"
+foreground = "$text"
+radius = 9
+
+# ---------------------------------------------------------------------------
+# Groups
+#
+# All transparent, so the strip shows through end to end. They exist for
+# spacing: the dots sit tight together, the readings further apart.
+# ---------------------------------------------------------------------------
+
+[group.desktop]
+modules = ["workspaces", "mode"]
+# Vertical room the dots do not use, which is what keeps them at 18 in a 36 bar.
+padding = 9
+spacing = 5
+
+[group.capture]
+modules = ["region", "screen"]
+spacing = 0
+
+[group.time]
+modules = ["clock"]
+
+[group.world]
+modules = ["weather"]
+
+[group.tools]
+modules = ["calculator", "volume"]
+spacing = 2
+
+[group.tray]
+modules = ["tray"]
+spacing = 2
+
+[group.session]
+modules = ["network", "notifications", "power"]
+padding = 4
+spacing = 2
+
+[menu]
+background = "#24273a"
+foreground = "$text"
+highlight = "$raised"
+disabled = "$subtext"
+separator = "$raised"
+radius = 10
+
+# ---------------------------------------------------------------------------
+# Modules
+# ---------------------------------------------------------------------------
+
+[module.workspaces]
+source = "workspaces"
+format = "$name"
+style = "dot"
+
+[module.workspaces.states.focused]
+focused = true
+style = "focused"
+
+[module.workspaces.states.urgent]
+urgent = true
+background = "$critical"
+
+# Only on the bar while a binding mode is held, next to the dots where the eye
+# already is.
+[module.mode]
+source = "mode"
+format = "$mode"
+style = "plain"
+foreground = "$accent"
+
+# A button has nothing to read, so its source is a command that says nothing,
+# run once at startup. The glyph is the wording rather than an `icon`: a module
+# whose format renders empty is not drawn, whatever icon its style names.
+[module.region]
+source = "command"
+command = ["true"]
+interval = "once"
+format = "\U000F0485"
+style = "button"
+on_click = { left = ["sh", "-c", "grim -g \"$(slurp)\" - | wl-copy"] }
+
+[module.screen]
+source = "command"
+command = ["true"]
+interval = "once"
+format = "\U000F02F9"
+style = "button"
+on_click = { left = ["sh", "-c", "grim - | wl-copy"] }
+
+[module.clock]
+source = "time"
+interval = "1m"
+format = "$now.time(f:'%H:%M')"
+format_alt = "$now.time(f:'%a %d %b  %H:%M')"
+style = "plain"
+on_click = { right = ["examples/sway_calendar.sh"] }
+alt_button = "left"
+
+# The chain on $icon keeps the module on the bar when the fetch failed, so there
+# is still something to middle click.
+[module.weather]
+source = "command"
+command = ["examples/weather.sh"]
+params = ["metric", "~/.config/dbar/owm.key", "45.2517,19.8369"]
+interval = "30m"
+refresh_button = "middle"
+fields = { "icon" = "text", "weather" = "text", "location" = "text", "temp" = "number", "wind" = "number", "direction" = "text", "forecast_icon" = "text", "forecast_avg" = "number", "forecast_min" = "number", "forecast_max" = "number" }
+format = "$icon|'?'{ $temp.n(d:0)°C}"
+format_alt = "{$icon }$weather|'unavailable'{ ($location)}{, $wind.n(d:1) m/s $direction}"
+style = "plain"
+max_width = 260
+
+[module.weather.states.stale]
+state = "error"
+foreground = "$subtext"
+
+[module.calculator]
+source = "command"
+command = ["true"]
+interval = "once"
+format = "\U000F00EC"
+style = "button"
+on_click = { left = ["qalculate-gtk"] }
+
+[module.volume]
+source = "audio"
+scroll = "5%"
+format = "$volume.n(d:0)"
+style = "plain"
+icon = "$volume"
+
+[module.volume.states.headphones_muted]
+fields = { "muted" = "yes", "port" = "headphones" }
+foreground = "$subtext"
+icon = "$headphones-muted"
+
+[module.volume.states.muted]
+field = "muted"
+equals = "yes"
+foreground = "$subtext"
+icon = "$volume-muted"
+
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "$headphones"
+
+[module.tray]
+source = "tray"
+style = "button"
+icon_size = 18
+
+[module.tray.states.attention]
+field = "status"
+equals = "attention"
+background = "$critical"
+radius = 9
+
+[module.network]
+source = "network"
+interval = "5s"
+format = "$ssid|$device"
+format_alt = "$down{  $up}"
+style = "plain"
+icon = "$wifi"
+max_width = 200
+
+[module.network.states.offline]
+field = "state"
+equals = "down"
+foreground = "$subtext"
+icon = "$wifi-off"
+
+[module.notifications]
+source = "command"
+command = ["true"]
+interval = "once"
+format = "\U000F009A"
+style = "button"
+on_click = { left = ["swaync-client", "-t", "-sw"] }
+
+[module.power]
+source = "command"
+command = ["true"]
+interval = "once"
+format = "\U000F0425"
+style = "button"
+on_click = { left = ["wlogout"] }
