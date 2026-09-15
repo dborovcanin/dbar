@@ -533,9 +533,15 @@ mod tests {
         // Plugged back in: the working wireless link is kept until the choice is old.
         std::fs::write(&cable, "up\n").expect("writable");
         assert_eq!(device(&mut net), "wlp3s0");
-        if let Some((_, at)) = &mut net.chosen {
-            *at -= REPICK;
-        }
+        // A machine up for less than the interval has no instant that far back to age the
+        // choice to, and nothing left here to check.
+        let Some((_, at)) = &mut net.chosen else {
+            panic!("the wireless card was chosen");
+        };
+        let Some(earlier) = at.checked_sub(REPICK) else {
+            return;
+        };
+        *at = earlier;
         assert_eq!(device(&mut net), "enp2s0f0");
     }
 
