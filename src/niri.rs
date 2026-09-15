@@ -172,7 +172,11 @@ impl State {
     /// niri does not promise that its events agree with each other at every step - a
     /// workspace can name an active window that has not been announced yet - so an event
     /// about something that is not there is left alone rather than trusted.
-    fn apply(&mut self, event: Event) -> bool {
+    ///
+    /// niri reports every title of every window, and a terminal running a build retitles
+    /// itself many times a second. A change the bar is not showing is taken in and goes no
+    /// further, rather than rebuilding a desktop only for it to be found unchanged.
+    fn apply(&mut self, event: Event, watching: Watching) -> bool {
         let mut news = false;
         if let Some(e) = event.workspaces_changed {
             self.workspaces = e.workspaces.into_iter().map(|w| (w.id, w)).collect();
@@ -199,23 +203,32 @@ impl State {
             }
             news = true;
         }
-        if let Some(e) = event.workspace_active_window_changed {
-            if let Some(workspace) = self.workspaces.get_mut(&e.workspace_id) {
-                workspace.active_window_id = e.active_window_id;
-            }
-            news = true;
+        if let Some(e) = event.workspace_active_window_changed
+            && let Some(workspace) = self.workspaces.get_mut(&e.workspace_id)
+            && workspace.active_window_id != e.active_window_id
+        {
+            workspace.active_window_id = e.active_window_id;
+            // Only the workspace a screen is on puts its active window on the bar.
+            news |= watching.windows && workspace.is_active;
         }
         if let Some(e) = event.windows_changed {
             self.windows = e.windows.into_iter().map(|w| (w.id, w.into())).collect();
             news = true;
         }
         if let Some(e) = event.window_opened_or_changed {
-            self.windows.insert(e.window.id, e.window.into());
-            news = true;
+            let id = e.window.id;
+            news |= match self.windows.insert(id, e.window.into()) {
+                // A new window can fill a workspace the list had left off.
+                None => true,
+                Some(before) => {
+                    let after = &self.windows[&id];
+                    before.workspace != after.workspace
+                        || (watching.windows && before.window != after.window && self.showing(id))
+                }
+            };
         }
         if let Some(e) = event.window_closed {
-            self.windows.remove(&e.id);
-            news = true;
+            news |= self.windows.remove(&e.id).is_some();
         }
         if let Some(e) = event.keyboard_layouts_changed {
             self.layouts = Some(e.keyboard_layouts);
@@ -228,6 +241,14 @@ impl State {
             news = true;
         }
         news
+    }
+
+    /// Whether a screen is showing this window: it is the active window of the workspace
+    /// active there.
+    fn showing(&self, window: u64) -> bool {
+        self.workspaces
+            .values()
+            .any(|w| w.is_active && w.active_window_id == Some(window))
     }
 
     /// The desktop as the bar holds it.
@@ -293,6 +314,15 @@ impl State {
     }
 }
 
+/// The longest event taken from niri, in bytes.
+///
+/// niri opens its stream with every window in the session on one line, a few hundred bytes
+/// each, so that line grows with the session rather than with the bar. A cut event cannot
+/// be read, and the bar would be left following a desktop niri no longer has, so this is set
+/// far past any session a person runs. It is still a limit, and the memory is held only while
+/// such a line is being read.
+const EVENT_LIMIT: usize = 16 * 1024 * 1024;
+
 /// Ask niri for its event stream and forward what it says into the event loop.
 pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching) -> Result<()> {
     // Asked here rather than on the thread, so a socket that is not there or a niri that
@@ -301,7 +331,7 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
     stream
         .write_all(b"\"EventStream\"\n")
         .context("asking niri for its event stream")?;
-    let mut lines = lines::capped(BufReader::new(stream));
+    let mut lines = lines::capped_at(BufReader::new(stream), EVENT_LIMIT);
     let reply = lines
         .next()
         .context("niri closed its socket instead of answering")?
@@ -343,13 +373,12 @@ fn follow(mut lines: Lines<BufReader<UnixStream>>, mut publisher: Publisher, wat
             // desktop niri no longer has.
             if line.dropped > 0 {
                 publisher.stop(format!(
-                    "niri sent an event longer than {} bytes",
-                    lines::LIMIT
+                    "niri sent an event longer than {EVENT_LIMIT} bytes"
                 ));
                 return;
             }
             match serde_json::from_str::<Event>(&line.text) {
-                Ok(event) => news |= state.apply(event),
+                Ok(event) => news |= state.apply(event, watching),
                 // A newer niri may describe something in a way this dbar does not read. Said
                 // once: the same event will keep arriving, and the log is not the place for it.
                 Err(e) if !unreadable => {
@@ -433,10 +462,18 @@ mod tests {
     /// The new terminal setting its title.
     const RETITLED: &str = r#"{"WindowOpenedOrChanged":{"window":{"id":3,"title":"title-b","app_id":"foot","pid":638599,"workspace_id":1,"is_focused":true,"is_floating":false,"is_urgent":false,"focus_timestamp":null}}}"#;
 
-    fn replay(state: &mut State, lines: &[&str]) {
+    /// Take events in for a bar showing everything, and say whether any of them was news.
+    fn replay(state: &mut State, lines: &[&str]) -> bool {
+        replay_watching(state, lines, EVERYTHING)
+    }
+
+    fn replay_watching(state: &mut State, lines: &[&str], watching: Watching) -> bool {
+        let mut news = false;
         for line in lines {
-            state.apply(serde_json::from_str(line).expect("an event from niri parses"));
+            let event = serde_json::from_str(line).expect("an event from niri parses");
+            news |= state.apply(event, watching);
         }
+        news
     }
 
     fn names(desktop: &Desktop) -> Vec<&str> {
@@ -499,12 +536,13 @@ mod tests {
         replay(&mut state, OPENING);
         replay(&mut state, OPENED_A_TERMINAL);
         let before = state.desktop(EVERYTHING);
-        replay(
+        let news = replay(
             &mut state,
             &[
                 r#"{"WindowOpenedOrChanged":{"window":{"id":2,"title":"make: building","app_id":"foot","workspace_id":1,"is_focused":false}}}"#,
             ],
         );
+        assert!(!news, "nothing to rebuild the desktop for");
         assert_eq!(state.desktop(EVERYTHING), before);
 
         let workspaces_only = Watching {
@@ -512,8 +550,51 @@ mod tests {
             ..Watching::default()
         };
         let before = state.desktop(workspaces_only);
-        replay(&mut state, &[RETITLED]);
+        assert!(!replay_watching(&mut state, &[RETITLED], workspaces_only));
         assert_eq!(state.desktop(workspaces_only), before);
+    }
+
+    /// A window event is news when the bar can show it: the title on a screen, or a window
+    /// opening or moving, which can change which workspaces are listed. The same title again,
+    /// the active window of a workspace no screen is on, and a window niri never announced
+    /// are not.
+    #[test]
+    fn only_a_window_change_the_bar_can_show_is_news() {
+        let mut state = State::default();
+        replay(&mut state, OPENING);
+        replay(&mut state, OPENED_A_TERMINAL);
+        let workspaces_only = Watching {
+            workspaces: true,
+            ..Watching::default()
+        };
+
+        assert!(replay(&mut state, &[RETITLED]), "the title on the screen");
+        assert!(!replay(&mut state, &[RETITLED]), "the same title again");
+
+        let moved = r#"{"WindowOpenedOrChanged":{"window":{"id":2,"title":"title-b","app_id":"foot","workspace_id":2,"is_focused":false}}}"#;
+        assert!(
+            replay_watching(&mut state, &[moved], workspaces_only),
+            "a window moving can fill or empty a workspace"
+        );
+        let opened = r#"{"WindowOpenedOrChanged":{"window":{"id":4,"title":"new","app_id":"foot","workspace_id":2,"is_focused":false}}}"#;
+        assert!(replay_watching(&mut state, &[opened], workspaces_only));
+
+        assert!(!replay(&mut state, &[r#"{"WindowClosed":{"id":42}}"#]));
+        let behind = r#"{"WorkspaceActiveWindowChanged":{"workspace_id":2,"active_window_id":4}}"#;
+        assert!(
+            !replay(&mut state, &[behind]),
+            "no screen is on workspace 2"
+        );
+
+        let on_screen =
+            r#"{"WorkspaceActiveWindowChanged":{"workspace_id":1,"active_window_id":2}}"#;
+        assert!(!replay_watching(&mut state, &[on_screen], workspaces_only));
+        let again = r#"{"WorkspaceActiveWindowChanged":{"workspace_id":1,"active_window_id":3}}"#;
+        assert!(
+            replay(&mut state, &[again]),
+            "the screen shows another window"
+        );
+        assert_eq!(state.desktop(EVERYTHING).windows["winit"].title, "title-b");
     }
 
     /// Geometry, focus timestamps, the overview and screencasts all arrive on the same
@@ -530,7 +611,7 @@ mod tests {
             r#"{"ScreenshotCaptured":{"path":null}}"#,
         ] {
             let event = serde_json::from_str(line).expect("an event dbar ignores still parses");
-            assert!(!state.apply(event), "{line}");
+            assert!(!state.apply(event, EVERYTHING), "{line}");
         }
     }
 

@@ -30,10 +30,13 @@ pub struct Lines<R> {
 }
 
 pub fn capped<R: BufRead>(reader: R) -> Lines<R> {
-    Lines {
-        reader,
-        limit: LIMIT,
-    }
+    capped_at(reader, LIMIT)
+}
+
+/// Lines from a reader, each cut to `limit` bytes, for a reader whose lines are known to run
+/// longer than any status line does.
+pub fn capped_at<R: BufRead>(reader: R, limit: usize) -> Lines<R> {
+    Lines { reader, limit }
 }
 
 impl<R> Lines<R> {
@@ -92,11 +95,7 @@ mod tests {
     use super::*;
 
     fn read(input: &[u8], limit: usize) -> Vec<(String, usize)> {
-        let lines = Lines {
-            reader: std::io::BufReader::new(input),
-            limit,
-        };
-        lines
+        capped_at(std::io::BufReader::new(input), limit)
             .map(|l| l.expect("reading from a slice cannot fail"))
             .map(|l| (l.text, l.dropped))
             .collect()
