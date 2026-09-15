@@ -355,3 +355,12 @@ fn group_button_precedes_every_child_gesture_and_forwarded_action() {
         }
     }
 }
+
+#[test]
+fn a_hiding_bar_keeps_its_margin_inside_its_surface_on_the_edge_side() {
+    assert_eq!(inset(Edge::Top, 3, 31), (3, 28));
+    assert_eq!(inset(Edge::Bottom, 3, 31), (0, 28));
+    assert_eq!(inset(Edge::Top, 0, 28), (0, 28));
+    // Before the compositor has answered with the taller size, there is no bar to place.
+    assert_eq!(inset(Edge::Top, 3, 1).1, 0);
+}

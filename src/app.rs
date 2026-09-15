@@ -339,6 +339,19 @@ impl Bar {
 /// nothing to see, since what it draws is transparent.
 const HIDDEN_HEIGHT: u32 = 1;
 
+/// Where a bar sits in a surface that also holds `reach` pixels of its margin: the offset
+/// from the surface's top, and the bar's own height.
+///
+/// The margin is the band nearest the edge, so it comes first on a top bar and last on a
+/// bottom one.
+fn inset(position: Edge, reach: u32, surface_height: u32) -> (u32, u32) {
+    let height = surface_height.saturating_sub(reach);
+    match position {
+        Edge::Top => (surface_height - height, height),
+        Edge::Bottom => (0, height),
+    }
+}
+
 /// How wide a bar's surface is asked to be on a screen, or `None` to stretch it between the
 /// screen's sides.
 ///
@@ -358,16 +371,19 @@ fn span_on(cfg: &crate::config::Bar, screen: Option<(i32, i32)>) -> Option<u32> 
 /// A surface anchored to one edge alone is centred along it by the compositor, which is
 /// what puts a bar with a width in the middle of the screen.
 ///
-/// A hidden bar keeps its width but is a strip against the edge itself, with no margin
-/// between, so that the pointer pushed to the edge lands on it.
+/// A hiding bar never stands off its edge. Hidden, it keeps its width but is a strip against
+/// the edge itself; out, its margin towards the edge is a transparent band inside its own
+/// surface. Either way the pointer pushed to the edge is over the bar, rather than in a gap
+/// that would count as having left it.
 fn place(layer: &LayerSurface, cfg: &crate::config::Bar, span: Option<u32>, hidden: bool) {
     let edge = match cfg.position {
         Edge::Top => Anchor::TOP,
         Edge::Bottom => Anchor::BOTTOM,
     };
-    let (height, m) = match hidden {
-        true => (HIDDEN_HEIGHT, 0),
-        false => (cfg.height, cfg.margin),
+    let (height, m) = match (hidden, cfg.autohide) {
+        (true, _) => (HIDDEN_HEIGHT, 0),
+        (false, Some(_)) => (cfg.height + cfg.margin.max(0) as u32, 0),
+        (false, None) => (cfg.height, cfg.margin),
     };
     let side = cfg.margin;
     match cfg.position {
@@ -1293,6 +1309,21 @@ impl App {
         self.menu_timer_scheduled = false;
     }
 
+    /// Where a bar's content sits in its surface, or `None` while there is nothing to lay
+    /// out: a hidden bar, or one the compositor has not yet made tall enough to hold it.
+    fn content_of(&self, i: usize) -> Option<(u32, u32)> {
+        let bar = &self.bars[i];
+        if bar.hidden() {
+            return None;
+        }
+        let reach = match bar.autohide {
+            Some(_) => self.config.bar.margin.max(0) as u32,
+            None => 0,
+        };
+        let (offset, height) = inset(self.config.bar.position, reach, bar.height);
+        (height > 0).then_some((offset, height))
+    }
+
     /// Whether a menu is open or on its way, which keeps a hiding bar in view.
     fn menu_held(&self) -> bool {
         !self.menus.is_empty() || self.opening.is_some()
@@ -1718,10 +1749,12 @@ impl App {
     fn draw(&mut self, i: usize) -> Result<()> {
         // A hidden bar is still a surface, and needs a buffer for the pointer to find it;
         // an empty frame paints it transparent and gives a click nothing to land on.
-        let frame = match self.bars[i].hidden() {
-            true => Frame::default(),
-            false => self.lay_out(i),
+        let content = self.content_of(i);
+        let frame = match content {
+            Some(_) => self.lay_out(i),
+            None => Frame::default(),
         };
+        let (offset, content_height) = content.unwrap_or((0, self.bars[i].height));
         let bar = &self.bars[i];
         let surface_now = (bar.width, bar.height, bar.scale);
         // Worked out against the frame that is on screen, which is the one still held: a
@@ -1767,12 +1800,21 @@ impl App {
             .pool
             .create_buffer(pw, ph, stride, *format)
             .context("creating an shm buffer")?;
+        // A hiding bar's margin belongs to its surface but stays clear, and the bar is
+        // painted into the rows beside it as though they were the whole surface.
+        let above = (offset * scale as u32) as usize * stride as usize;
+        let rows = content_height * scale as u32;
+        let (margin, canvas) = canvas.split_at_mut(above.min(canvas.len()));
+        margin.fill(0);
+        let (canvas, below) =
+            canvas.split_at_mut((rows as usize * stride as usize).min(canvas.len()));
+        below.fill(0);
 
         render::render_to_buffer(
             render::Target {
                 canvas,
                 width: pw as u32,
-                height: ph as u32,
+                height: rows,
                 clip: &mut bar.clip,
                 pixels: *pixels,
             },
@@ -1790,6 +1832,7 @@ impl App {
             layout::Damage::All => surface.damage_buffer(0, 0, pw, ph),
             layout::Damage::Rects(rects) => {
                 for (x, y, w, h) in rects {
+                    let y = y + offset as f32;
                     // Out to whole pixels on every side: a rectangle in logical pixels
                     // lands between them once the scale is applied, and antialiasing
                     // reaches a little past the shape that asked for it.
@@ -1823,6 +1866,9 @@ impl App {
     /// frame is being held, and because a bar's geometry is the only thing that differs:
     /// everything laid out here came from one round of collecting.
     fn lay_out(&mut self, i: usize) -> Frame {
+        let height = self
+            .content_of(i)
+            .map_or(self.bars[i].height, |(_, height)| height) as f32;
         let App {
             bars,
             painter,
@@ -1843,7 +1889,7 @@ impl App {
         } = self;
         let bar = &bars[i];
         painter.text.set_scale(bar.scale.max(1) as f32);
-        let (width, height) = (bar.width as f32, bar.height as f32);
+        let width = bar.width as f32;
         if let Some(message) = fault {
             return layout::fault(config, message, width, height, &mut painter.text);
         }
@@ -2334,6 +2380,9 @@ impl PointerHandler for App {
             let Some(i) = self.bar_of(&event.surface) else {
                 continue;
             };
+            // Frames are laid out from the bar's own top, which a hiding bar's margin pushes
+            // down inside its surface.
+            let y = y - self.content_of(i).map_or(0, |(offset, _)| offset) as f64;
             match event.kind {
                 PointerEventKind::Enter { .. } => {
                     self.pointer_entered(i);

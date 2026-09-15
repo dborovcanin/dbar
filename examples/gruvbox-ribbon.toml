@@ -17,11 +17,14 @@
 [bar]
 height = 30
 position = "top"
-layer = "bottom"
+layer = "overlay"
 margin = 0
 gap = 0
 font = "monospace 13"
 icon_size = 16
+autohide = true
+autohide_delay = "500ms"
+autohide_signal = 3
 
 [bar.background]
 color = "$background"
