@@ -38,7 +38,8 @@ bench:
 		benchmark_joined_ribbon \
 		benchmark_group_collapse_layout \
 		benchmark_module_collapse \
-		benchmark_held_pseudo_files
+		benchmark_held_pseudo_files \
+		benchmark_native_layout
 
 fmt:
 	$(CARGO) fmt

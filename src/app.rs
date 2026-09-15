@@ -1880,10 +1880,16 @@ impl App {
                 let Some(name) = named else {
                     return;
                 };
-                let showing = self.pages.entry(name).or_insert(0);
-                *showing = match forward {
-                    true => (*showing + 1) % count,
-                    false => (*showing + count - 1) % count,
+                let showing = self.pages.get(&name).copied().unwrap_or(0);
+                let next = match forward {
+                    true => (showing + 1) % count,
+                    false => (showing + count - 1) % count,
+                };
+                // The first page is held as no entry at all, so a bar scrolled back round
+                // to where it started lays out as cheaply as one never scrolled.
+                match next {
+                    0 => self.pages.remove(&name),
+                    next => self.pages.insert(name, next),
                 };
                 self.invalidate();
             }
@@ -1892,9 +1898,12 @@ impl App {
                 let Some(name) = named else {
                     return;
                 };
-                let showing = self.alt.entry(name.clone()).or_insert(0);
-                let from = *showing;
-                *showing = (from + 1) % views;
+                let from = self.alt.get(&name).copied().unwrap_or(0);
+                // The first wording is held as no entry at all, the same as the first page.
+                match (from + 1) % views {
+                    0 => self.alt.remove(&name),
+                    next => self.alt.insert(name.clone(), next),
+                };
                 // The wording flips at once whether or not anything is animated, so a
                 // click is never lost and a module caught part way still knows what it is
                 // showing.

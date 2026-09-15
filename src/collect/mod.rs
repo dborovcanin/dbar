@@ -489,6 +489,16 @@ impl Registry {
         Registry::fixture_pages(which, vec![reading])
     }
 
+    /// The same, for several sources at once.
+    #[cfg(test)]
+    pub fn fixtures(sources: Vec<(Which, Reading)>) -> Registry {
+        let entries = sources
+            .into_iter()
+            .flat_map(|(which, reading)| Registry::fixture(which, reading).entries)
+            .collect();
+        Registry { entries }
+    }
+
     /// The same, for a source that published several readings at once.
     #[cfg(test)]
     pub fn fixture_pages(which: Which, readings: Vec<Reading>) -> Registry {

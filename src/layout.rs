@@ -12,6 +12,7 @@ use crate::config::{
 use crate::format::Format;
 use crate::geometry::{Direction, EdgeShape, Edges, SeparatorShape};
 use crate::icon::{self, Icon};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use crate::config::{Button, ClickActions};
@@ -849,6 +850,11 @@ fn wording<'g>(
     module: &'g ModuleCfg,
     alt: &std::collections::HashMap<String, usize>,
 ) -> &'g Format {
+    // Most modules have one wording, and asking which of one is showing would hash the
+    // module's name on every frame for an answer that cannot be anything but the first.
+    if module.format_alt.is_empty() || alt.is_empty() {
+        return &module.format;
+    }
     wording_at(module, alt.get(&module.name).copied().unwrap_or(0))
 }
 
@@ -950,13 +956,17 @@ struct SizedModule {
 const FAULT_COLOR: Color = Color::rgba(0xf3, 0x8b, 0xa8, 0xff);
 
 /// One thing a group will draw, before it has been measured.
-struct Candidate<'g> {
+struct Candidate<'g, 'i> {
     module: &'g ModuleCfg,
     text: String,
     flags: StateFlags,
     /// What the source published, so a threshold can read the value it names rather than
     /// the one the format happened to show.
-    values: Fields,
+    ///
+    /// Borrowed where a source already holds it: this is built for every module of every
+    /// frame, and a reading copied only to be read and dropped would be paid for forever.
+    /// The compositor's modules make their fields here, and own them.
+    values: Cow<'i, Fields>,
     /// Colours the source asked for, which win over the style's own.
     foreground: Option<Color>,
     background: Option<Color>,
@@ -991,12 +1001,13 @@ enum Decoration<'g> {
 ///
 /// A module drawn from the compositor expands here: `workspaces` becomes one candidate
 /// per workspace, so each is its own rectangle with its own state and click target.
-fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
+fn collect<'g, 'i>(group: &'g GroupCfg, inputs: &Inputs<'i>) -> Vec<Candidate<'g, 'i>> {
     #[cfg(test)]
     tests::COLLECTIONS.with(|count| count.set(count.get() + 1));
     let mut out = Vec::new();
+    let (items, native): (&'i [StatusItem], &'i Registry) = (inputs.items, inputs.native);
 
-    let from_item = |module: &'g ModuleCfg, item: &StatusItem| Candidate {
+    let from_item = |module: &'g ModuleCfg, item: &'i StatusItem| Candidate {
         module,
         text: wording(module, inputs.alt).render(&item.fields),
         flags: StateFlags {
@@ -1004,7 +1015,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
             state: item.state,
             ..StateFlags::default()
         },
-        values: item.fields.clone(),
+        values: Cow::Borrowed(&item.fields),
         foreground: item.foreground,
         background: item.background,
         action: item.action.clone(),
@@ -1015,7 +1026,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
 
     if group.wildcard {
         if let Some(module) = group.modules.first() {
-            out.extend(inputs.items.iter().map(|item| from_item(module, item)));
+            out.extend(items.iter().map(|item| from_item(module, item)));
         }
         return out;
     }
@@ -1025,19 +1036,22 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
             Source::Native(which) => {
                 // Which of the readings this module is scrolled to. A source that
                 // published one has one, and the page is always that one.
-                let page = inputs.pages.get(&module.name).copied().unwrap_or(0);
+                let page = match inputs.pages.is_empty() {
+                    true => 0,
+                    false => inputs.pages.get(&module.name).copied().unwrap_or(0),
+                };
                 // A collector that has not read yet has nothing to show, which is the same
                 // as a provider that has not spoken: the module simply is not there. A
                 // command with its first run still out is the exception, because it has a
                 // reason to be on the bar early: the spinner stands in until the reading
                 // lands, in the place the reading will land in.
-                let Some((reading, pages)) = inputs.native.showing(which, page) else {
+                let Some((reading, pages)) = native.showing(which, page) else {
                     if inputs.waiting.contains(which) {
                         out.push(Candidate {
                             module,
                             text: String::new(),
                             flags: StateFlags::default(),
-                            values: Fields::default(),
+                            values: Cow::Owned(Fields::default()),
                             foreground: None,
                             background: None,
                             action: None,
@@ -1057,7 +1071,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         state: reading.state,
                         ..StateFlags::default()
                     },
-                    values: reading.fields.clone(),
+                    values: Cow::Borrowed(&reading.fields),
                     foreground: None,
                     background: None,
                     pages,
@@ -1069,7 +1083,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                 });
             }
             Source::Provider => {
-                for item in inputs.items {
+                for item in items {
                     if item.id.as_deref() == Some(module.name.as_str()) {
                         out.push(from_item(module, item));
                     }
@@ -1095,7 +1109,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
-                        values: fields,
+                        values: Cow::Owned(fields),
                         foreground: None,
                         background: None,
                         pages: 1,
@@ -1130,7 +1144,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
-                        values: fields,
+                        values: Cow::Owned(fields),
                         foreground: None,
                         background: None,
                         pages: 1,
@@ -1151,7 +1165,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                         module,
                         text: wording(module, inputs.alt).render(&fields),
                         flags: StateFlags::default(),
-                        values: fields,
+                        values: Cow::Owned(fields),
                         foreground: None,
                         background: None,
                         pages: 1,
@@ -1190,7 +1204,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                             urgent: item.status == crate::tray::Status::NeedsAttention,
                             ..StateFlags::default()
                         },
-                        values: fields,
+                        values: Cow::Owned(fields),
                         foreground: None,
                         background: None,
                         pages: 1,
@@ -1230,7 +1244,7 @@ fn collect<'g>(group: &'g GroupCfg, inputs: &Inputs<'_>) -> Vec<Candidate<'g>> {
                             visible: workspace.visible,
                             ..StateFlags::default()
                         },
-                        values: fields.clone(),
+                        values: Cow::Owned(fields),
                         foreground: None,
                         background: None,
                         pages: 1,

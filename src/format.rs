@@ -789,15 +789,15 @@ fn render_value(value: &Value, func: Option<&Func>, out: &mut String) -> bool {
     match (value, func) {
         (Value::Absent, _) => false,
         (Value::Num { v, unit }, Some(Func::Num(args))) => {
-            out.push_str(&format_num(*v, *unit, args));
+            format_num(*v, *unit, args, out);
             true
         }
         (Value::Num { v, unit }, None) => {
-            out.push_str(&format_num(*v, *unit, &NumArgs::default()));
+            format_num(*v, *unit, &NumArgs::default(), out);
             true
         }
         (Value::Text(text), Some(Func::Str(args))) => {
-            out.push_str(&format_str(text, args));
+            format_str(text, args, out);
             true
         }
         // The one case worth spelling out: text with no function is most of what a bar
@@ -815,27 +815,15 @@ fn render_value(value: &Value, func: Option<&Func>, out: &mut String) -> bool {
             true
         }
         (Value::Time(t), Some(Func::Time(args))) => {
-            match format_time(*t, &args.pattern, args.zone.as_ref()) {
-                Some(text) => {
-                    out.push_str(&text);
-                    true
-                }
-                None => false,
-            }
+            format_time(*t, &args.pattern, args.zone.as_ref(), out)
         }
-        (Value::Time(t), None) => match format_time(*t, "%H:%M", None) {
-            Some(text) => {
-                out.push_str(&text);
-                true
-            }
-            None => false,
-        },
+        (Value::Time(t), None) => format_time(*t, "%H:%M", None, out),
         (Value::Dur(d), Some(Func::Dur(style))) => {
-            out.push_str(&format_dur(*d, *style));
+            format_dur(*d, *style, out);
             true
         }
         (Value::Dur(d), None) => {
-            out.push_str(&format_dur(*d, DurStyle::default()));
+            format_dur(*d, DurStyle::default(), out);
             true
         }
         (Value::Flag(b), None) => {
@@ -848,7 +836,18 @@ fn render_value(value: &Value, func: Option<&Func>, out: &mut String) -> bool {
     }
 }
 
-fn format_num(v: f64, unit: Unit, args: &NumArgs) -> String {
+/// Spaces to pad with, for the widths anybody writes, without building a string of them.
+const SPACES: &str = "                                ";
+
+fn pad(width: usize) -> std::borrow::Cow<'static, str> {
+    match SPACES.get(..width) {
+        Some(spaces) => spaces.into(),
+        None => " ".repeat(width).into(),
+    }
+}
+
+fn format_num(v: f64, unit: Unit, args: &NumArgs, out: &mut String) {
+    use std::fmt::Write as _;
     let scale = args.scale.unwrap_or_else(|| default_scale(unit));
     let prefix = args.prefix.unwrap_or_else(|| Prefix::best(v, scale));
     let scaled = if scale == Scale::None && args.prefix.is_none() {
@@ -873,11 +872,11 @@ fn format_num(v: f64, unit: Unit, args: &NumArgs) -> String {
         }
     };
 
-    let mut out = String::new();
+    let start = out.len();
     if args.sign == Some(Sign::Always) && scaled >= 0.0 {
         out.push('+');
     }
-    out.push_str(&format!("{scaled:.decimals$}"));
+    let _ = write!(out, "{scaled:.decimals$}");
 
     let (symbol, spaced) = unit_suffix(unit);
     if args.suffix.unwrap_or(true) && !(symbol.is_empty() && prefix.symbol.is_empty()) {
@@ -889,16 +888,16 @@ fn format_num(v: f64, unit: Unit, args: &NumArgs) -> String {
     }
 
     // Numbers pad on the left, so a column of them lines up on the decimal point.
-    let width = args.width.saturating_sub(out.chars().count());
+    let width = args.width.saturating_sub(out[start..].chars().count());
     if width > 0 {
-        out.insert_str(0, &" ".repeat(width));
+        out.insert_str(start, &pad(width));
     }
-    out
 }
 
-fn format_str(text: &str, args: &StrArgs) -> String {
+fn format_str(text: &str, args: &StrArgs, out: &mut String) {
     let ellipsis = args.ellipsis.as_deref().unwrap_or("\u{2026}");
-    let mut out = match args.max {
+    let start = out.len();
+    match args.max {
         Some(max) if text.chars().count() > max => {
             let keep = max.saturating_sub(ellipsis.chars().count());
             let cut = text
@@ -906,16 +905,14 @@ fn format_str(text: &str, args: &StrArgs) -> String {
                 .nth(keep)
                 .map(|(i, _)| i)
                 .unwrap_or(text.len());
-            format!("{}{ellipsis}", &text[..cut])
+            out.push_str(&text[..cut]);
+            out.push_str(ellipsis);
         }
-        _ => text.to_string(),
-    };
-    // Text pads on the right, the way a label sits in a column.
-    let width = args.width.saturating_sub(out.chars().count());
-    if width > 0 {
-        out.push_str(&" ".repeat(width));
+        _ => out.push_str(text),
     }
-    out
+    // Text pads on the right, the way a label sits in a column.
+    let width = args.width.saturating_sub(out[start..].chars().count());
+    out.push_str(&pad(width));
 }
 
 /// Reject a strftime pattern that would draw itself instead of the time.
@@ -937,42 +934,44 @@ fn check_pattern(pattern: &str) -> Result<()> {
     Ok(())
 }
 
-/// Render an instant, in the zone the format named or in the machine's own.
-fn strftime(
-    pattern: &str,
-    at: jiff::Timestamp,
-    zone: Option<&jiff::tz::TimeZone>,
-) -> Result<String> {
-    let zoned = match zone {
-        Some(zone) => at.to_zoned(zone.clone()),
-        None => at.to_zoned(jiff::tz::TimeZone::system()),
-    };
-    jiff::fmt::strtime::format(pattern, &zoned).map_err(|e| anyhow!("{e}"))
-}
-
+/// Write an instant, in the zone the format named or in the machine's own, and say whether
+/// it could be written.
 fn format_time(
     at: std::time::SystemTime,
     pattern: &str,
     zone: Option<&jiff::tz::TimeZone>,
-) -> Option<String> {
-    let timestamp = jiff::Timestamp::try_from(at).ok()?;
+    out: &mut String,
+) -> bool {
+    let Ok(at) = jiff::Timestamp::try_from(at) else {
+        return false;
+    };
+    let zoned = match zone {
+        Some(zone) => at.to_zoned(zone.clone()),
+        None => at.to_zoned(jiff::tz::TimeZone::system()),
+    };
     // The pattern was checked when the config was read, so a failure here is a clock the
-    // calendar cannot express rather than a typo.
-    strftime(pattern, timestamp, zone).ok()
+    // calendar cannot express rather than a typo, and what it got as far as is taken back.
+    let mark = out.len();
+    let written = jiff::fmt::strtime::BrokenDownTime::from(&zoned).format(pattern, &mut *out);
+    if written.is_err() {
+        out.truncate(mark);
+    }
+    written.is_ok()
 }
 
-fn format_dur(d: std::time::Duration, style: DurStyle) -> String {
+fn format_dur(d: std::time::Duration, style: DurStyle, out: &mut String) {
+    use std::fmt::Write as _;
     let total = d.as_secs();
     let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
-    match style {
-        DurStyle::Hms if h > 0 => format!("{h}:{m:02}:{s:02}"),
-        DurStyle::Hms => format!("{m}:{s:02}"),
+    let _ = match style {
+        DurStyle::Hms if h > 0 => write!(out, "{h}:{m:02}:{s:02}"),
+        DurStyle::Hms => write!(out, "{m}:{s:02}"),
         // Two units is as much as a bar has room for, and the smallest one is noise once
         // the largest is hours.
-        DurStyle::Short if h > 0 => format!("{h}h{m:02}m"),
-        DurStyle::Short if m > 0 => format!("{m}m{s:02}s"),
-        DurStyle::Short => format!("{s}s"),
-    }
+        DurStyle::Short if h > 0 => write!(out, "{h}h{m:02}m"),
+        DurStyle::Short if m > 0 => write!(out, "{m}m{s:02}s"),
+        DurStyle::Short => write!(out, "{s}s"),
+    };
 }
 
 #[cfg(test)]

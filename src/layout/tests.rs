@@ -3134,6 +3134,127 @@ fn benchmark_group_collapse_layout() {
     }
 }
 
+/// Layout of an everyday bar read by dbar itself: native readings with number formats, the
+/// compositor's workspaces, a window title long enough to be cut, and a clock.
+#[test]
+#[ignore]
+fn benchmark_native_layout() {
+    use crate::desktop::{Layout, Window, Workspace};
+    use std::{hint::black_box, time::Instant};
+    let cfg = Config::parse(
+        "[left]\ngroups = ['desktop']\n[center]\ngroups = ['title']\n\
+         [right]\ngroups = ['system', 'clock']\n\
+         [group.desktop]\nmodules = ['workspaces', 'language']\n\
+         [group.title]\nmodules = ['window']\n\
+         [group.system]\nmodules = ['cpu', 'memory', 'load', 'temperature', 'network']\n\
+         [group.clock]\nmodules = ['time']\n\
+         [module.workspaces]\nsource = 'workspaces'\n\
+         [module.language]\nsource = 'language'\nformat = ' $short '\n\
+         [module.window]\nsource = 'window'\nformat = ' $title '\nmax_width = 400\n\
+         [module.cpu]\nsource = 'cpu'\nformat = ' $utilization.n(w:3) '\n\
+         [module.memory]\nsource = 'memory'\nformat = ' $used.n()/$total.n() '\n\
+         [module.load]\nsource = 'load'\nformat = ' $one.n(d:2) '\n\
+         [module.temperature]\nsource = 'temperature'\nformat = ' $temp {$label.str(max:8)} '\n\
+         [module.network]\nsource = 'network'\nformat = ' $down.n() $up.n() {$ssid} '\n\
+         [module.time]\nsource = 'time'\n",
+    )
+    .unwrap();
+    let reading = |pairs: &[(&'static str, Value)]| {
+        let mut fields = Fields::default();
+        for (name, value) in pairs {
+            fields.set(name, value.clone());
+        }
+        fields.set_primary(pairs[0].0);
+        Reading {
+            fields,
+            state: State::Idle,
+        }
+    };
+    let num = |v: f64, unit: Unit| Value::Num { v, unit };
+    let native = Registry::fixtures(vec![
+        (
+            Which::Cpu,
+            reading(&[("utilization", num(12.5, Unit::Percent))]),
+        ),
+        (
+            Which::Memory,
+            reading(&[
+                ("used", num(7.4e9, Unit::Bytes)),
+                ("total", num(3.2e10, Unit::Bytes)),
+            ]),
+        ),
+        (Which::Load, reading(&[("one", num(0.63, Unit::None))])),
+        (
+            Which::Temperature(None),
+            reading(&[
+                ("temp", num(46.6, Unit::Celsius)),
+                ("label", Value::Text("Tctl".into())),
+            ]),
+        ),
+        (
+            Which::Network(None),
+            reading(&[
+                ("down", num(123456.0, Unit::BytesPerSec)),
+                ("up", num(2345.0, Unit::BytesPerSec)),
+                ("ssid", Value::Text("home".into())),
+            ]),
+        ),
+        (
+            Which::Time,
+            reading(&[("now", Value::Time(std::time::SystemTime::now()))]),
+        ),
+    ]);
+    let desktop = Desktop {
+        workspaces: (1..=6)
+            .map(|i| Workspace {
+                id: i,
+                name: i.to_string(),
+                output: "DP-1".into(),
+                focused: i == 2,
+                visible: i == 2,
+                urgent: false,
+            })
+            .collect(),
+        windows: [(
+            "DP-1".to_string(),
+            Window {
+                title: "dbar - src/layout.rs - a long editor title that has to be cut short to fit"
+                    .into(),
+                app_id: "foot".into(),
+                class: String::new(),
+            },
+        )]
+        .into(),
+        focused_output: Some("DP-1".into()),
+        layout: Some(Layout {
+            name: "English (US)".into(),
+            index: 0,
+        }),
+        mode: None,
+    };
+    let groups = Default::default();
+    let mut inputs = group_inputs(&[], &native, &groups);
+    inputs.desktop = &desktop;
+    inputs.output = Some("DP-1");
+    let mut text = crate::text::TextRenderer::new(
+        &cfg.bar.font_family,
+        cfg.bar.font_size,
+        &cfg.bar.font_fallback,
+    )
+    .unwrap();
+    for _ in 0..200 {
+        black_box(compute(&cfg, &inputs, 2560.0, 30.0, &mut text, None));
+    }
+    let start = Instant::now();
+    for _ in 0..20_000 {
+        black_box(compute(&cfg, &inputs, 2560.0, 30.0, &mut text, None));
+    }
+    println!(
+        "native layout: {:.2} us/frame",
+        start.elapsed().as_secs_f64() * 1e6 / 20_000.0
+    );
+}
+
 #[test]
 fn collapsed_island_respects_padding_caps_and_icon_width_limits() {
     let config = "[bar]\ngap = 0\n[left]\ngroups = ['g']\n[group.g]\nmodules = ['*']\ncollapsible = true\ncollapse_button = 'right'\npadding = 2\nradius = 8\nopacity = 0.7\nends = { left = 'slant', right = 'slant', width = 3 }\ncollapsed = { icon = '$tux', icon_size = 10, padding = 4, min_width = 22 }";
