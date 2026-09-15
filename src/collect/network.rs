@@ -84,7 +84,18 @@ pub struct Network {
     /// Whether the wireless stack has already refused, so a machine without one is not
     /// asked on every tick.
     wireless_failed: bool,
+    /// The interface picked last and when, for a module that did not name one.
+    chosen: Option<(PathBuf, Instant)>,
 }
+
+/// How long a picked interface is kept before the choice is made again.
+///
+/// Picking lists every interface and reads each candidate's state, which on a machine with
+/// containers is most of what a tick costs outside the wireless stack. Losing the link is
+/// seen on the next tick regardless, because the state read with the counters says so; what
+/// waits for this is only a better interface coming up beside one that still works, such
+/// as a cable plugged in while the wireless is connected.
+const REPICK: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl Network {
     pub fn new(wanted: Option<String>) -> Network {
@@ -94,6 +105,7 @@ impl Network {
             previous: None,
             wireless: None,
             wireless_failed: false,
+            chosen: None,
         }
     }
 }
@@ -158,10 +170,25 @@ impl Collector for Network {
                 }
                 path
             }
-            // Chosen again on every tick, so unplugging the cable moves the module to the
-            // wireless card without dbar being restarted.
+            // Kept while its link is up, so unplugging the cable moves the module to the
+            // wireless card on the next tick without dbar being restarted.
+            None if let Some((path, at)) = &self.chosen
+                && at.elapsed() < REPICK =>
+            {
+                let path = path.clone();
+                match Sample::read(&path) {
+                    Ok(sample) if sample.state == "up" => return Ok(self.reading(&path, sample)),
+                    _ => {
+                        self.chosen = None;
+                        return self.read();
+                    }
+                }
+            }
             None => match pick(&self.class) {
-                Some(path) => path,
+                Some(path) => {
+                    self.chosen = Some((path.clone(), Instant::now()));
+                    path
+                }
                 None => {
                     // A machine with no hardware interface at all is unusual but not
                     // broken; the module simply has nothing to say.
@@ -182,6 +209,17 @@ impl Collector for Network {
         };
 
         let now = Sample::read(&device)?;
+        // Only a working link is worth keeping: with nothing up, the next tick looks again,
+        // as it always did.
+        if now.state != "up" {
+            self.chosen = None;
+        }
+        Ok(self.reading(&device, now))
+    }
+}
+
+impl Network {
+    fn reading(&mut self, device: &Path, now: Sample) -> Reading {
         // A different interface means the counters are not comparable, so the first tick
         // after a switch reports no rate rather than an enormous one.
         let previous = self
@@ -207,7 +245,7 @@ impl Collector for Network {
         );
         fields.set("device", Value::Text(now.device.clone()));
         fields.set("state", Value::Text(now.state.clone()));
-        let (ssid, strength) = self.wireless_state(&device);
+        let (ssid, strength) = self.wireless_state(device);
         fields.set(
             "ssid",
             match ssid {
@@ -257,7 +295,7 @@ impl Collector for Network {
             false => "down",
         });
 
-        Ok(Reading {
+        Reading {
             fields,
             // A link that is down is worth saying so, but it is not an error: an unplugged
             // cable is a fact about the machine, not a failure to read it.
@@ -266,7 +304,7 @@ impl Collector for Network {
                 "down" => State::Warning,
                 _ => State::Idle,
             },
-        })
+        }
     }
 }
 
@@ -351,6 +389,23 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    /// What one tick costs against this machine's own interfaces and wireless stack.
+    #[test]
+    #[ignore]
+    fn benchmark_network_reads() {
+        const N: u32 = 20_000;
+        let mut network = Network::new(None);
+        if let Err(e) = network.read() {
+            println!("network read: nothing to measure here: {e:#}");
+            return;
+        }
+        let start = Instant::now();
+        for _ in 0..N {
+            std::hint::black_box(network.read().expect("reads"));
+        }
+        println!("network read: {:?}", start.elapsed() / N);
+    }
+
     /// Build a `/sys/class/net`-shaped directory. An interface with `device` is hardware.
     fn class(name: &str, devices: &[(&str, bool, &str, u64, u64)]) -> PathBuf {
         let root = std::env::temp_dir().join(format!("dbar-net-{name}"));
@@ -406,6 +461,7 @@ mod tests {
             previous: None,
             wireless: None,
             wireless_failed: true,
+            chosen: None,
         };
 
         // Nothing to divide by yet, so the first tick reports no rate rather than a wrong
@@ -443,6 +499,46 @@ mod tests {
         assert_eq!(now.rate(&previous, true), None);
     }
 
+    /// The choice is kept rather than made again on every tick, but a link that goes down
+    /// is left at once, and a better one coming up is found once the choice is old enough.
+    #[test]
+    fn a_picked_interface_is_kept_while_its_link_is_up() {
+        let root = class(
+            "kept",
+            &[
+                ("enp2s0f0", true, "up", 10, 10),
+                ("wlp3s0", true, "up", 100, 200),
+            ],
+        );
+        let mut net = Network {
+            class: root.clone(),
+            wanted: None,
+            previous: None,
+            wireless: None,
+            wireless_failed: true,
+            chosen: None,
+        };
+        let device =
+            |net: &mut Network| match net.read().expect("the fixture reads").fields.get("device") {
+                Some(Value::Text(name)) => name.clone(),
+                other => panic!("the device field is {other:?}"),
+            };
+        assert_eq!(device(&mut net), "enp2s0f0");
+
+        // Unplugged: the next tick is already on the wireless card.
+        let cable = root.join("enp2s0f0/operstate");
+        std::fs::write(&cable, "down\n").expect("writable");
+        assert_eq!(device(&mut net), "wlp3s0");
+
+        // Plugged back in: the working wireless link is kept until the choice is old.
+        std::fs::write(&cable, "up\n").expect("writable");
+        assert_eq!(device(&mut net), "wlp3s0");
+        if let Some((_, at)) = &mut net.chosen {
+            *at -= REPICK;
+        }
+        assert_eq!(device(&mut net), "enp2s0f0");
+    }
+
     #[test]
     fn naming_an_interface_that_is_not_there_is_reported() {
         let root = class("named", &[("wlp3s0", true, "up", 1, 1)]);
@@ -452,6 +548,7 @@ mod tests {
             previous: None,
             wireless: None,
             wireless_failed: true,
+            chosen: None,
         };
         let e = net
             .read()
@@ -468,6 +565,7 @@ mod tests {
             previous: None,
             wireless: None,
             wireless_failed: true,
+            chosen: None,
         };
         let fields = net.read().expect("this is not an error").fields;
         assert!(matches!(fields.get("device"), Some(Value::Absent)));
