@@ -2,10 +2,11 @@
 name = "dbar"
 version = "0.7.0"
 edition = "2024"
-# Let-chains and edition 2024 are what dbar's own code needs, which is 1.88.
-# The floor is 1.89 because cosmic-text asks for it, so keep this in step with
-# the dependencies rather than with the source - CI builds against it.
-rust-version = "1.89"
+# Edition 2024 and let-chains need 1.88 and cosmic-text asks for 1.89, but the
+# source itself matches on an `if let` guard, which is stable from 1.95. Keep this
+# at whichever of the source and the dependencies asks for more - CI builds
+# against it.
+rust-version = "1.95"
 description = "A small, event-driven Wayland status bar for Sway and SwayFX"
 repository = "https://github.com/dborovcanin/dbar"
 license = "Apache-2.0"
