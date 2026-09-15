@@ -4,7 +4,6 @@
 //! costs no dependencies. Two connections are used: one stays subscribed to events, which
 //! the protocol says must not carry other requests, and one issues queries.
 
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -30,6 +29,8 @@ const GET_BINDING_STATE: u32 = 12;
 const EVENT_INPUT: u32 = 0x8000_0015;
 /// A binding-mode event, numbered the same way.
 const EVENT_MODE: u32 = 0x8000_0002;
+/// A window event, numbered the same way.
+const EVENT_WINDOW: u32 = 0x8000_0003;
 
 /// What sway calls the mode its keyboard is in when no binding mode is held.
 ///
@@ -120,58 +121,90 @@ fn query(stream: &mut UnixStream, kind: u32) -> Result<Vec<u8>> {
     Ok(body)
 }
 
-/// The children of a node, ordinary and floating alike.
-fn children(node: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
-    ["nodes", "floating_nodes"]
-        .into_iter()
-        .flat_map(move |key| {
-            node.get(key)
-                .and_then(|v| v.as_array())
-                .into_iter()
-                .flatten()
-        })
+/// One node of the tree, holding only what a bar reads from it.
+///
+/// The tree describes every container's geometry, marks, borders and more besides, and a
+/// busy session sends a lot of it. Read into a general JSON value, all of that would be
+/// built into maps and strings only to be looked at once and dropped; read into this, the
+/// parser steps over it.
+#[derive(Deserialize, Default)]
+struct Node {
+    #[serde(default)]
+    id: u64,
+    #[serde(default, rename = "type")]
+    kind: NodeKind,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    app_id: Option<String>,
+    #[serde(default)]
+    window_properties: Option<WindowProperties>,
+    /// The children, most recently focused first, by id.
+    #[serde(default)]
+    focus: Vec<u64>,
+    #[serde(default)]
+    nodes: Vec<Node>,
+    #[serde(default)]
+    floating_nodes: Vec<Node>,
 }
 
-/// The node a container would focus, found by following its focus chain to the end.
-///
-/// `focused` is true on exactly one node in the whole session, so it cannot say what the
-/// other screens are showing. Every container instead lists its children most recently
-/// focused first, and following that from an output arrives at the window that screen is
-/// on, whether or not the keyboard is there.
-fn focus_head(node: &serde_json::Value) -> &serde_json::Value {
-    let mut node = node;
-    loop {
-        let wanted = node
-            .get("focus")
-            .and_then(|v| v.as_array())
-            .and_then(|f| f.first())
-            .and_then(|v| v.as_u64());
-        let Some(wanted) = wanted else {
-            return node;
-        };
-        let child = children(node).find(|c| c.get("id").and_then(|v| v.as_u64()) == Some(wanted));
-        match child {
-            Some(child) => node = child,
-            None => return node,
+#[derive(Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum NodeKind {
+    Con,
+    FloatingCon,
+    #[default]
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Deserialize, Default)]
+struct WindowProperties {
+    #[serde(default)]
+    class: Option<String>,
+}
+
+impl Node {
+    /// The children of a node, ordinary and floating alike.
+    fn children(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.iter().chain(&self.floating_nodes)
+    }
+
+    /// The node a container would focus, found by following its focus chain to the end.
+    ///
+    /// `focused` is true on exactly one node in the whole session, so it cannot say what the
+    /// other screens are showing. Every container instead lists its children most recently
+    /// focused first, and following that from an output arrives at the window that screen is
+    /// on, whether or not the keyboard is there.
+    fn focus_head(&self) -> &Node {
+        let mut node = self;
+        while let Some(&wanted) = node.focus.first()
+            && let Some(child) = node.children().find(|c| c.id == wanted)
+        {
+            node = child;
         }
+        node
     }
 }
 
-/// What each screen is showing, by the name the compositor gives that screen.
+/// What each screen is showing, by the name the compositor gives that screen, with the id
+/// of the window it is showing.
 ///
 /// The root's children are the outputs, so one pass over them covers every screen rather
 /// than only the one the keyboard is on.
-fn windows_by_output(tree: &serde_json::Value) -> HashMap<String, Window> {
-    let mut windows = HashMap::new();
-    for output in children(tree) {
-        let Some(name) = output.get("name").and_then(|v| v.as_str()) else {
-            continue;
-        };
-        if let Some(window) = window_of(focus_head(output)) {
-            windows.insert(name.to_string(), window);
-        }
-    }
-    windows
+fn shown_by_output(tree: &Node) -> impl Iterator<Item = (&str, u64, Window)> {
+    tree.children().filter_map(|output| {
+        let name = output.name.as_deref()?;
+        let head = output.focus_head();
+        Some((name, head.id, window_of(head)?))
+    })
+}
+
+#[cfg(test)]
+fn windows_by_output(tree: &Node) -> std::collections::HashMap<String, Window> {
+    shown_by_output(tree)
+        .map(|(output, _, window)| (output.to_string(), window))
+        .collect()
 }
 
 /// The window a node is, if it is one at all.
@@ -181,39 +214,90 @@ fn windows_by_output(tree: &serde_json::Value) -> HashMap<String, Window> {
 /// container with nothing inside it. What the window calls itself is read afterwards and
 /// separately: a Wayland client that never set an app id, and an X11 one whose properties
 /// carry no class, are both still windows with a title worth showing.
-fn window_of(node: &serde_json::Value) -> Option<Window> {
-    let text = |value: Option<&serde_json::Value>| {
-        value
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string()
-    };
-    let kind = node.get("type").and_then(|v| v.as_str());
-    if !matches!(kind, Some("con" | "floating_con")) || children(node).next().is_some() {
+fn window_of(node: &Node) -> Option<Window> {
+    if !matches!(node.kind, NodeKind::Con | NodeKind::FloatingCon)
+        || node.children().next().is_some()
+    {
         return None;
     }
-    let app_id = node.get("app_id");
-    let class = node
-        .get("window_properties")
-        .and_then(|properties| properties.get("class"));
     Some(Window {
-        title: text(node.get("name")),
-        app_id: text(app_id),
-        class: text(class),
+        title: node.name.clone().unwrap_or_default(),
+        app_id: node.app_id.clone().unwrap_or_default(),
+        class: node
+            .window_properties
+            .as_ref()
+            .and_then(|properties| properties.class.clone())
+            .unwrap_or_default(),
     })
 }
 
+/// A window event, reduced to what it says about the bar.
+#[derive(Deserialize)]
+struct WindowEvent {
+    change: WindowChange,
+    #[serde(default)]
+    container: Node,
+}
+
+#[derive(Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum WindowChange {
+    Title,
+    Mark,
+    #[serde(other)]
+    Other,
+}
+
+/// Take a window event into the state, and say whether the desktop has to be read again.
+///
+/// A title is the noisiest thing sway reports - a terminal running a build, a browser
+/// playing a video - and the event carries the window whole. Reading the workspaces and
+/// the whole tree again for every one of those would parse the session to change one
+/// string, so a title is written straight into the screen showing that window, and a
+/// window no screen is showing changes nothing. A mark is never drawn. Everything else can
+/// move focus, windows or urgency, and is read again.
+fn window_event(body: &[u8], state: &mut Desktop, shown: &[(u64, String)]) -> bool {
+    let Ok(event) = serde_json::from_slice::<WindowEvent>(body) else {
+        return true;
+    };
+    match event.change {
+        WindowChange::Mark => false,
+        WindowChange::Title => {
+            if let Some((_, output)) = shown.iter().find(|(id, _)| *id == event.container.id)
+                && let Some(window) = window_of(&event.container)
+            {
+                state.windows.insert(output.clone(), window);
+            }
+            false
+        }
+        WindowChange::Other => true,
+    }
+}
+
 /// Re-read the two halves a workspace or window event can have changed.
-fn read_desktop(query_stream: &mut UnixStream, state: &mut Desktop, windows: bool) -> Result<()> {
+///
+/// `shown` is left holding which window each screen is showing, by id, for a title event
+/// to find its screen by.
+fn read_desktop(
+    query_stream: &mut UnixStream,
+    state: &mut Desktop,
+    windows: bool,
+    shown: &mut Vec<(u64, String)>,
+) -> Result<()> {
     // The workspace list is read either way: it is where the focused screen comes from,
     // and a window module on one screen has to know which screen that is. The tree is the
     // expensive half, and only a window module has anything to do with it.
     state.workspaces = workspaces_of(&query(query_stream, GET_WORKSPACES)?)?;
 
     if windows {
-        let tree: serde_json::Value =
+        let tree: Node =
             serde_json::from_slice(&query(query_stream, GET_TREE)?).context("parsing the tree")?;
-        state.windows = windows_by_output(&tree);
+        state.windows.clear();
+        shown.clear();
+        for (output, id, window) in shown_by_output(&tree) {
+            shown.push((id, output.to_string()));
+            state.windows.insert(output.to_string(), window);
+        }
     }
     state.focused_output = state
         .workspaces
@@ -346,8 +430,9 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
     );
 
     let mut state = Desktop::default();
+    let mut shown = Vec::new();
     if watching.follows_workspaces() {
-        read_desktop(&mut queries, &mut state, watching.windows)?;
+        read_desktop(&mut queries, &mut state, watching.windows, &mut shown)?;
     }
     if watching.mode {
         // Sway only reports a mode when it changes, so the one it is already in has to be
@@ -388,8 +473,11 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
                                 state.layout = Some(layout);
                             }
                         }
-                        // Any workspace or window event can change either half, and the
-                        // queries are cheap next to a redraw, so both are re-read rather
+                        Ok((EVENT_WINDOW, body)) => {
+                            desktop |= window_event(&body, &mut state, &shown);
+                        }
+                        // Any workspace event, and any window event other than a title
+                        // or a mark, can change either half, so both are re-read rather
                         // than patched.
                         Ok(_) => desktop = true,
                         Err(e) => {
@@ -401,7 +489,9 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
                         break;
                     }
                 }
-                if desktop && let Err(e) = read_desktop(&mut queries, &mut state, watching.windows)
+                if desktop
+                    && let Err(e) =
+                        read_desktop(&mut queries, &mut state, watching.windows, &mut shown)
                 {
                     publisher.stop(e.to_string());
                     return;
@@ -446,7 +536,7 @@ mod tests {
     /// would say the same thing on every screen and be wrong on all but one of them.
     #[test]
     fn every_screen_reports_the_window_it_is_showing() {
-        let tree: serde_json::Value = serde_json::from_str(TREE).expect("a tree parses");
+        let tree: Node = serde_json::from_str(TREE).expect("a tree parses");
         let windows = windows_by_output(&tree);
         assert_eq!(windows.get("DP-1").map(|w| w.title.as_str()), Some("vim"));
         assert_eq!(
@@ -459,15 +549,13 @@ mod tests {
     /// behind the window a screen shows has to leave the state exactly as it was.
     #[test]
     fn a_window_nobody_is_looking_at_changes_nothing_on_the_bar() {
-        let before: serde_json::Value = serde_json::from_str(TREE).expect("a tree parses");
-        let after: serde_json::Value =
+        let before: Node = serde_json::from_str(TREE).expect("a tree parses");
+        let after: Node =
             serde_json::from_str(&TREE.replace("\"mail\"", "\"mail (1)\"")).expect("a tree parses");
-        assert_ne!(before, after, "the tree itself did change");
         assert_eq!(windows_by_output(&before), windows_by_output(&after));
 
-        let focused: serde_json::Value =
-            serde_json::from_str(&TREE.replace("\"vim\"", "\"vim - notes\""))
-                .expect("a tree parses");
+        let focused: Node = serde_json::from_str(&TREE.replace("\"vim\"", "\"vim - notes\""))
+            .expect("a tree parses");
         assert_ne!(windows_by_output(&before), windows_by_output(&focused));
     }
 
@@ -477,14 +565,14 @@ mod tests {
     /// through Xwayland.
     #[test]
     fn a_window_says_what_it_is_as_well_as_what_it_shows() {
-        let tree: serde_json::Value = serde_json::from_str(TREE).expect("a tree parses");
+        let tree: Node = serde_json::from_str(TREE).expect("a tree parses");
         let windows = windows_by_output(&tree);
         let wayland = windows.get("DP-1").expect("a window on DP-1");
         assert_eq!(wayland.app_id, "foot");
         assert!(wayland.class.is_empty(), "a Wayland client has no class");
 
         // What Xwayland reports instead: no app_id, and a class in the X11 properties.
-        let x11: serde_json::Value = serde_json::from_str(
+        let x11: Node = serde_json::from_str(
             r#"{"id":1,"focus":[3],"nodes":[
                  {"id":3,"name":"DP-1","type":"output","focus":[6],"nodes":[
                    {"id":6,"name":"1","type":"workspace","focus":[9],"nodes":[
@@ -504,7 +592,7 @@ mod tests {
     /// and a title is exactly what a bar has to show for them.
     #[test]
     fn a_window_that_says_nothing_about_itself_still_has_a_title() {
-        let nameless: serde_json::Value = serde_json::from_str(
+        let nameless: Node = serde_json::from_str(
             r#"{"id":1,"focus":[3],"nodes":[
                  {"id":3,"name":"DP-1","type":"output","focus":[6],"nodes":[
                    {"id":6,"name":"1","type":"workspace","focus":[9],"nodes":[
@@ -518,7 +606,7 @@ mod tests {
         assert!(window.app_id.is_empty());
         assert!(window.class.is_empty());
 
-        let classless: serde_json::Value = serde_json::from_str(
+        let classless: Node = serde_json::from_str(
             r#"{"id":1,"focus":[3],"nodes":[
                  {"id":3,"name":"DP-1","type":"output","focus":[6],"nodes":[
                    {"id":6,"name":"1","type":"workspace","focus":[9],"nodes":[
@@ -536,13 +624,78 @@ mod tests {
     /// is a window: a screen with nothing on it says nothing rather than saying "1".
     #[test]
     fn an_empty_screen_has_no_title_rather_than_its_workspace_name() {
-        let tree: serde_json::Value = serde_json::from_str(
+        let tree: Node = serde_json::from_str(
             r#"{"id":1,"focus":[3],"nodes":[
                  {"id":3,"name":"DP-1","type":"output","focus":[6],
                   "nodes":[{"id":6,"name":"1","type":"workspace","focus":[],"nodes":[]}]}]}"#,
         )
         .expect("a tree parses");
         assert_eq!(windows_by_output(&tree).get("DP-1"), None);
+    }
+
+    /// The state and window ids a freshly read tree leaves behind.
+    fn read(tree: &str) -> (Desktop, Vec<(u64, String)>) {
+        let tree: Node = serde_json::from_str(tree).expect("a tree parses");
+        let mut state = Desktop::default();
+        let mut shown = Vec::new();
+        for (output, id, window) in shown_by_output(&tree) {
+            shown.push((id, output.to_string()));
+            state.windows.insert(output.to_string(), window);
+        }
+        (state, shown)
+    }
+
+    fn title_event(id: u64, title: &str) -> String {
+        format!(
+            r#"{{"change":"title","container":{{"id":{id},"name":"{title}","type":"con",
+                "app_id":"foot","focus":[],"nodes":[],"floating_nodes":[],"marks":[],
+                "rect":{{"x":0,"y":0,"width":10,"height":10}}}}}}"#
+        )
+    }
+
+    /// A title is taken from its event into the screen showing that window, without the
+    /// tree being asked for again.
+    #[test]
+    fn a_title_event_retitles_the_screen_showing_that_window() {
+        let (mut state, shown) = read(TREE);
+        let reread = window_event(
+            title_event(11, "another page").as_bytes(),
+            &mut state,
+            &shown,
+        );
+        assert!(!reread, "a title needs nothing read again");
+        assert_eq!(state.windows["HDMI-A-1"].title, "another page");
+        assert_eq!(state.windows["HDMI-A-1"].app_id, "foot");
+        assert_eq!(state.windows["DP-1"].title, "vim");
+    }
+
+    #[test]
+    fn a_title_event_for_a_window_nobody_is_looking_at_changes_nothing() {
+        let (mut state, shown) = read(TREE);
+        let before = state.clone();
+        assert!(!window_event(
+            title_event(10, "mail (1)").as_bytes(),
+            &mut state,
+            &shown
+        ));
+        assert_eq!(state, before);
+    }
+
+    /// Focus, new and closed windows, urgency and moves can change what every screen shows,
+    /// and a mark changes nothing a bar draws.
+    #[test]
+    fn only_a_title_or_a_mark_is_spared_reading_the_desktop_again() {
+        let (mut state, shown) = read(TREE);
+        for change in ["focus", "new", "close", "move", "urgent", "floating"] {
+            let body = format!(r#"{{"change":"{change}","container":{{"id":9}}}}"#);
+            assert!(
+                window_event(body.as_bytes(), &mut state, &shown),
+                "{change}"
+            );
+        }
+        let mark = br#"{"change":"mark","container":{"id":9,"marks":["a"]}}"#;
+        assert!(!window_event(mark, &mut state, &shown));
+        assert!(window_event(b"not json", &mut state, &shown));
     }
 
     /// Sway names the screen each workspace is on, which is what lets a bar list its own.
