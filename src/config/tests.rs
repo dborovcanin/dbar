@@ -1211,6 +1211,37 @@ fn a_bar_that_names_screens_goes_only_on_those() {
     assert!(all.shows_on(None));
 }
 
+#[test]
+fn a_bar_width_is_pixels_or_a_share_of_the_screen() {
+    use crate::config::BarWidth;
+    let width = |written: &str| {
+        Config::parse(&format!("[bar]\nwidth = {written}\n"))
+            .expect("parses")
+            .bar
+            .width
+            .expect("a width was written")
+    };
+    assert_eq!(width("1200"), BarWidth::Pixels(1200));
+    assert_eq!(width("\"60%\""), BarWidth::Share(60.0));
+    assert!(Config::parse("[bar]\n").unwrap().bar.width.is_none());
+
+    // Pixels are a limit, so a panel narrower than the monitor they were written for still
+    // gets the whole bar between its margins.
+    assert_eq!(BarWidth::Pixels(1200).on(1920, 8), 1200);
+    assert_eq!(BarWidth::Pixels(1200).on(1024, 8), 1008);
+    assert_eq!(BarWidth::Share(60.0).on(1920, 8), 1152);
+    assert_eq!(BarWidth::Share(100.0).on(1920, 8), 1904);
+}
+
+#[test]
+fn a_bar_width_that_cannot_be_drawn_is_rejected() {
+    for written in ["0", "-40", "\"0%\"", "\"150%\"", "\"1200px\"", "\"60\""] {
+        let e = Config::parse(&format!("[bar]\nwidth = {written}\n")).expect_err(written);
+        let message = format!("{e:#}");
+        assert!(message.contains("width"), "{written}: {message}");
+    }
+}
+
 /// `scope` is about what is on a screen, so it means nothing on a module that is not
 /// drawn from the compositor - and a key that quietly does nothing is how a config
 /// comes to be wrong for months.

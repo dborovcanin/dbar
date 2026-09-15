@@ -124,8 +124,8 @@ root at all.
 
 ## What works
 
-- `wlr-layer-shell` surface, top or bottom placement, configurable margin and
-  exclusive zone
+- `wlr-layer-shell` surface, top or bottom placement, an optional centred width,
+  configurable margin and exclusive zone
 - per-pixel transparency, so SwayFX blur shows through
 - text rendering with shaping and font fallback (`cosmic-text`)
 - native collectors for cpu, memory, battery, backlight, load, temperature,

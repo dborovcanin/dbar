@@ -37,7 +37,7 @@ use wayland_client::{
 };
 
 use crate::collect::{Registry, Which, watch};
-use crate::config::{BarLayer, Button, Config, Edge};
+use crate::config::{BarLayer, BarWidth, Button, Config, Edge};
 use crate::desktop::{self, Desktop, DesktopEvent};
 use crate::layout::{self, Frame, Inputs, MenuFrame, PlacedModule};
 use crate::render;
@@ -233,6 +233,9 @@ struct Bar {
     width: u32,
     height: u32,
     scale: i32,
+    /// The width asked of the compositor, or `None` while the bar stretches between the
+    /// screen's sides. Kept so a screen change that leaves it alone commits nothing.
+    span: Option<u32>,
 
     /// Pointer position in surface coordinates, while it is over this bar.
     pointer_at: Option<(f32, f32)>,
@@ -265,6 +268,7 @@ impl Bar {
         name: Option<String>,
         width: u32,
         scale: i32,
+        span: Option<u32>,
     ) -> Result<Bar> {
         let cfg = &app.config.bar;
         let stack = match cfg.layer {
@@ -279,13 +283,7 @@ impl Bar {
             app.layer_shell
                 .create_layer_surface(qh, surface, stack, Some("dbar"), Some(&output));
 
-        let edge = match cfg.position {
-            Edge::Top => Anchor::TOP,
-            Edge::Bottom => Anchor::BOTTOM,
-        };
-        layer.set_anchor(edge | Anchor::LEFT | Anchor::RIGHT);
-        // A zero width lets the compositor stretch us between the left and right anchors.
-        layer.set_size(0, cfg.height);
+        place(&layer, cfg, span);
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         let m = cfg.margin;
         match cfg.position {
@@ -318,6 +316,7 @@ impl Bar {
             width: 0,
             height: cfg.height,
             scale: scale.max(1),
+            span,
             pointer_at: None,
             scrolled: 0.0,
             configured: false,
@@ -325,6 +324,42 @@ impl Bar {
             frame_pending: false,
             presented: None,
         })
+    }
+}
+
+/// How wide a bar's surface is asked to be on a screen, or `None` to stretch it between the
+/// screen's sides.
+///
+/// A share of a screen whose size is not known yet stretches until the size arrives, and
+/// `update_output` narrows it then.
+fn span_on(cfg: &crate::config::Bar, screen: Option<(i32, i32)>) -> Option<u32> {
+    let width = cfg.width?;
+    match (width, screen) {
+        (_, Some((w, _))) if w > 0 => Some(width.on(w.unsigned_abs(), cfg.margin)),
+        (BarWidth::Pixels(pixels), _) => Some(pixels),
+        (BarWidth::Share(_), _) => None,
+    }
+}
+
+/// Anchor a bar to its edge, and to both sides as well when it is to stretch between them.
+///
+/// A surface anchored to one edge alone is centred along it by the compositor, which is
+/// what puts a bar with a width in the middle of the screen.
+fn place(layer: &LayerSurface, cfg: &crate::config::Bar, span: Option<u32>) {
+    let edge = match cfg.position {
+        Edge::Top => Anchor::TOP,
+        Edge::Bottom => Anchor::BOTTOM,
+    };
+    match span {
+        Some(width) => {
+            layer.set_anchor(edge);
+            layer.set_size(width, cfg.height);
+        }
+        None => {
+            layer.set_anchor(edge | Anchor::LEFT | Anchor::RIGHT);
+            // A zero width lets the compositor stretch us between the left and right anchors.
+            layer.set_size(0, cfg.height);
+        }
     }
 }
 
@@ -1724,7 +1759,8 @@ impl App {
             .map(|(w, _)| w.max(0) as u32)
             .unwrap_or(1920);
         let scale = info.as_ref().map_or(1, |i| i.scale_factor);
-        match Bar::new(self, &self.qh, output, name.clone(), width, scale) {
+        let span = span_on(&self.config.bar, info.as_ref().and_then(|i| i.logical_size));
+        match Bar::new(self, &self.qh, output, name.clone(), width, scale, span) {
             Ok(bar) => {
                 log::info!("bar on output {}", name.as_deref().unwrap_or("?"));
                 self.bars.push(bar);
@@ -2205,9 +2241,22 @@ impl OutputHandler for App {
         _: &QueueHandle<Self>,
         output: wl_output::WlOutput,
     ) {
-        let name = self.output_state.info(&output).and_then(|i| i.name);
+        let info = self.output_state.info(&output);
+        let name = info.as_ref().and_then(|info| info.name.clone());
         match self.bars.iter().position(|b| b.output == output) {
             Some(i) if self.config.bar.shows_on(name.as_deref()) => {
+                // A screen that changed size, or whose size has only just arrived, wants its
+                // width worked out again. The compositor answers with a configure, and that
+                // is what redraws.
+                let span = span_on(
+                    &self.config.bar,
+                    info.as_ref().and_then(|info| info.logical_size),
+                );
+                if self.bars[i].span != span {
+                    place(&self.bars[i].layer, &self.config.bar, span);
+                    self.bars[i].layer.commit();
+                    self.bars[i].span = span;
+                }
                 if self.bars[i].name != name {
                     // The workspaces a bar lists follow its name, so a bar that has just
                     // learned one is showing the wrong screen's until it draws again.

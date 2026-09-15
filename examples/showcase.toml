@@ -26,6 +26,11 @@ position = "top"
 # "overlay" covers even a screen locker, and "background" is wallpaper level.
 layer = "top"
 margin = 3
+# How wide the bar is: pixels, `width = 1200`, or a share of the screen,
+# `width = "60%"`. Left out, the bar runs between the screen's sides. With a
+# width it is centred on its edge, and never wider than the screen less
+# `margin` on either side, so pixels written for a monitor still fit a laptop.
+# width = "60%"
 gap = 3
 # Kept font-agnostic, since this is the built-in default. Icon sizes follow it
 # unless [bar] icon_size says otherwise.

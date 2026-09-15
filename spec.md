@@ -130,7 +130,8 @@ on this path and do not shape the native source model.
 
 The current bar supports:
 
-- top or bottom placement, layer selection, margins and exclusive zones;
+- top or bottom placement, an optional centred width, layer selection, margins
+  and exclusive zones;
 - per-output bars and output-scoped compositor data;
 - left, centre and right runs of named groups;
 - named style inheritance plus per-module and state overrides;

@@ -356,6 +356,9 @@ struct RawBar {
     layer: BarLayer,
     #[serde(default)]
     margin: i32,
+    /// How wide the bar may be: logical pixels, or a share of the screen. Absent is every
+    /// pixel between the screen's sides.
+    width: Option<RawWidth>,
     #[serde(default = "default_gap")]
     gap: f32,
     #[serde(default = "default_font")]
@@ -462,6 +465,17 @@ struct RawBarBackground {
     color: Option<String>,
     #[serde(default)]
     radius: f32,
+}
+
+/// A bar width as written: a bare number is pixels, and a string is a share of the screen.
+///
+/// Pixels are read signed so that a negative width is refused by name rather than by
+/// serde saying the value matched neither shape.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawWidth {
+    Pixels(i64),
+    Share(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -760,6 +774,7 @@ impl Default for RawBar {
             position: default_edge(),
             layer: default_layer(),
             margin: 0,
+            width: None,
             gap: default_gap(),
             font: default_font(),
             fallback: Vec::new(),
@@ -808,6 +823,8 @@ pub struct Bar {
     pub position: Edge,
     pub layer: BarLayer,
     pub margin: i32,
+    /// How wide the bar is asked to be, when it should not stretch between the screen's sides.
+    pub width: Option<BarWidth>,
     pub gap: f32,
     pub font_family: String,
     pub font_size: f32,
@@ -838,6 +855,30 @@ impl Bar {
             return true;
         }
         name.is_some_and(|name| self.outputs.iter().any(|o| o == name))
+    }
+}
+
+/// How wide a bar is, when it is not every pixel between the screen's sides.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum BarWidth {
+    /// Logical pixels.
+    Pixels(u32),
+    /// Percent of the screen's logical width.
+    Share(f64),
+}
+
+impl BarWidth {
+    /// The surface width on a screen `screen` logical pixels wide.
+    ///
+    /// Capped at what is left once `margin` is kept clear on either side, so a width
+    /// written for a large monitor still leaves the bar whole on a laptop panel.
+    pub fn on(self, screen: u32, margin: i32) -> u32 {
+        let room = screen.saturating_sub(margin.max(0).unsigned_abs().saturating_mul(2));
+        let wanted = match self {
+            BarWidth::Pixels(pixels) => pixels,
+            BarWidth::Share(percent) => (f64::from(screen) * percent / 100.0).round() as u32,
+        };
+        wanted.min(room).max(1)
     }
 }
 
@@ -1646,6 +1687,7 @@ impl Config {
             position: raw.bar.position,
             layer: raw.bar.layer,
             margin: raw.bar.margin,
+            width: parse_bar_width(raw.bar.width.as_ref()).context("in [bar] width")?,
             gap: raw.bar.gap,
             font_family,
             font_size,
@@ -1852,6 +1894,39 @@ fn parse_percent(written: &str) -> Result<f64> {
         bail!("a scroll step is between 0 and 100 percent, not {written:?}");
     }
     Ok(step)
+}
+
+/// A bar width: a bare number of pixels, or a share of the screen written with its `%`.
+///
+/// Unlike a scroll step, the `%` is required: a bare number already means pixels here, so
+/// a quoted one without it could be meant either way.
+fn parse_bar_width(written: Option<&RawWidth>) -> Result<Option<BarWidth>> {
+    let Some(written) = written else {
+        return Ok(None);
+    };
+    let width = match written {
+        RawWidth::Pixels(pixels) => match u32::try_from(*pixels) {
+            Ok(pixels) if pixels > 0 => BarWidth::Pixels(pixels),
+            _ => bail!("a bar is at least one pixel wide, not {pixels}"),
+        },
+        RawWidth::Share(text) => {
+            let percent = text
+                .trim()
+                .strip_suffix('%')
+                .and_then(|number| number.trim().parse::<f64>().ok())
+                .ok_or_else(|| {
+                    anyhow!(
+                        "{text:?} is not a width: write pixels as a number, like 1200, \
+                         or a share of the screen, like \"60%\""
+                    )
+                })?;
+            if !(percent.is_finite() && percent > 0.0 && percent <= 100.0) {
+                bail!("a bar takes between 0 and 100 percent of the screen, not {text:?}");
+            }
+            BarWidth::Share(percent)
+        }
+    };
+    Ok(Some(width))
 }
 
 /// Whether a rule may compare this kind of field against a word.
