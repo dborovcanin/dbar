@@ -274,6 +274,17 @@ fn window_event(body: &[u8], state: &mut Desktop, shown: &[(u64, String)]) -> bo
     }
 }
 
+/// Take what every screen is showing from a freshly read tree, and which window that is
+/// by id, for a title event to find its screen by.
+fn take_tree(tree: &Node, state: &mut Desktop, shown: &mut Vec<(u64, String)>) {
+    state.windows.clear();
+    shown.clear();
+    for (output, id, window) in shown_by_output(tree) {
+        shown.push((id, output.to_string()));
+        state.windows.insert(output.to_string(), window);
+    }
+}
+
 /// Re-read the two halves a workspace or window event can have changed.
 ///
 /// `shown` is left holding which window each screen is showing, by id, for a title event
@@ -292,12 +303,7 @@ fn read_desktop(
     if windows {
         let tree: Node =
             serde_json::from_slice(&query(query_stream, GET_TREE)?).context("parsing the tree")?;
-        state.windows.clear();
-        shown.clear();
-        for (output, id, window) in shown_by_output(&tree) {
-            shown.push((id, output.to_string()));
-            state.windows.insert(output.to_string(), window);
-        }
+        take_tree(&tree, state, shown);
     }
     state.focused_output = state
         .workspaces
@@ -638,10 +644,7 @@ mod tests {
         let tree: Node = serde_json::from_str(tree).expect("a tree parses");
         let mut state = Desktop::default();
         let mut shown = Vec::new();
-        for (output, id, window) in shown_by_output(&tree) {
-            shown.push((id, output.to_string()));
-            state.windows.insert(output.to_string(), window);
-        }
+        take_tree(&tree, &mut state, &mut shown);
         (state, shown)
     }
 
