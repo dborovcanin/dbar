@@ -131,7 +131,7 @@ on this path and do not shape the native source model.
 The current bar supports:
 
 - top or bottom placement, an optional centred width, layer selection, margins
-  and exclusive zones;
+  and padding set per side, and exclusive zones;
 - autohide, which shrinks the bar to a transparent strip on its edge until the
   pointer reaches it, with a realtime signal that pins it in view;
 - per-output bars and output-scoped compositor data;

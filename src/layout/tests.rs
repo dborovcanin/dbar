@@ -4295,3 +4295,46 @@ foreground = "#ffffff"
     let settled = compute(&cfg, &inputs, 400.0, 20.0, &mut Fixed, None);
     assert_eq!(settled.groups[0].modules[0].foreground.r, grey(1.0));
 }
+
+/// The bar's padding moves the runs in from its sides and top, and the islands give up
+/// what it takes above and below.
+#[test]
+fn a_bar_padding_keeps_the_runs_off_the_bar_edges() {
+    const RUNS: &str = r##"
+[left]
+groups = ["l"]
+
+[right]
+groups = ["r"]
+
+[group.l]
+modules = ["cpu"]
+
+[group.r]
+modules = ["mem"]
+
+[module.cpu]
+padding = 0
+
+[module.mem]
+padding = 0
+"##;
+    let items = [item("cpu", "1%"), item("mem", "2%")];
+    let flush = frame_of(RUNS, &items);
+    let padded = frame_of(
+        &format!("[bar]\npadding = {{ top = 2, right = 6, bottom = 1, left = 5 }}\n{RUNS}"),
+        &items,
+    );
+    let end = |g: &PlacedGroup| g.x + g.width;
+    assert_eq!(padded.groups[0].x, flush.groups[0].x + 5.0);
+    assert_eq!(end(&padded.groups[1]), end(&flush.groups[1]) - 6.0);
+    for group in &padded.groups {
+        assert_eq!((group.y, group.height), (2.0, 7.0));
+        assert!(
+            group
+                .modules
+                .iter()
+                .all(|m| m.y >= 2.0 && m.y + m.height <= 9.0)
+        );
+    }
+}

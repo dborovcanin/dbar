@@ -293,8 +293,10 @@ impl Bar {
             autohide.as_ref().is_some_and(Autohide::hidden),
         );
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        // The compositor counts the margin against the edge in on its own; the one across
+        // the bar, facing the windows, is only kept clear if it is asked for here.
         layer.set_exclusive_zone(if cfg.exclusive {
-            cfg.height as i32 + cfg.margin
+            cfg.height as i32 + cfg.edge_margins().1
         } else {
             0
         });
@@ -380,15 +382,16 @@ fn place(layer: &LayerSurface, cfg: &crate::config::Bar, span: Option<u32>, hidd
         Edge::Top => Anchor::TOP,
         Edge::Bottom => Anchor::BOTTOM,
     };
-    let (height, m) = match (hidden, cfg.autohide) {
+    let (near, far) = cfg.edge_margins();
+    let (height, near) = match (hidden, cfg.autohide) {
         (true, _) => (HIDDEN_HEIGHT, 0),
-        (false, Some(_)) => (cfg.height + cfg.margin.max(0) as u32, 0),
-        (false, None) => (cfg.height, cfg.margin),
+        (false, Some(_)) => (cfg.height + near.max(0) as u32, 0),
+        (false, None) => (cfg.height, near),
     };
-    let side = cfg.margin;
+    let (left, right) = (cfg.margin.left, cfg.margin.right);
     match cfg.position {
-        Edge::Top => layer.set_margin(m, side, 0, side),
-        Edge::Bottom => layer.set_margin(0, side, m, side),
+        Edge::Top => layer.set_margin(near, right, far, left),
+        Edge::Bottom => layer.set_margin(far, right, near, left),
     }
     match span {
         Some(width) => {
@@ -1317,7 +1320,7 @@ impl App {
             return None;
         }
         let reach = match bar.autohide {
-            Some(_) => self.config.bar.margin.max(0) as u32,
+            Some(_) => self.config.bar.edge_margins().0.max(0) as u32,
             None => 0,
         };
         let (offset, height) = inset(self.config.bar.position, reach, bar.height);

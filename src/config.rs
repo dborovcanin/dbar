@@ -354,8 +354,12 @@ struct RawBar {
     /// Where the bar sits in the compositor's stack. Defaults to above ordinary windows.
     #[serde(default = "default_layer")]
     layer: BarLayer,
+    /// Space kept clear around the bar: one number for every side, or a table naming them.
     #[serde(default)]
-    margin: i32,
+    margin: Option<RawSides<i32>>,
+    /// Space inside the bar's own ground, around the runs of groups. Written like `margin`.
+    #[serde(default)]
+    padding: Option<RawSides<f32>>,
     /// How wide the bar may be: logical pixels, or a share of the screen. Absent is every
     /// pixel between the screen's sides.
     width: Option<RawWidth>,
@@ -484,6 +488,24 @@ struct RawBarBackground {
 enum RawWidth {
     Pixels(i64),
     Share(String),
+}
+
+/// Space around or inside a bar as written: a bare number is every side, and a table names
+/// the sides it wants, leaving the rest at nothing.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum RawSides<T> {
+    All(T),
+    Each(RawEachSide<T>),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawEachSide<T> {
+    top: Option<T>,
+    right: Option<T>,
+    bottom: Option<T>,
+    left: Option<T>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -778,7 +800,8 @@ impl Default for RawBar {
             height: default_height(),
             position: default_edge(),
             layer: default_layer(),
-            margin: 0,
+            margin: None,
+            padding: None,
             width: None,
             gap: default_gap(),
             font: default_font(),
@@ -830,7 +853,9 @@ pub struct Bar {
     pub height: u32,
     pub position: Edge,
     pub layer: BarLayer,
-    pub margin: i32,
+    pub margin: Sides<i32>,
+    /// Space between the bar's ground and what is laid out on it.
+    pub padding: Sides<f32>,
     /// How wide the bar is asked to be, when it should not stretch between the screen's sides.
     pub width: Option<BarWidth>,
     pub gap: f32,
@@ -868,6 +893,48 @@ impl Bar {
         }
         name.is_some_and(|name| self.outputs.iter().any(|o| o == name))
     }
+
+    /// The margin against the bar's own edge, and the one across the bar from it, which is
+    /// the side facing the windows.
+    pub fn edge_margins(&self) -> (i32, i32) {
+        match self.position {
+            Edge::Top => (self.margin.top, self.margin.bottom),
+            Edge::Bottom => (self.margin.bottom, self.margin.top),
+        }
+    }
+}
+
+/// Something measured on each of a bar's four sides.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Sides<T> {
+    pub top: T,
+    pub right: T,
+    pub bottom: T,
+    pub left: T,
+}
+
+impl<T: Copy + Default> Sides<T> {
+    pub fn all(each: T) -> Sides<T> {
+        Sides {
+            top: each,
+            right: each,
+            bottom: each,
+            left: each,
+        }
+    }
+
+    fn written(raw: Option<&RawSides<T>>) -> Sides<T> {
+        match raw {
+            None => Sides::default(),
+            Some(RawSides::All(each)) => Sides::all(*each),
+            Some(RawSides::Each(sides)) => Sides {
+                top: sides.top.unwrap_or_default(),
+                right: sides.right.unwrap_or_default(),
+                bottom: sides.bottom.unwrap_or_default(),
+                left: sides.left.unwrap_or_default(),
+            },
+        }
+    }
 }
 
 /// How wide a bar is, when it is not every pixel between the screen's sides.
@@ -882,10 +949,11 @@ pub enum BarWidth {
 impl BarWidth {
     /// The surface width on a screen `screen` logical pixels wide.
     ///
-    /// Capped at what is left once `margin` is kept clear on either side, so a width
+    /// Capped at what is left once the left and right margins are kept clear, so a width
     /// written for a large monitor still leaves the bar whole on a laptop panel.
-    pub fn on(self, screen: u32, margin: i32) -> u32 {
-        let room = screen.saturating_sub(margin.max(0).unsigned_abs().saturating_mul(2));
+    pub fn on(self, screen: u32, margin: Sides<i32>) -> u32 {
+        let clear = |side: i32| side.max(0).unsigned_abs();
+        let room = screen.saturating_sub(clear(margin.left).saturating_add(clear(margin.right)));
         let wanted = match self {
             BarWidth::Pixels(pixels) => pixels,
             BarWidth::Share(percent) => (f64::from(screen) * percent / 100.0).round() as u32,
@@ -1699,7 +1767,9 @@ impl Config {
             height: raw.bar.height.max(1),
             position: raw.bar.position,
             layer: raw.bar.layer,
-            margin: raw.bar.margin,
+            margin: Sides::written(raw.bar.margin.as_ref()),
+            padding: parse_bar_padding(raw.bar.padding.as_ref(), raw.bar.height.max(1))
+                .context("in [bar] padding")?,
             width: parse_bar_width(raw.bar.width.as_ref()).context("in [bar] width")?,
             gap: raw.bar.gap,
             font_family,
@@ -1950,6 +2020,23 @@ fn parse_bar_width(written: Option<&RawWidth>) -> Result<Option<BarWidth>> {
         }
     };
     Ok(Some(width))
+}
+
+/// A bar's padding, refused when it is not a distance or leaves no bar between top and
+/// bottom to draw a group in. Too much from the sides is only known once a screen is, and
+/// then the runs are given nothing rather than the bar being refused.
+fn parse_bar_padding(written: Option<&RawSides<f32>>, height: u32) -> Result<Sides<f32>> {
+    let padding = Sides::written(written);
+    for side in [padding.top, padding.right, padding.bottom, padding.left] {
+        if !(side.is_finite() && side >= 0.0) {
+            bail!("padding is a distance of zero or more, not {side}");
+        }
+    }
+    let vertical = padding.top + padding.bottom;
+    if vertical >= height as f32 {
+        bail!("{vertical} of padding above and below leaves nothing of a bar {height} high");
+    }
+    Ok(padding)
 }
 
 /// Whether a rule may compare this kind of field against a word.

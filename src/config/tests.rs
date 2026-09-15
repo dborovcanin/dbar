@@ -1227,10 +1227,70 @@ fn a_bar_width_is_pixels_or_a_share_of_the_screen() {
 
     // Pixels are a limit, so a panel narrower than the monitor they were written for still
     // gets the whole bar between its margins.
-    assert_eq!(BarWidth::Pixels(1200).on(1920, 8), 1200);
-    assert_eq!(BarWidth::Pixels(1200).on(1024, 8), 1008);
-    assert_eq!(BarWidth::Share(60.0).on(1920, 8), 1152);
-    assert_eq!(BarWidth::Share(100.0).on(1920, 8), 1904);
+    let eight = Sides::all(8);
+    assert_eq!(BarWidth::Pixels(1200).on(1920, eight), 1200);
+    assert_eq!(BarWidth::Pixels(1200).on(1024, eight), 1008);
+    assert_eq!(BarWidth::Share(60.0).on(1920, eight), 1152);
+    assert_eq!(BarWidth::Share(100.0).on(1920, eight), 1904);
+    let one_side = Sides {
+        left: 16,
+        ..Sides::all(0)
+    };
+    assert_eq!(BarWidth::Pixels(1200).on(1024, one_side), 1008);
+}
+
+#[test]
+fn a_margin_or_padding_is_one_number_or_a_table_of_sides() {
+    let bar = |written: &str| {
+        Config::parse(&format!("[bar]\n{written}\n"))
+            .expect(written)
+            .bar
+    };
+    assert_eq!(bar("").margin, Sides::all(0));
+    assert_eq!(bar("").padding, Sides::all(0.0));
+    assert_eq!(bar("margin = 6").margin, Sides::all(6));
+    assert_eq!(
+        bar("margin = { top = 4, left = 10, right = 12 }").margin,
+        Sides {
+            top: 4,
+            right: 12,
+            bottom: 0,
+            left: 10
+        }
+    );
+    assert_eq!(bar("padding = 3").padding, Sides::all(3.0));
+    assert_eq!(
+        bar("padding = { left = 8, right = 8.5 }").padding,
+        Sides {
+            top: 0.0,
+            right: 8.5,
+            bottom: 0.0,
+            left: 8.0
+        }
+    );
+
+    // The margin across the bar from its edge is the one facing the windows, whichever edge
+    // the bar is on.
+    let sides = "margin = { top = 1, bottom = 2 }";
+    assert_eq!(bar(sides).edge_margins(), (1, 2));
+    assert_eq!(
+        bar(&format!("position = \"bottom\"\n{sides}")).edge_margins(),
+        (2, 1)
+    );
+}
+
+#[test]
+fn space_around_a_bar_that_cannot_be_drawn_is_rejected() {
+    for written in [
+        "padding = -1",
+        "padding = { left = -4 }",
+        "height = 20\npadding = 10",
+        "height = 20\npadding = { top = 15, bottom = 5 }",
+        "margin = { top = 1, middle = 2 }",
+        "margin = \"6\"",
+    ] {
+        Config::parse(&format!("[bar]\n{written}\n")).expect_err(written);
+    }
 }
 
 #[test]

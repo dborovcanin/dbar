@@ -2061,9 +2061,15 @@ impl SizedGroup {
     }
 }
 
-fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>) -> PlacedGroup {
+fn place(
+    sized: SizedGroup,
+    mut x: f32,
+    top: f32,
+    height: f32,
+    pointer: Option<(f32, f32)>,
+) -> PlacedGroup {
     let group_x = x;
-    let inner_y = sized.padding;
+    let inner_y = top + sized.padding;
     let inner_h = (height - sized.padding * 2.0).max(0.0);
     x += sized.horizontal_padding;
 
@@ -2260,7 +2266,7 @@ fn place(sized: SizedGroup, mut x: f32, height: f32, pointer: Option<(f32, f32)>
     PlacedGroup {
         collapse: sized.collapse,
         x: group_x,
-        y: 0.0,
+        y: top,
         width: sized.width,
         height,
         background: sized.background,
@@ -2404,6 +2410,11 @@ pub fn compute(
     pointer: Option<(f32, f32)>,
 ) -> Frame {
     let gap = cfg.bar.gap;
+    // The runs are laid out in what the bar's padding leaves, and moved in by it when they
+    // are placed. The ground under them is still the whole bar.
+    let padding = cfg.bar.padding;
+    let width = (width - padding.left - padding.right).max(0.0);
+    let height = (height - padding.top - padding.bottom).max(0.0);
     let mut frame = Frame {
         background: cfg.bar.background,
         radius: cfg.bar.radius,
@@ -2460,7 +2471,7 @@ pub fn compute(
     let centre_width = run_width(&centre, cfg.positions[1].separator);
     let sized = [left, centre, right];
 
-    // The centre run is centred on the bar, but pushed aside rather than allowed to sit on
+    // The centre run is centred inside the padding, but pushed aside rather than allowed to sit on
     // top of its neighbours: a wide right-hand run would otherwise overlap a centred clock
     // long before the bar is actually full.
     let right_start = (width - right_width).max(0.0);
@@ -2474,7 +2485,7 @@ pub fn compute(
         .max(0.0)
         .clamp(centre_lower, centre_upper);
 
-    let starts = [0.0, centre_start, right_start];
+    let starts = [0.0, centre_start, right_start].map(|start| start + padding.left);
 
     for ((groups, mut x), position) in sized.into_iter().zip(starts).zip(&cfg.positions) {
         let first = frame.groups.len();
@@ -2488,7 +2499,7 @@ pub fn compute(
         let mut behind_travel = 0.0;
         for group in groups {
             let (w, travel) = (group.width, group.travel);
-            let placed = place(group, x, height, pointer);
+            let placed = place(group, x, padding.top, height, pointer);
             // Where this island's contents stop, which is where anything drawn at its
             // trailing end belongs - the join below included.
             let edge = placed.content_right;
@@ -2534,7 +2545,9 @@ pub fn fault(
 ) -> Frame {
     let padding = 10.0;
     let module_width = text.measure(message) + padding * 2.0;
-    let x = (width - module_width).max(0.0);
+    let inset = cfg.bar.padding;
+    let x = inset.left + (width - inset.left - inset.right - module_width).max(0.0);
+    let height = (height - inset.top - inset.bottom).max(0.0);
 
     Frame {
         groups: vec![PlacedGroup {
@@ -2543,7 +2556,7 @@ pub fn fault(
             text_right: None,
             content_edge: None,
             x,
-            y: 0.0,
+            y: inset.top,
             width: module_width,
             height,
             background: Color::TRANSPARENT,
@@ -2555,7 +2568,7 @@ pub fn fault(
             },
             modules: vec![PlacedModule {
                 x,
-                y: 0.0,
+                y: inset.top,
                 width: module_width,
                 height,
                 content_right: None,

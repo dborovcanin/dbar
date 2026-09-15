@@ -125,7 +125,7 @@ root at all.
 ## What works
 
 - `wlr-layer-shell` surface, top or bottom placement, an optional centred width,
-  configurable margin and exclusive zone
+  margin and padding set per side, and an exclusive zone
 - autohide: the bar stays out of sight until the pointer reaches its edge, with a
   realtime signal to pin it in view from a keybinding
 - per-pixel transparency, so SwayFX blur shows through
@@ -426,7 +426,8 @@ dbar -c examples/showcase.toml
 [bar]
 height = 34
 position = "top"      # or "bottom"
-margin = 6            # floats the bar off the screen edge
+margin = { top = 6, right = 8, bottom = 0, left = 8 }  # or one number for all four sides
+padding = { left = 8, right = 8 }  # space between the bar's edges and its groups
 gap = 6               # space between groups
 font = "Inter 10"
 fallback = [          # for glyphs `font` lacks; omit and dbar chooses
