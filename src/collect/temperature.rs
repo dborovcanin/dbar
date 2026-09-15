@@ -153,10 +153,11 @@ struct Chip {
 /// A chip that has been settled on: which sensors it has, what they are called, and their
 /// readings held open.
 ///
-/// The directory listing and the labels do not change while the chip is there, so they
-/// are taken once; only the readings are asked for again on every tick.
+/// The directory listing and the labels are taken once; only the readings are asked for
+/// again on every tick. A sensor the driver adds while the chip is held - coretemp gains
+/// one when a processor comes online - is not seen until the chip is chosen again, which is
+/// the price of not listing the directory every few seconds.
 struct Held {
-    path: PathBuf,
     name: String,
     name_file: super::Pseudo,
     sensors: Vec<HeldSensor>,
@@ -200,7 +201,6 @@ impl Held {
             })
             .collect();
         Some(Held {
-            path: path.to_path_buf(),
             name,
             name_file,
             sensors,
@@ -209,14 +209,13 @@ impl Held {
 
     /// Whether this is still the chip it was when it was chosen.
     ///
-    /// A device that went away fails the read of its name, and one that took over its
-    /// number reads a different name; a directory that is simply gone is caught first.
+    /// The name is read through the descriptor held since then, so it always speaks for
+    /// the device that was chosen: once that device goes away, sysfs fails the read, and a
+    /// chip that later takes over the same number is found by choosing again.
     fn still_there(&mut self) -> bool {
-        self.path.is_dir()
-            && self
-                .name_file
-                .read()
-                .is_ok_and(|read| read.trim() == self.name)
+        self.name_file
+            .read()
+            .is_ok_and(|read| read.trim() == self.name)
     }
 
     fn read(&mut self) -> Chip {
@@ -496,6 +495,10 @@ mod tests {
         };
         assert_eq!(chip_of(&collector.read().expect("reads")), "k10temp");
 
+        // Sysfs fails a held read once its device has gone. A deleted fixture file would
+        // go on reading through the descriptor, so its name is emptied first to say the
+        // same thing.
+        std::fs::write(root.join("hwmon0/name"), "").expect("writable");
         std::fs::remove_dir_all(root.join("hwmon0")).expect("the fixture is removable");
         assert_eq!(
             chip_of(&collector.read().expect("reads")),
