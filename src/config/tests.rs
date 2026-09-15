@@ -2096,3 +2096,58 @@ fn a_state_error_names_the_state_it_is_about() {
         "the wrong state was named: {error}"
     );
 }
+
+#[test]
+fn a_hiding_bar_holds_no_space_and_waits_half_a_second_by_default() {
+    let bar = Config::parse("").unwrap().bar;
+    assert_eq!(bar.autohide, None);
+    assert!(bar.exclusive);
+
+    let bar = Config::parse("[bar]\nautohide = true\n").unwrap().bar;
+    assert_eq!(bar.autohide, Some(std::time::Duration::from_millis(500)));
+    assert!(!bar.exclusive);
+    assert_eq!(bar.autohide_signal, None);
+
+    let bar = Config::parse(
+        "[bar]\nautohide = true\nautohide_delay = \"2s\"\nautohide_signal = 3\nexclusive = false\n",
+    )
+    .unwrap()
+    .bar;
+    assert_eq!(bar.autohide, Some(std::time::Duration::from_secs(2)));
+    assert_eq!(bar.autohide_signal, Some(3));
+}
+
+#[test]
+fn autohide_refuses_what_would_leave_the_bar_in_the_way_or_out_of_reach() {
+    for (config, expected) in [
+        ("[bar]\nautohide = true\nexclusive = true\n", "exclusive"),
+        ("[bar]\nautohide = true\nlayer = \"bottom\"\n", "layer"),
+        ("[bar]\nautohide = true\nlayer = \"background\"\n", "layer"),
+        ("[bar]\nautohide_delay = \"1s\"\n", "autohide is not on"),
+        ("[bar]\nautohide_signal = 3\n", "autohide is not on"),
+        ("[bar]\nautohide = true\nautohide_signal = -1\n", "SIGRTMIN"),
+        (
+            "[bar]\nautohide = true\nautohide_delay = \"soon\"\n",
+            "autohide_delay",
+        ),
+    ] {
+        let e = Config::parse(config).expect_err(config);
+        assert!(format!("{e:#}").contains(expected), "{config}: {e:#}");
+    }
+}
+
+#[test]
+fn the_autohide_signal_cannot_also_refresh_a_module() {
+    let config = one_module("source = \"backlight\"\nsignal = 3\n").replace(
+        "height = 30",
+        "height = 30\nautohide = true\nautohide_signal = 3",
+    );
+    let e = Config::parse(&config).expect_err("one signal meaning two things");
+    assert!(format!("{e:#}").contains("autohide_signal 3"), "{e:#}");
+
+    let config = one_module("source = \"backlight\"\nsignal = 4\n").replace(
+        "height = 30",
+        "height = 30\nautohide = true\nautohide_signal = 3",
+    );
+    assert!(Config::parse(&config).is_ok());
+}

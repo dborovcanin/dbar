@@ -269,6 +269,23 @@ fn schedule_menu(handle: &calloop::LoopHandle<'static, App>) -> Result<()> {
     Ok(())
 }
 
+/// Start the timer that hides a bar the pointer has left, if one is not already going.
+///
+/// It exists only while some bar is counting down, so a bar that is hidden, pinned or under
+/// the pointer never wakes for it.
+fn schedule_hide(handle: &calloop::LoopHandle<'static, App>) -> Result<()> {
+    handle
+        .insert_source(
+            calloop::timer::Timer::from_duration(std::time::Duration::from_millis(0)),
+            |_, _, app: &mut App| match app.on_hide_timer() {
+                Some(next) => calloop::timer::TimeoutAction::ToInstant(next),
+                None => calloop::timer::TimeoutAction::Drop,
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("inserting the hide timer: {e}"))?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
@@ -313,7 +330,8 @@ fn main() -> Result<()> {
     let listening = provider.is_some();
     // A signal brings a reading forward: after `brightnessctl set`, the bar should say so
     // now rather than when the interval next comes round.
-    let offsets: Vec<i32> = config.signals().keys().copied().collect();
+    let mut offsets: Vec<i32> = config.signals().keys().copied().collect();
+    offsets.extend(config.bar.autohide_signal);
     let click_programs = config.modules().any(|module| module.on_click.is_some());
     // Which sources a click or a signal can ask for another reading, so a command that
     // nothing can ask keeps no thread waiting to be asked.
@@ -560,6 +578,7 @@ fn main() -> Result<()> {
 
     let handle_for_fold = handle.clone();
     let handle_for_menu = handle.clone();
+    let handle_for_hide = handle.clone();
     WaylandSource::new(conn, event_queue)
         .insert(handle)
         .map_err(|e| anyhow::anyhow!("inserting the Wayland source: {e}"))?;
@@ -581,6 +600,12 @@ fn main() -> Result<()> {
         {
             log::error!("{e}");
             app.release_menu_timer();
+        }
+        if app.take_hide_timer()
+            && let Err(e) = schedule_hide(&handle_for_hide)
+        {
+            log::error!("{e}");
+            app.release_hide_timer();
         }
         // Anything the handlers marked dirty but could not draw yet gets drawn here.
         app.draw_if_needed();

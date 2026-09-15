@@ -132,6 +132,8 @@ The current bar supports:
 
 - top or bottom placement, an optional centred width, layer selection, margins
   and exclusive zones;
+- autohide, which shrinks the bar to a transparent strip on its edge until the
+  pointer reaches it, with a realtime signal that pins it in view;
 - per-output bars and output-scoped compositor data;
 - left, centre and right runs of named groups;
 - named style inheritance plus per-module and state overrides;
@@ -598,6 +600,8 @@ pass.
 - Event-driven sources add no polling wake-up.
 - Sampled sources share one scheduler that wakes at the earliest deadline and
   reads everything then due.
+- A hiding bar has a timer only while it counts down to hide; hidden, pinned or
+  under the pointer, it has none.
 - The time source aligns itself to the boundary its format needs.
 - Multiple outputs share collection and external connections.
 

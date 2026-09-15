@@ -43,6 +43,15 @@ font = "sans-serif 15"
 # fallback = ["Symbols Nerd Font", "Noto Color Emoji", "Noto Sans CJK JP"]
 icon_size = 20
 exclusive = true       # default: true; reserve the space so windows do not sit under the bar
+# Keep the bar out of sight until the pointer reaches its edge. It comes out over the
+# windows rather than pushing them aside, which is why it cannot be exclusive as well,
+# and it needs the "top" or "overlay" layer, where no window covers the edge. It hides
+# again `autohide_delay` after the pointer leaves, and never while a tray menu is open.
+# With `autohide_signal = 3`, `pkill -RTMIN+3 dbar` pins it in view or lets it hide
+# again, which is what a keybinding in the compositor's config is for.
+# autohide = true
+# autohide_delay = "500ms"
+# autohide_signal = 3
 # Which screens to appear on, named the way the compositor names them - `swaymsg
 # -t get_outputs` or `niri msg outputs` lists them. Left out, or a single "*", is
 # every screen there is and every one plugged in later, each getting a bar of its own.

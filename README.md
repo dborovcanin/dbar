@@ -126,6 +126,8 @@ root at all.
 
 - `wlr-layer-shell` surface, top or bottom placement, an optional centred width,
   configurable margin and exclusive zone
+- autohide: the bar stays out of sight until the pointer reaches its edge, with a
+  realtime signal to pin it in view from a keybinding
 - per-pixel transparency, so SwayFX blur shows through
 - text rendering with shaping and font fallback (`cosmic-text`)
 - native collectors for cpu, memory, battery, backlight, load, temperature,

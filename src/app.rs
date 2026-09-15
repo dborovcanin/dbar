@@ -48,7 +48,7 @@ use crate::text::TextRenderer;
 
 mod animation;
 
-use animation::Travels;
+use animation::{Autohide, Travels};
 
 /// How the i3bar protocol numbers a wheel notch, which is what click dispatch speaks.
 const SCROLL_UP: u32 = 4;
@@ -254,6 +254,8 @@ struct Bar {
     /// this is what says so safely: the first draw, and the first after a resize or a
     /// scale change, has to commit whatever the frame looks like.
     presented: Option<(u32, u32, i32)>,
+    /// Whether this bar is out of sight and when it goes, for a config that hides it.
+    autohide: Option<Autohide>,
 }
 
 impl Bar {
@@ -283,13 +285,14 @@ impl Bar {
             app.layer_shell
                 .create_layer_surface(qh, surface, stack, Some("dbar"), Some(&output));
 
-        place(&layer, cfg, span);
+        let autohide = cfg.autohide.map(Autohide::new);
+        place(
+            &layer,
+            cfg,
+            span,
+            autohide.as_ref().is_some_and(Autohide::hidden),
+        );
         layer.set_keyboard_interactivity(KeyboardInteractivity::None);
-        let m = cfg.margin;
-        match cfg.position {
-            Edge::Top => layer.set_margin(m, m, 0, m),
-            Edge::Bottom => layer.set_margin(0, m, m, m),
-        }
         layer.set_exclusive_zone(if cfg.exclusive {
             cfg.height as i32 + cfg.margin
         } else {
@@ -323,9 +326,18 @@ impl Bar {
             dirty: true,
             frame_pending: false,
             presented: None,
+            autohide,
         })
     }
+
+    fn hidden(&self) -> bool {
+        self.autohide.as_ref().is_some_and(Autohide::hidden)
+    }
 }
+
+/// How tall a hidden bar is: enough for the pointer to land on at the screen's edge, and
+/// nothing to see, since what it draws is transparent.
+const HIDDEN_HEIGHT: u32 = 1;
 
 /// How wide a bar's surface is asked to be on a screen, or `None` to stretch it between the
 /// screen's sides.
@@ -345,20 +357,32 @@ fn span_on(cfg: &crate::config::Bar, screen: Option<(i32, i32)>) -> Option<u32> 
 ///
 /// A surface anchored to one edge alone is centred along it by the compositor, which is
 /// what puts a bar with a width in the middle of the screen.
-fn place(layer: &LayerSurface, cfg: &crate::config::Bar, span: Option<u32>) {
+///
+/// A hidden bar keeps its width but is a strip against the edge itself, with no margin
+/// between, so that the pointer pushed to the edge lands on it.
+fn place(layer: &LayerSurface, cfg: &crate::config::Bar, span: Option<u32>, hidden: bool) {
     let edge = match cfg.position {
         Edge::Top => Anchor::TOP,
         Edge::Bottom => Anchor::BOTTOM,
     };
+    let (height, m) = match hidden {
+        true => (HIDDEN_HEIGHT, 0),
+        false => (cfg.height, cfg.margin),
+    };
+    let side = cfg.margin;
+    match cfg.position {
+        Edge::Top => layer.set_margin(m, side, 0, side),
+        Edge::Bottom => layer.set_margin(0, side, m, side),
+    }
     match span {
         Some(width) => {
             layer.set_anchor(edge);
-            layer.set_size(width, cfg.height);
+            layer.set_size(width, height);
         }
         None => {
             layer.set_anchor(edge | Anchor::LEFT | Anchor::RIGHT);
             // A zero width lets the compositor stretch us between the left and right anchors.
-            layer.set_size(0, cfg.height);
+            layer.set_size(0, height);
         }
     }
 }
@@ -447,6 +471,8 @@ pub struct App {
     menu_intent: Option<PendingMenuIntent>,
     /// Whether the event loop already has a timer responsible for `menu_intent`.
     menu_timer_scheduled: bool,
+    /// Whether the event loop has a timer counting down to a hiding bar's deadline.
+    hide_timer_scheduled: bool,
     /// What the next menu asked for is called, so an answer can be matched to its ask.
     menu_request: u64,
     /// The item whose menu is being opened, while its rows are still being read.
@@ -549,6 +575,7 @@ impl App {
             menus: Vec::new(),
             menu_intent: None,
             menu_timer_scheduled: false,
+            hide_timer_scheduled: false,
             opening: None,
             fault: None,
             warned_names: None,
@@ -645,6 +672,10 @@ impl App {
     /// nothing due by then and simply asks for the next one, so it corrects itself rather
     /// than needing to be rescheduled from here.
     pub fn on_signal(&mut self, offset: i32) {
+        if self.config.bar.autohide_signal == Some(offset) {
+            self.toggle_pinned();
+            return;
+        }
         let Some(sources) = self.signals.get(&offset) else {
             return;
         };
@@ -1043,6 +1074,7 @@ impl App {
         close_below(&mut self.menus, 0);
         self.opening = None;
         self.menu_intent = None;
+        self.menus_closed();
     }
 
     /// Which open menu a surface belongs to.
@@ -1259,6 +1291,107 @@ impl App {
     /// Give the submenu timer claim back when the event loop could not install it.
     pub fn release_menu_timer(&mut self) {
         self.menu_timer_scheduled = false;
+    }
+
+    /// Whether a menu is open or on its way, which keeps a hiding bar in view.
+    fn menu_held(&self) -> bool {
+        !self.menus.is_empty() || self.opening.is_some()
+    }
+
+    /// Ask the compositor for a bar's size now that it has hidden or come out.
+    ///
+    /// Nothing is drawn here: the compositor answers with a configure, and that is what
+    /// redraws the bar at its new size.
+    fn place_bar(&mut self, i: usize) {
+        let bar = &self.bars[i];
+        place(&bar.layer, &self.config.bar, bar.span, bar.hidden());
+        bar.layer.commit();
+    }
+
+    /// The pointer has reached a bar, which brings a hiding one out.
+    fn pointer_entered(&mut self, i: usize) {
+        if self.bars[i].autohide.as_mut().is_some_and(Autohide::enter) {
+            self.place_bar(i);
+        }
+    }
+
+    /// The pointer has left a bar, which starts a hiding one counting down.
+    fn pointer_left(&mut self, i: usize) {
+        let held = self.menu_held();
+        if let Some(autohide) = &mut self.bars[i].autohide {
+            autohide.leave(std::time::Instant::now(), held);
+        }
+    }
+
+    /// A menu has closed, so a hiding bar the pointer is not on can count down again.
+    fn menus_closed(&mut self) {
+        let held = self.menu_held();
+        let now = std::time::Instant::now();
+        for autohide in self.bars.iter_mut().filter_map(|bar| bar.autohide.as_mut()) {
+            autohide.wait(now, held);
+        }
+    }
+
+    /// Pin every hiding bar in view, or let them all hide again.
+    fn toggle_pinned(&mut self) {
+        let pinned = !self
+            .bars
+            .iter()
+            .filter_map(|bar| bar.autohide.as_ref())
+            .any(Autohide::pinned);
+        log::debug!("the bar is {}", if pinned { "pinned" } else { "hiding" });
+        let held = self.menu_held();
+        let now = std::time::Instant::now();
+        for i in 0..self.bars.len() {
+            if self.bars[i]
+                .autohide
+                .as_mut()
+                .is_some_and(|autohide| autohide.pin(pinned, now, held))
+            {
+                self.place_bar(i);
+            }
+        }
+    }
+
+    /// Hide the bars whose time has come, and say when this timer is next wanted.
+    pub fn on_hide_timer(&mut self) -> Option<std::time::Instant> {
+        let now = std::time::Instant::now();
+        let held = self.menu_held();
+        let mut next = None;
+        for i in 0..self.bars.len() {
+            let Some(autohide) = self.bars[i].autohide.as_mut() else {
+                continue;
+            };
+            // A menu that opened while the bar was counting down keeps it; closing the
+            // menu is what starts the count again.
+            if held {
+                autohide.wait(now, true);
+                continue;
+            }
+            let hid = autohide.step(now);
+            next = next.into_iter().chain(autohide.due()).min();
+            if hid {
+                self.place_bar(i);
+            }
+        }
+        self.hide_timer_scheduled = next.is_some();
+        next
+    }
+
+    /// Claim responsibility for a bar's hiding deadline not already driven by a timer.
+    pub fn take_hide_timer(&mut self) -> bool {
+        let needed = !self.hide_timer_scheduled
+            && self
+                .bars
+                .iter()
+                .any(|bar| bar.autohide.as_ref().is_some_and(|a| a.due().is_some()));
+        self.hide_timer_scheduled |= needed;
+        needed
+    }
+
+    /// Give the hide timer claim back when the event loop could not install it.
+    pub fn release_hide_timer(&mut self) {
+        self.hide_timer_scheduled = false;
     }
 
     /// Act on a click inside a menu.
@@ -1583,7 +1716,12 @@ impl App {
     }
 
     fn draw(&mut self, i: usize) -> Result<()> {
-        let frame = self.lay_out(i);
+        // A hidden bar is still a surface, and needs a buffer for the pointer to find it;
+        // an empty frame paints it transparent and gives a click nothing to land on.
+        let frame = match self.bars[i].hidden() {
+            true => Frame::default(),
+            false => self.lay_out(i),
+        };
         let bar = &self.bars[i];
         let surface_now = (bar.width, bar.height, bar.scale);
         // Worked out against the frame that is on screen, which is the one still held: a
@@ -2197,10 +2335,17 @@ impl PointerHandler for App {
                 continue;
             };
             match event.kind {
-                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                PointerEventKind::Enter { .. } => {
+                    self.pointer_entered(i);
                     self.set_pointer(i, Some((x as f32, y as f32)));
                 }
-                PointerEventKind::Leave { .. } => self.set_pointer(i, None),
+                PointerEventKind::Motion { .. } => {
+                    self.set_pointer(i, Some((x as f32, y as f32)));
+                }
+                PointerEventKind::Leave { .. } => {
+                    self.set_pointer(i, None);
+                    self.pointer_left(i);
+                }
                 PointerEventKind::Press { button, serial, .. } => {
                     // Kept because a menu may be about to be opened, and a grab can only
                     // be asked for with the serial of the press that opened it.
@@ -2253,7 +2398,12 @@ impl OutputHandler for App {
                     info.as_ref().and_then(|info| info.logical_size),
                 );
                 if self.bars[i].span != span {
-                    place(&self.bars[i].layer, &self.config.bar, span);
+                    place(
+                        &self.bars[i].layer,
+                        &self.config.bar,
+                        span,
+                        self.bars[i].hidden(),
+                    );
                     self.bars[i].layer.commit();
                     self.bars[i].span = span;
                 }
@@ -2310,6 +2460,7 @@ impl PopupHandler for App {
             close_below(&mut self.menus, index);
             if index == 0 {
                 self.menu_intent = None;
+                self.menus_closed();
             }
         }
     }

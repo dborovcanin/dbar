@@ -370,9 +370,17 @@ struct RawBar {
     icon_size: Option<f32>,
     #[serde(default)]
     background: RawBarBackground,
-    /// Reserve space so windows are not covered. Defaults to on.
-    #[serde(default = "default_true")]
-    exclusive: bool,
+    /// Reserve space so windows are not covered. Defaults to on, and to off for a bar that
+    /// hides; kept optional so that asking for both can be refused rather than ignored.
+    exclusive: Option<bool>,
+    /// Keep the bar out of sight until the pointer reaches its edge.
+    #[serde(default)]
+    autohide: bool,
+    /// How long after the pointer leaves the bar hides again.
+    autohide_delay: Option<String>,
+    /// The realtime signal, counted from SIGRTMIN, that pins a hiding bar in view or lets
+    /// it hide again.
+    autohide_signal: Option<i32>,
     /// Which screens to appear on, named the way the compositor names them: "DP-1".
     /// Empty, or a single "*", is every screen there is and every one plugged in later.
     #[serde(default)]
@@ -754,9 +762,6 @@ fn default_gap() -> f32 {
 fn default_font() -> String {
     "sans-serif 10".to_string()
 }
-fn default_true() -> bool {
-    true
-}
 fn default_i3bar_command() -> String {
     "i3status-rs".to_string()
 }
@@ -780,7 +785,10 @@ impl Default for RawBar {
             fallback: Vec::new(),
             icon_size: None,
             background: RawBarBackground::default(),
-            exclusive: true,
+            exclusive: None,
+            autohide: false,
+            autohide_delay: None,
+            autohide_signal: None,
             outputs: Vec::new(),
             icon_theme: default_icon_theme(),
         }
@@ -839,6 +847,10 @@ pub struct Bar {
     pub background: Color,
     pub radius: f32,
     pub exclusive: bool,
+    /// How long the bar waits after the pointer leaves before hiding, for a bar that hides.
+    pub autohide: Option<Duration>,
+    /// The signal offset that pins a hiding bar in view, or lets it hide again.
+    pub autohide_signal: Option<i32>,
     /// The screens this bar appears on, empty for all of them.
     pub outputs: Vec<String>,
     /// Which icon theme a tray item's named icon is looked for in.
@@ -1682,6 +1694,7 @@ impl Config {
         let palette = Palette::new(&raw.colors)?;
 
         let (font_family, font_size) = parse_font(&raw.bar.font);
+        let autohide = parse_autohide(&raw.bar)?;
         let bar = Bar {
             height: raw.bar.height.max(1),
             position: raw.bar.position,
@@ -1702,7 +1715,9 @@ impl Config {
                 None => Color::TRANSPARENT,
             },
             radius: raw.bar.background.radius,
-            exclusive: raw.bar.exclusive,
+            exclusive: raw.bar.exclusive.unwrap_or(autohide.is_none()),
+            autohide,
+            autohide_signal: raw.bar.autohide_signal,
             outputs: raw.bar.outputs.clone(),
             icon_theme: raw.bar.icon_theme.clone(),
         };
@@ -1790,6 +1805,14 @@ impl Config {
             positions,
         };
         config.check_how_many_programs()?;
+        if let Some(offset) = config.bar.autohide_signal
+            && config.signals().contains_key(&offset)
+        {
+            bail!(
+                "[bar] autohide_signal {offset} is already a module's signal; give the bar \
+                 one of its own"
+            );
+        }
         Ok(config)
     }
 
@@ -1936,6 +1959,57 @@ fn parse_bar_width(written: Option<&RawWidth>) -> Result<Option<BarWidth>> {
 /// published the word, without every config that matched on the word going quiet.
 fn compares_to_a_word(kind: crate::status::Kind) -> bool {
     matches!(kind, crate::status::Kind::Text | crate::status::Kind::Flag)
+}
+
+/// How long a bar waits before it hides when the pointer has left it.
+const DEFAULT_AUTOHIDE_DELAY: Duration = Duration::from_millis(500);
+
+/// How long a hiding bar waits after the pointer leaves, or `None` for a bar that stays.
+///
+/// The keys that only mean something to a hiding bar are refused without `autohide`, and
+/// so is anything that would leave a hidden bar out of reach or still holding its space.
+fn parse_autohide(raw: &RawBar) -> Result<Option<Duration>> {
+    if !raw.autohide {
+        if raw.autohide_delay.is_some() {
+            bail!("[bar] sets autohide_delay, but autohide is not on");
+        }
+        if raw.autohide_signal.is_some() {
+            bail!("[bar] sets autohide_signal, but autohide is not on");
+        }
+        return Ok(None);
+    }
+    if raw.exclusive == Some(true) {
+        bail!(
+            "[bar] asks for autohide and exclusive = true together, but a hidden bar cannot \
+             hold space for itself without every window moving each time it appears"
+        );
+    }
+    let covered = match raw.layer {
+        BarLayer::Bottom => Some("bottom"),
+        BarLayer::Background => Some("background"),
+        BarLayer::Top | BarLayer::Overlay => None,
+    };
+    if let Some(layer) = covered {
+        bail!(
+            "[bar] asks for autohide on the {layer:?} layer, where windows cover the edge \
+             that brings the bar back; use layer = \"top\" or \"overlay\""
+        );
+    }
+    if let Some(offset) = raw.autohide_signal {
+        let highest = signal_range();
+        if offset < 0 || offset > highest {
+            bail!(
+                "[bar] asks for autohide_signal {offset}, but only 0 to {highest} exist on \
+                 this system; they are counted from SIGRTMIN"
+            );
+        }
+    }
+    match &raw.autohide_delay {
+        Some(written) => parse_duration(written)
+            .map(Some)
+            .context("in [bar] autohide_delay"),
+        None => Ok(Some(DEFAULT_AUTOHIDE_DELAY)),
+    }
 }
 
 fn parse_duration(written: &str) -> Result<Duration> {

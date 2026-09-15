@@ -1,4 +1,4 @@
-//! Runtime state for the bar's bounded fold and wording animations.
+//! Runtime state for the bar's bounded fold and wording animations, and for hiding it.
 //!
 //! This module owns the state and timestamps. The event loop owns when the shared timer
 //! runs, keeping animation mechanics and scheduling out of layout.
@@ -216,9 +216,157 @@ impl Travels {
     }
 }
 
+/// One bar that keeps out of sight until the pointer reaches its edge.
+///
+/// Only a deadline is kept: the event loop's hide timer exists while some bar has one, and
+/// a bar that is shown and hovered, pinned or hidden costs nothing.
+pub(super) struct Autohide {
+    delay: Duration,
+    pinned: bool,
+    hovered: bool,
+    hidden: bool,
+    hide_at: Option<Instant>,
+}
+
+impl Autohide {
+    /// A bar starts out of the way; the pointer or the signal is what brings it out.
+    pub(super) fn new(delay: Duration) -> Autohide {
+        Autohide {
+            delay,
+            pinned: false,
+            hovered: false,
+            hidden: true,
+            hide_at: None,
+        }
+    }
+
+    pub(super) fn hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// When this bar hides next, if anything is counting down.
+    pub(super) fn due(&self) -> Option<Instant> {
+        self.hide_at
+    }
+
+    /// The pointer has arrived, returning whether that brought the bar out.
+    pub(super) fn enter(&mut self) -> bool {
+        self.hovered = true;
+        self.hide_at = None;
+        std::mem::replace(&mut self.hidden, false)
+    }
+
+    /// The pointer has gone. `held` is an open menu, which keeps the bar it hangs from.
+    pub(super) fn leave(&mut self, now: Instant, held: bool) {
+        self.hovered = false;
+        self.wait(now, held);
+    }
+
+    /// Pin the bar in view or let it hide again, returning whether that brought it out.
+    pub(super) fn pin(&mut self, pinned: bool, now: Instant, held: bool) -> bool {
+        self.pinned = pinned;
+        if pinned {
+            self.hide_at = None;
+            return std::mem::replace(&mut self.hidden, false);
+        }
+        self.wait(now, held);
+        false
+    }
+
+    pub(super) fn pinned(&self) -> bool {
+        self.pinned
+    }
+
+    /// Start counting down again once whatever held the bar out has let go.
+    pub(super) fn wait(&mut self, now: Instant, held: bool) {
+        let staying = self.hidden || self.hovered || self.pinned || held;
+        self.hide_at = (!staying).then(|| now + self.delay);
+    }
+
+    /// Hide the bar if its time has come, returning whether it did.
+    pub(super) fn step(&mut self, now: Instant) -> bool {
+        match self.hide_at {
+            Some(at) if at <= now => {
+                self.hide_at = None;
+                self.hidden = true;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hiding_bar_comes_out_for_the_pointer_and_goes_after_its_delay() {
+        let now = Instant::now();
+        let delay = Duration::from_millis(500);
+        let mut bar = Autohide::new(delay);
+        assert!(bar.hidden());
+        assert!(bar.enter());
+        assert!(!bar.enter(), "already out");
+        assert_eq!(bar.due(), None, "nothing counts down under the pointer");
+
+        bar.leave(now, false);
+        assert_eq!(bar.due(), Some(now + delay));
+        assert!(!bar.step(now + delay / 2));
+        assert!(!bar.hidden());
+        assert!(bar.step(now + delay));
+        assert!(bar.hidden());
+        assert_eq!(bar.due(), None, "a hidden bar keeps no timer");
+    }
+
+    #[test]
+    fn coming_back_before_the_delay_keeps_the_bar_out() {
+        let now = Instant::now();
+        let mut bar = Autohide::new(Duration::from_millis(500));
+        bar.enter();
+        bar.leave(now, false);
+        bar.enter();
+        assert_eq!(bar.due(), None);
+        assert!(!bar.step(now + Duration::from_secs(1)));
+        assert!(!bar.hidden());
+    }
+
+    #[test]
+    fn an_open_menu_holds_the_bar_until_it_closes() {
+        let now = Instant::now();
+        let delay = Duration::from_millis(300);
+        let mut bar = Autohide::new(delay);
+        bar.enter();
+        bar.leave(now, true);
+        assert_eq!(bar.due(), None);
+        bar.wait(now, false);
+        assert_eq!(bar.due(), Some(now + delay));
+    }
+
+    #[test]
+    fn a_pinned_bar_stays_out_until_it_is_let_go() {
+        let now = Instant::now();
+        let delay = Duration::from_millis(300);
+        let mut bar = Autohide::new(delay);
+        assert!(bar.pin(true, now, false), "pinning brings a hidden bar out");
+        bar.enter();
+        bar.leave(now, false);
+        assert_eq!(bar.due(), None);
+
+        assert!(!bar.pin(false, now, false));
+        assert_eq!(bar.due(), Some(now + delay));
+        assert!(bar.step(now + delay));
+    }
+
+    #[test]
+    fn letting_go_under_the_pointer_waits_for_the_pointer_to_leave() {
+        let now = Instant::now();
+        let mut bar = Autohide::new(Duration::from_millis(300));
+        bar.pin(true, now, false);
+        bar.enter();
+        bar.pin(false, now, false);
+        assert_eq!(bar.due(), None);
+    }
 
     #[test]
     fn a_fold_eases_between_its_two_ends_and_stops_at_them() {
