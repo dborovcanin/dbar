@@ -7,7 +7,7 @@ edition = "2024"
 # at whichever of the source and the dependencies asks for more - CI builds
 # against it.
 rust-version = "1.95"
-description = "A small, event-driven Wayland status bar for Sway and SwayFX"
+description = "A small, event-driven Wayland status bar for Sway/SwayFX and Niri"
 repository = "https://github.com/dborovcanin/dbar"
 license = "Apache-2.0"
 readme = "README.md"
