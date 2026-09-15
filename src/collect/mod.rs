@@ -235,10 +235,10 @@ impl Which {
         match self {
             Which::Audio | Which::Media | Which::Command(_) => Box::new(Pushed),
             Which::Cpu => Box::new(cpu::Cpu::new()),
-            Which::Memory => Box::new(memory::Memory),
+            Which::Memory => Box::new(memory::Memory::new()),
             Which::Battery => Box::new(battery::Battery::new()),
             Which::Backlight => Box::new(backlight::Backlight::new()),
-            Which::Load => Box::new(load::Load),
+            Which::Load => Box::new(load::Load::new()),
             Which::Temperature(chip) => Box::new(temperature::Temperature::new(chip.clone())),
             Which::Disk(path) => Box::new(disk::Disk::new(path.clone())),
             Which::Network(device) => Box::new(network::Network::new(device.clone())),
@@ -616,6 +616,64 @@ fn read_to_string(path: impl AsRef<std::path::Path>) -> Result<String> {
 /// What to make room for when reading a file the kernel generates.
 const PSEUDO_FILE: usize = 4096;
 
+/// A file the kernel generates, held open and read again from the start on every tick.
+///
+/// `/proc` and `/sys` produce a fresh copy for a read at offset zero, so opening the file
+/// again each time buys nothing: it is a path walk, a descriptor and a close, several
+/// times every couple of seconds, for as long as the bar runs. `pread` at zero asks for
+/// the same fresh copy through a descriptor kept for the purpose, and the text is read
+/// into the buffer the last tick left behind.
+///
+/// A read that fails lets the descriptor go, so the next one opens the file again: a
+/// device that went away and came back is found where it now is.
+pub struct Pseudo {
+    path: std::path::PathBuf,
+    file: Option<std::fs::File>,
+    text: String,
+}
+
+impl Pseudo {
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Pseudo {
+        Pseudo {
+            path: path.into(),
+            file: None,
+            text: String::new(),
+        }
+    }
+
+    pub fn read(&mut self) -> Result<&str> {
+        match self.fill() {
+            Ok(()) => Ok(&self.text),
+            Err(e) => {
+                self.file = None;
+                Err(anyhow::anyhow!("reading {}: {e}", self.path.display()))
+            }
+        }
+    }
+
+    fn fill(&mut self) -> std::io::Result<()> {
+        use std::os::unix::fs::FileExt as _;
+        let file = match &mut self.file {
+            Some(file) => file,
+            None => self.file.insert(std::fs::File::open(&self.path)?),
+        };
+        let mut bytes = std::mem::take(&mut self.text).into_bytes();
+        bytes.clear();
+        let mut chunk = [0u8; PSEUDO_FILE];
+        loop {
+            match file.read_at(&mut chunk, bytes.len() as u64) {
+                Ok(0) => break,
+                Ok(n) => bytes.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        self.text = String::from_utf8(bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -956,6 +1014,60 @@ mod tests {
         assert!(registry.is_scheduled(), "it is due straight away");
         assert!(registry.tick());
         assert!(registry.next_due().is_some(), "and on its interval after");
+    }
+
+    /// A held file is read from the start every time, so it says what the file says now
+    /// rather than what was left after the last read.
+    #[test]
+    fn a_held_file_is_read_again_from_the_start() {
+        let path = std::env::temp_dir().join("dbar-pseudo-again");
+        std::fs::write(&path, "first\n").expect("writable");
+        let mut file = Pseudo::new(&path);
+        assert_eq!(file.read().expect("reads"), "first\n");
+        assert_eq!(file.read().expect("reads"), "first\n");
+        std::fs::write(&path, "second, and longer\n").expect("writable");
+        assert_eq!(file.read().expect("reads"), "second, and longer\n");
+        std::fs::write(&path, "3\n").expect("writable");
+        assert_eq!(file.read().expect("reads"), "3\n");
+    }
+
+    #[test]
+    fn a_held_file_that_was_not_there_is_opened_once_it_is() {
+        let path = std::env::temp_dir().join("dbar-pseudo-later");
+        let _ = std::fs::remove_file(&path);
+        let mut file = Pseudo::new(&path);
+        let e = file.read().expect_err("nothing to read yet");
+        assert!(format!("{e:#}").contains("dbar-pseudo-later"), "{e:#}");
+        std::fs::write(&path, "here now\n").expect("writable");
+        assert_eq!(file.read().expect("reads"), "here now\n");
+    }
+
+    #[test]
+    fn a_held_file_longer_than_one_read_is_read_whole() {
+        let path = std::env::temp_dir().join("dbar-pseudo-long");
+        let text = "x".repeat(PSEUDO_FILE * 2 + 17);
+        std::fs::write(&path, &text).expect("writable");
+        assert_eq!(Pseudo::new(&path).read().expect("reads"), text);
+    }
+
+    #[test]
+    #[ignore]
+    fn benchmark_held_pseudo_files() {
+        const N: u32 = 200_000;
+        for path in ["/proc/stat", "/proc/meminfo", "/proc/loadavg"] {
+            let start = Instant::now();
+            for _ in 0..N {
+                std::hint::black_box(read_to_string(path).expect("reads"));
+            }
+            let reopened = start.elapsed() / N;
+            let mut held = Pseudo::new(path);
+            let start = Instant::now();
+            for _ in 0..N {
+                std::hint::black_box(held.read().expect("reads").len());
+            }
+            let kept = start.elapsed() / N;
+            println!("{path}: reopened {reopened:?} held {kept:?}");
+        }
     }
 
     #[test]

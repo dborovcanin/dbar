@@ -37,7 +37,8 @@ bench:
 		paint_costs_this_much_per_frame \
 		benchmark_joined_ribbon \
 		benchmark_group_collapse_layout \
-		benchmark_module_collapse
+		benchmark_module_collapse \
+		benchmark_held_pseudo_files
 
 fmt:
 	$(CARGO) fmt

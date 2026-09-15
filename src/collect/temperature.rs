@@ -64,8 +64,8 @@ pub struct Temperature {
     /// a drive's sensor is an NVMe admin command and an embedded controller's is an ACPI
     /// transaction, so the scan costs milliseconds and wakes hardware whose reading is then
     /// thrown away. Which chip is the processor does not change while dbar runs, so it is
-    /// settled once. The name is kept alongside to notice a chip that has gone away.
-    chosen: Option<(PathBuf, String)>,
+    /// settled once, with its sensors listed and their files held open.
+    chosen: Option<Held>,
 }
 
 impl Temperature {
@@ -77,25 +77,19 @@ impl Temperature {
         }
     }
 
-    /// The directory to read, choosing one if this is the first read or the last one left.
-    fn chip_dir(&mut self) -> Option<&Path> {
-        // A cached chip still answering to the name it was chosen under needs no search.
-        let still_there = match &self.chosen {
-            Some((path, name)) => {
-                super::read_to_string(path.join("name")).is_ok_and(|read| read.trim() == name)
-            }
-            None => false,
-        };
-        if !still_there {
-            self.chosen = Some(pick(&self.class, self.wanted.as_deref())?);
+    /// The chip as it reads now, choosing one if this is the first read or the last one left.
+    fn chip(&mut self) -> Option<Chip> {
+        if !self.chosen.as_mut().is_some_and(Held::still_there) {
+            let (path, _) = pick(&self.class, self.wanted.as_deref())?;
+            self.chosen = Some(Held::open(&path)?);
         }
-        self.chosen.as_ref().map(|(path, _)| path.as_path())
+        self.chosen.as_mut().map(Held::read)
     }
 }
 
 impl Collector for Temperature {
     fn read(&mut self) -> Result<Reading> {
-        let Some(chip) = self.chip_dir().and_then(Chip::read) else {
+        let Some(chip) = self.chip() else {
             // Naming a chip that is not there is a mistake worth reporting; finding no
             // processor sensor at all is a machine dbar cannot read, and it says so.
             match &self.wanted {
@@ -156,12 +150,27 @@ struct Chip {
     sensors: Vec<Sensor>,
 }
 
-impl Chip {
-    fn read(path: &Path) -> Option<Chip> {
-        let name = super::read_to_string(path.join("name"))
-            .ok()?
-            .trim()
-            .to_string();
+/// A chip that has been settled on: which sensors it has, what they are called, and their
+/// readings held open.
+///
+/// The directory listing and the labels do not change while the chip is there, so they
+/// are taken once; only the readings are asked for again on every tick.
+struct Held {
+    path: PathBuf,
+    name: String,
+    name_file: super::Pseudo,
+    sensors: Vec<HeldSensor>,
+}
+
+struct HeldSensor {
+    input: super::Pseudo,
+    label: Option<String>,
+}
+
+impl Held {
+    fn open(path: &Path) -> Option<Held> {
+        let mut name_file = super::Pseudo::new(path.join("name"));
+        let name = name_file.read().ok()?.trim().to_string();
 
         // The kernel numbers sensors from one and leaves gaps, so which ones exist is read
         // from the directory rather than guessed at by opening a fixed range of names.
@@ -180,27 +189,59 @@ impl Chip {
         // Sorted so the label a reading is reported under does not depend on directory order.
         indices.sort_unstable();
 
-        let mut sensors = Vec::new();
-        for i in indices {
-            let Ok(raw) = super::read_to_string(path.join(format!("temp{i}_input"))) else {
-                continue;
-            };
-            let Ok(milli) = raw.trim().parse::<f64>() else {
-                continue;
-            };
-            // Firmware lists sensors for hardware that is not fitted, and they read zero.
-            if milli <= 0.0 {
-                continue;
-            }
-            sensors.push(Sensor {
-                degrees: milli / 1000.0,
+        let sensors = indices
+            .into_iter()
+            .map(|i| HeldSensor {
+                input: super::Pseudo::new(path.join(format!("temp{i}_input"))),
                 label: super::read_to_string(path.join(format!("temp{i}_label")))
                     .ok()
                     .map(|l| l.trim().to_string())
                     .filter(|l| !l.is_empty()),
-            });
+            })
+            .collect();
+        Some(Held {
+            path: path.to_path_buf(),
+            name,
+            name_file,
+            sensors,
+        })
+    }
+
+    /// Whether this is still the chip it was when it was chosen.
+    ///
+    /// A device that went away fails the read of its name, and one that took over its
+    /// number reads a different name; a directory that is simply gone is caught first.
+    fn still_there(&mut self) -> bool {
+        self.path.is_dir()
+            && self
+                .name_file
+                .read()
+                .is_ok_and(|read| read.trim() == self.name)
+    }
+
+    fn read(&mut self) -> Chip {
+        let sensors = self
+            .sensors
+            .iter_mut()
+            .filter_map(|sensor| {
+                let milli = sensor.input.read().ok()?.trim().parse::<f64>().ok()?;
+                // Firmware lists sensors for hardware that is not fitted, and they read zero.
+                (milli > 0.0).then(|| Sensor {
+                    degrees: milli / 1000.0,
+                    label: sensor.label.clone(),
+                })
+            })
+            .collect();
+        Chip {
+            name: self.name.clone(),
+            sensors,
         }
-        Some(Chip { name, sensors })
+    }
+}
+
+impl Chip {
+    fn read(path: &Path) -> Option<Chip> {
+        Held::open(path).map(|mut held| held.read())
     }
 
     fn hottest(&self) -> Option<&Sensor> {
@@ -410,6 +451,33 @@ mod tests {
             "coretemp",
             "the chip was chosen again instead of being remembered"
         );
+    }
+
+    /// The sensors stay open between ticks, which must not freeze the reading at the value
+    /// it had when the chip was chosen.
+    #[test]
+    fn a_chip_held_open_reports_what_its_sensors_say_now() {
+        let root = class(
+            "held",
+            &[(
+                "k10temp",
+                &[("temp1_input", "46000"), ("temp1_label", "Tctl")],
+            )],
+        );
+        let mut collector = Temperature {
+            class: root.clone(),
+            wanted: None,
+            chosen: None,
+        };
+        let degrees = |reading: &Reading| match reading.fields.get("temp") {
+            Some(Value::Num { v, .. }) => *v,
+            other => panic!("the temp field is {other:?}"),
+        };
+        assert_eq!(degrees(&collector.read().expect("reads")), 46.0);
+        std::fs::write(root.join("hwmon0/temp1_input"), "81500\n").expect("writable");
+        let reading = collector.read().expect("reads");
+        assert_eq!(degrees(&reading), 81.5);
+        assert_eq!(reading.state, State::Warning);
     }
 
     #[test]

@@ -34,11 +34,21 @@ pub const FIELDS: &[FieldSpec] = &[
 
 const LOADAVG: &str = "/proc/loadavg";
 
-pub struct Load;
+pub struct Load {
+    loadavg: super::Pseudo,
+}
+
+impl Load {
+    pub fn new() -> Load {
+        Load {
+            loadavg: super::Pseudo::new(LOADAVG),
+        }
+    }
+}
 
 impl Collector for Load {
     fn read(&mut self) -> Result<Reading> {
-        let [one, five, fifteen] = parse(&super::read_to_string(LOADAVG)?)?;
+        let [one, five, fifteen] = parse(self.loadavg.read()?)?;
 
         let mut fields = Fields::default();
         for (name, v) in [("one", one), ("five", five), ("fifteen", fifteen)] {

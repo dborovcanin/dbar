@@ -43,11 +43,21 @@ pub const FIELDS: &[FieldSpec] = &[
 
 const MEMINFO: &str = "/proc/meminfo";
 
-pub struct Memory;
+pub struct Memory {
+    meminfo: super::Pseudo,
+}
+
+impl Memory {
+    pub fn new() -> Memory {
+        Memory {
+            meminfo: super::Pseudo::new(MEMINFO),
+        }
+    }
+}
 
 impl Collector for Memory {
     fn read(&mut self) -> Result<Reading> {
-        let info = parse(&super::read_to_string(MEMINFO)?)?;
+        let info = parse(self.meminfo.read()?)?;
 
         let mut fields = Fields::default();
         fields.set("percent", percent(info.used(), Some(info.total)));

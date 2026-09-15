@@ -18,6 +18,7 @@ pub const FIELDS: &[FieldSpec] = &[FieldSpec {
 const STAT: &str = "/proc/stat";
 
 pub struct Cpu {
+    stat: super::Pseudo,
     previous: Option<Times>,
 }
 
@@ -33,16 +34,15 @@ struct Times {
 impl Cpu {
     pub fn new() -> Cpu {
         // Failing here is not worth reporting: the first tick will try again and say so.
-        let previous = super::read_to_string(STAT)
-            .ok()
-            .and_then(|s| parse(&s).ok());
-        Cpu { previous }
+        let mut stat = super::Pseudo::new(STAT);
+        let previous = stat.read().ok().and_then(|s| parse(s).ok());
+        Cpu { stat, previous }
     }
 }
 
 impl Collector for Cpu {
     fn read(&mut self) -> Result<Reading> {
-        let now = parse(&super::read_to_string(STAT)?)?;
+        let now = parse(self.stat.read()?)?;
         let previous = self.previous.replace(now);
 
         let mut fields = crate::status::Fields::default();
