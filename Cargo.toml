@@ -6,7 +6,7 @@ edition = "2024"
 # The floor is 1.89 because cosmic-text asks for it, so keep this in step with
 # the dependencies rather than with the source - CI builds against it.
 rust-version = "1.89"
-description = "A small, event-driven Wayland status bar for Sway and SwayFX"
+description = "A small, event-driven Wayland status bar for Sway/SwayFX and Niri"
 repository = "https://github.com/dborovcanin/dbar"
 license = "Apache-2.0"
 readme = "README.md"
