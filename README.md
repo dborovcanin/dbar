@@ -81,7 +81,7 @@ but its workspaces, window title, keyboard layout and binding mode are read from
 Sway's IPC or niri's event stream. The initial downloaded binary targets current
 Arch Linux and uses its system xkbcommon, Wayland and PipeWire libraries, which
 are normally already present on a Sway or niri desktop. Building from
-source additionally needs Rust 1.95 or newer and `clang` to generate the
+source additionally needs Rust 1.89 or newer and `clang` to generate the
 PipeWire bindings:
 
 ```sh

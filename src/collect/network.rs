@@ -162,6 +162,13 @@ impl Network {
 
 impl Collector for Network {
     fn read(&mut self) -> Result<Reading> {
+        // Kept while its link is up, so unplugging the cable moves the module to the
+        // wireless card on the next tick without dbar being restarted.
+        if self.wanted.is_none()
+            && let Some((path, sample)) = self.kept()
+        {
+            return Ok(self.reading(&path, sample));
+        }
         let device = match &self.wanted {
             Some(name) => {
                 let path = self.class.join(name);
@@ -169,20 +176,6 @@ impl Collector for Network {
                     bail!("there is no network interface called {name:?}");
                 }
                 path
-            }
-            // Kept while its link is up, so unplugging the cable moves the module to the
-            // wireless card on the next tick without dbar being restarted.
-            None if let Some((path, at)) = &self.chosen
-                && at.elapsed() < REPICK =>
-            {
-                let path = path.clone();
-                match Sample::read(&path) {
-                    Ok(sample) if sample.state == "up" => return Ok(self.reading(&path, sample)),
-                    _ => {
-                        self.chosen = None;
-                        return self.read();
-                    }
-                }
             }
             None => match pick(&self.class) {
                 Some(path) => {
@@ -192,6 +185,7 @@ impl Collector for Network {
                 None => {
                     // A machine with no hardware interface at all is unusual but not
                     // broken; the module simply has nothing to say.
+                    self.chosen = None;
                     let mut fields = Fields::default();
                     for name in [
                         "down", "up", "device", "state", "received", "sent", "ssid", "signal",
@@ -219,6 +213,17 @@ impl Collector for Network {
 }
 
 impl Network {
+    /// The interface picked last and a fresh sample of it, while the choice is recent and
+    /// its link is still up.
+    fn kept(&self) -> Option<(PathBuf, Sample)> {
+        let (path, at) = self.chosen.as_ref()?;
+        if at.elapsed() >= REPICK {
+            return None;
+        }
+        let sample = Sample::read(path).ok().filter(|s| s.state == "up")?;
+        Some((path.clone(), sample))
+    }
+
     fn reading(&mut self, device: &Path, now: Sample) -> Reading {
         // A different interface means the counters are not comparable, so the first tick
         // after a switch reports no rate rather than an enormous one.
