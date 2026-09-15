@@ -850,9 +850,10 @@ fn wording<'g>(
     module: &'g ModuleCfg,
     alt: &std::collections::HashMap<String, usize>,
 ) -> &'g Format {
-    // Most modules have one wording, and asking which of one is showing would hash the
-    // module's name on every frame for an answer that cannot be anything but the first.
-    if module.format_alt.is_empty() || alt.is_empty() {
+    // Most modules have one wording, and while another module is on its second, asking
+    // which of one is showing would hash this module's name for an answer that cannot be
+    // anything but the first.
+    if module.format_alt.is_empty() {
         return &module.format;
     }
     wording_at(module, alt.get(&module.name).copied().unwrap_or(0))
@@ -1036,10 +1037,7 @@ fn collect<'g, 'i>(group: &'g GroupCfg, inputs: &Inputs<'i>) -> Vec<Candidate<'g
             Source::Native(which) => {
                 // Which of the readings this module is scrolled to. A source that
                 // published one has one, and the page is always that one.
-                let page = match inputs.pages.is_empty() {
-                    true => 0,
-                    false => inputs.pages.get(&module.name).copied().unwrap_or(0),
-                };
+                let page = inputs.pages.get(&module.name).copied().unwrap_or(0);
                 // A collector that has not read yet has nothing to show, which is the same
                 // as a provider that has not spoken: the module simply is not there. A
                 // command with its first run still out is the exception, because it has a
