@@ -134,6 +134,8 @@ The current bar supports:
   and padding set per side, and exclusive zones;
 - autohide, which shrinks the bar to a transparent strip on its edge until the
   pointer reaches it, with a realtime signal that pins it in view;
+- `reload_signal`, a realtime signal that makes dbar read its config file again
+  and apply everything in it that does not need a worker started or stopped;
 - per-output bars and output-scoped compositor data;
 - left, centre and right runs of named groups;
 - named style inheritance plus per-module and state overrides;
@@ -247,6 +249,21 @@ that can be checked.
 Unknown keys, invalid field references, incompatible options, conflicting
 button assignments, and impossible geometry are configuration errors. A key
 that cannot do anything should be rejected rather than accepted and ignored.
+
+Validation runs at startup and, for a bar configured with `reload_signal`, again
+whenever that signal arrives. The two differ only in what a failure costs: at
+startup it is an exit before the Wayland session opens, and at runtime it is a
+logged error and a bar that goes on showing the last file that made sense. A
+reload never takes the bar down, and never leaves it half configured.
+
+A reload applies everything or nothing. Presentation - wording, colours, styles,
+formats, spacing, separators, geometry, outputs - is re-read and redrawn.
+Anything that was decided once by something outside the config layer - a source,
+an interval, a signal, the tray, what is read from the compositor, the i3bar
+provider - is refused as a whole, naming the key that asked, because starting and
+stopping workers at runtime is out of scope. Half a config file taking effect is
+worse than none of it: a file where some keys are live and some wait for a
+restart cannot be read with confidence.
 
 ## 6. Source strategy
 
@@ -402,9 +419,9 @@ dbar itself starts workers only for features the resolved configuration needs:
 - one shared kernel-watch worker for watchable sources;
 - one worker per command source, and one per sampled source whose read can
   block indefinitely; and
-- one shared signal listener when realtime refresh signals or click commands
-  are configured. It forwards `SIGCHLD` so the event loop can reap only the
-  click-launched children it owns.
+- one shared signal listener when realtime refresh signals, a reload signal or
+  click commands are configured. It forwards `SIGCHLD` so the event loop can
+  reap only the click-launched children it owns.
 
 The signal listener is independent of the tray. Enabling a tray still starts
 one tray worker, regardless of the number of tray items or menus.
@@ -706,6 +723,13 @@ source contract provides that path.
 Command sources have an explicit timeout. A failed streaming command is
 reported and restarted with bounded backoff. Provider shutdown and malformed
 provider input must not corrupt native source state.
+
+A config that no longer parses, or that asks for something only a restart can
+give, leaves the running configuration in place; the bar keeps drawing and the
+reason is logged. Per-module state kept between frames - which wording is
+showing, which page is scrolled to, what is folded - is held by name, so a
+module that survives a reload keeps what it was doing and one that is gone takes
+its state with it.
 
 Wayland presentation only replaces the remembered on-screen `Frame` after a
 buffer was successfully painted and committed. Failed draws remain dirty and

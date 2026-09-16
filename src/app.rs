@@ -429,6 +429,10 @@ pub struct App {
     qh: QueueHandle<App>,
 
     config: Config,
+    /// The file the config came from, for reading it again on a signal. `None` is the
+    /// built-in default, and re-reading then looks where a config file would have been:
+    /// one written since dbar started is found, rather than ignored until a restart.
+    config_path: Option<std::path::PathBuf>,
     /// What the renderer keeps between frames: the text backend and its spare layer.
     painter: render::Painter,
     /// The external status provider, when the config asks for one.
@@ -566,6 +570,7 @@ impl App {
             conn,
             qh: qh.clone(),
             config,
+            config_path: None,
             painter: render::Painter::new(text),
             native: Registry::new(&config_collectors),
             alt: std::collections::HashMap::new(),
@@ -685,6 +690,11 @@ impl App {
         self.triggers.insert(which, trigger);
     }
 
+    /// Which file to read again when the reload signal arrives.
+    pub fn set_config_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.config_path = path;
+    }
+
     /// Read again whatever a signal asks for.
     ///
     /// The timer that was already scheduled still fires at its old deadline; it finds
@@ -693,6 +703,10 @@ impl App {
     pub fn on_signal(&mut self, offset: i32) {
         if self.config.bar.autohide_signal == Some(offset) {
             self.toggle_pinned();
+            return;
+        }
+        if self.config.bar.reload_signal == Some(offset) {
+            self.reload();
             return;
         }
         let Some(sources) = self.signals.get(&offset) else {
@@ -1384,6 +1398,147 @@ impl App {
             {
                 self.place_bar(i);
             }
+        }
+    }
+
+    /// Read the config file again, and show what it now says.
+    ///
+    /// A file that no longer parses leaves the running config alone: what is on screen is
+    /// the last version that made sense, and the error says what to fix. A reload is never
+    /// allowed to take the bar down, which is the whole difference between reading a config
+    /// at startup and reading one at three in the morning.
+    pub fn reload(&mut self) {
+        let new = match Config::load(self.config_path.as_deref()) {
+            Ok(new) => new,
+            Err(e) => {
+                log::error!("the config was not re-read, so the bar is unchanged: {e:#}");
+                return;
+            }
+        };
+        if let Some(what) = self.config.needs_restart_for(&new) {
+            log::warn!(
+                "nothing was reloaded: {what} changed, which needs a restart; the bar is \
+                 still showing the config it started with"
+            );
+            return;
+        }
+        self.reconfigure(new);
+        log::info!("the config was read again");
+    }
+
+    /// Take a config that only changed wording, colour and geometry.
+    ///
+    /// Everything a module keeps between frames is held by name - which wording it is
+    /// showing, which page it is scrolled to, whether it is folded - so a module that is
+    /// still in the file keeps what it was doing, and one that is gone takes its state with
+    /// it. Nothing here starts, stops or asks anything of a worker: that is what
+    /// `needs_restart_for` refused on the way in.
+    fn reconfigure(&mut self, new: Config) {
+        let refont = (
+            self.config.bar.font_family.clone(),
+            self.config.bar.font_size,
+            self.config.bar.font_fallback.clone(),
+        ) != (
+            new.bar.font_family.clone(),
+            new.bar.font_size,
+            new.bar.font_fallback.clone(),
+        );
+        // A layer is chosen when a surface is made and cannot be moved afterwards, so this
+        // is the one geometry change that costs new surfaces.
+        let relayer = self.config.bar.layer != new.bar.layer;
+        let rehide = self.config.bar.autohide != new.bar.autohide;
+        self.config = new;
+        self.travels = Travels::default();
+
+        if refont {
+            let bar = &self.config.bar;
+            match TextRenderer::new(&bar.font_family, bar.font_size, &bar.font_fallback) {
+                // Shaped runs and rasterised icons were measured against the old font, so
+                // the caches go with it. One shaping pass on the next frame, and nothing
+                // kept that was made for a file that is gone.
+                Ok(text) => self.painter = render::Painter::new(text),
+                Err(e) => log::error!("keeping the font already loaded: {e:#}"),
+            }
+        } else {
+            self.painter.forget_icons();
+        }
+
+        self.forget_missing();
+        match relayer {
+            true => self.rebuild_bars(),
+            false => self.replace_bars(rehide),
+        }
+        self.warn_if_nowhere();
+        self.invalidate();
+    }
+
+    /// Drop what was being kept for a module or group the config no longer has.
+    ///
+    /// A renamed module is a new one here, and starts open, unfolded and on its first page.
+    fn forget_missing(&mut self) {
+        let modules: std::collections::HashSet<&str> =
+            self.config.modules().map(|m| m.name.as_str()).collect();
+        let groups: std::collections::HashSet<&str> = self
+            .config
+            .positions
+            .iter()
+            .flat_map(|p| &p.groups)
+            .map(|g| g.name.as_str())
+            .collect();
+        self.alt.retain(|name, _| modules.contains(name.as_str()));
+        self.pages.retain(|name, _| modules.contains(name.as_str()));
+        self.collapsed
+            .retain(|name| modules.contains(name.as_str()));
+        self.collapsed_groups
+            .retain(|name| groups.contains(name.as_str()));
+    }
+
+    /// Give every bar new surfaces, for the one change a surface cannot be told about.
+    fn rebuild_bars(&mut self) {
+        let outputs: Vec<wl_output::WlOutput> =
+            self.bars.iter().map(|bar| bar.output.clone()).collect();
+        for output in &outputs {
+            self.drop_bar(output);
+        }
+        for output in outputs {
+            self.add_bar(output);
+        }
+    }
+
+    /// Put the bars that exist where the new config wants them, and judge every screen
+    /// again: a config that named other outputs moves the bar rather than only resizing it.
+    fn replace_bars(&mut self, rehide: bool) {
+        for output in self.output_state.outputs().collect::<Vec<_>>() {
+            let name = self
+                .output_state
+                .info(&output)
+                .and_then(|info| info.name.clone());
+            let here = self.bars.iter().any(|bar| bar.output == output);
+            match (here, self.config.bar.shows_on(name.as_deref())) {
+                (true, false) => self.drop_bar(&output),
+                (false, true) => self.add_bar(output),
+                _ => {}
+            }
+        }
+        for i in 0..self.bars.len() {
+            // A bar that is already hiding keeps where it is in that: a reload is not a
+            // reason for the bar under the pointer to disappear.
+            if rehide {
+                self.bars[i].autohide = self.config.bar.autohide.map(Autohide::new);
+            }
+            let info = self.output_state.info(&self.bars[i].output);
+            self.bars[i].span = span_on(
+                &self.config.bar,
+                info.as_ref().and_then(|info| info.logical_size),
+            );
+            self.bars[i].height = self.config.bar.height;
+            let cfg = &self.config.bar;
+            self.bars[i].layer.set_exclusive_zone(if cfg.exclusive {
+                cfg.height as i32 + cfg.edge_margins().1
+            } else {
+                0
+            });
+            self.place_bar(i);
         }
     }
 

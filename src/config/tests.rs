@@ -2197,6 +2197,107 @@ fn autohide_refuses_what_would_leave_the_bar_in_the_way_or_out_of_reach() {
 }
 
 #[test]
+fn a_bar_reads_its_config_again_only_when_a_signal_is_named_for_it() {
+    // No key, no offset for main to watch, and so no listener thread at all.
+    assert_eq!(Config::parse("").unwrap().bar.reload_signal, None);
+    assert_eq!(
+        Config::parse("[bar]\nreload_signal = 6\n")
+            .unwrap()
+            .bar
+            .reload_signal,
+        Some(6)
+    );
+}
+
+#[test]
+fn the_reload_signal_refuses_what_this_machine_does_not_have_or_already_means() {
+    let e = Config::parse("[bar]\nreload_signal = -1\n").expect_err("no such signal");
+    assert!(format!("{e:#}").contains("SIGRTMIN"), "{e:#}");
+
+    let config = one_module("source = \"backlight\"\nsignal = 3\n")
+        .replace("height = 30", "height = 30\nreload_signal = 3");
+    let e = Config::parse(&config).expect_err("one signal meaning two things");
+    assert!(format!("{e:#}").contains("reload_signal 3"), "{e:#}");
+
+    let config = one_module("source = \"backlight\"\nsignal = 3\n").replace(
+        "height = 30",
+        "height = 30\nautohide = true\nautohide_signal = 4\nreload_signal = 4",
+    );
+    let e = Config::parse(&config).expect_err("the bar's two signals are the same");
+    assert!(format!("{e:#}").contains("reload_signal 4"), "{e:#}");
+
+    let config = one_module("source = \"backlight\"\nsignal = 3\n").replace(
+        "height = 30",
+        "height = 30\nautohide = true\nautohide_signal = 4\nreload_signal = 5",
+    );
+    assert!(Config::parse(&config).is_ok());
+}
+
+#[test]
+fn a_reload_takes_wording_and_colour_and_refuses_what_a_worker_was_started_for() {
+    let base = one_module("source = \"cpu\"\n");
+    let old = Config::parse(&base).unwrap();
+
+    // Presentation is the whole point of a reload: same source, different bar.
+    let restyled = one_module("source = \"cpu\"\nformat = \"cpu $utilization.n(d: 1)\"\n")
+        .replace("height = 30", "height = 44");
+    let new = Config::parse(&restyled).unwrap();
+    assert_eq!(old.needs_restart_for(&new), None);
+
+    // A module put next to the one that is already there, for the sources that are not
+    // read on a schedule and so would not show up as a collector changing.
+    let beside = |body: &str| {
+        base.replace("modules = [\"m\"]", "modules = [\"m\", \"x\"]")
+            .replace("[module.m]", &format!("[module.x]\n{body}\n\n[module.m]"))
+    };
+
+    // Each of these was decided once, by something outside the config layer.
+    for (config, expected) in [
+        (base.replace("\"cpu\"", "\"memory\""), "source or interval"),
+        (
+            base.replace("source = \"cpu\"", "source = \"cpu\"\ninterval = \"9s\""),
+            "source or interval",
+        ),
+        (
+            base.replace("source = \"cpu\"", "source = \"cpu\"\nsignal = 2"),
+            "signal",
+        ),
+        (
+            base.replace("height = 30", "height = 30\nreload_signal = 7"),
+            "reload_signal",
+        ),
+        (
+            base.replace(
+                "source = \"cpu\"",
+                "source = \"cpu\"\non_click = { left = [\"true\"] }",
+            ),
+            "click runs a program",
+        ),
+        (beside("source = \"tray\""), "tray"),
+        (beside("source = \"workspaces\""), "compositor"),
+    ] {
+        let new = Config::parse(&config).expect(&config);
+        let what = old.needs_restart_for(&new).expect(&config);
+        assert!(what.contains(expected), "{config}: said {what}");
+    }
+}
+
+#[test]
+fn icon_size_is_presentation_until_a_tray_has_been_drawn_at_it() {
+    // A tray item's artwork is resolved once, at the size and in the theme the worker was
+    // started with, so those two stop being ordinary style keys when a tray exists.
+    let plain = one_module("source = \"cpu\"\n");
+    let old = Config::parse(&plain).unwrap();
+    let new = Config::parse(&plain.replace("height = 30", "height = 30\nicon_size = 22")).unwrap();
+    assert_eq!(old.needs_restart_for(&new), None);
+
+    let tray = one_module("source = \"tray\"\n");
+    let old = Config::parse(&tray).unwrap();
+    let new = Config::parse(&tray.replace("height = 30", "height = 30\nicon_size = 22")).unwrap();
+    assert_eq!(old.needs_restart_for(&new).as_deref(), Some("the tray"));
+}
+
+#[test]
 fn the_autohide_signal_cannot_also_refresh_a_module() {
     let config = one_module("source = \"backlight\"\nsignal = 3\n").replace(
         "height = 30",

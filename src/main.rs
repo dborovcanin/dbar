@@ -332,6 +332,9 @@ fn main() -> Result<()> {
     // now rather than when the interval next comes round.
     let mut offsets: Vec<i32> = config.signals().keys().copied().collect();
     offsets.extend(config.bar.autohide_signal);
+    // Reading the config again is a signal like any other, and costs the same nothing when
+    // the config asks for none: no key, no offset, no listener.
+    offsets.extend(config.bar.reload_signal);
     let click_programs = config.modules().any(|module| module.on_click.is_some());
     // Which sources a click or a signal can ask for another reading, so a command that
     // nothing can ask keeps no thread waiting to be asked.
@@ -342,6 +345,9 @@ fn main() -> Result<()> {
     let tray_size = config.bar.icon_size.round().max(1.0) as u32;
     let tray_theme = config.bar.icon_theme.clone();
     let mut app = App::new(&globals, &qh, conn.clone(), config, provider)?;
+    // Which file to read again on the reload signal. `None` is the built-in default, and
+    // re-reading then looks where a config file would be.
+    app.set_config_path(args.config.clone());
 
     if listening {
         handle

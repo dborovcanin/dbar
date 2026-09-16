@@ -385,6 +385,9 @@ struct RawBar {
     /// The realtime signal, counted from SIGRTMIN, that pins a hiding bar in view or lets
     /// it hide again.
     autohide_signal: Option<i32>,
+    /// The realtime signal, counted from SIGRTMIN, that makes dbar read its config file
+    /// again. Absent means the bar watches for nothing and keeps no listener for it.
+    reload_signal: Option<i32>,
     /// Which screens to appear on, named the way the compositor names them: "DP-1".
     /// Empty, or a single "*", is every screen there is and every one plugged in later.
     #[serde(default)]
@@ -812,6 +815,7 @@ impl Default for RawBar {
             autohide: false,
             autohide_delay: None,
             autohide_signal: None,
+            reload_signal: None,
             outputs: Vec::new(),
             icon_theme: default_icon_theme(),
         }
@@ -876,6 +880,8 @@ pub struct Bar {
     pub autohide: Option<Duration>,
     /// The signal offset that pins a hiding bar in view, or lets it hide again.
     pub autohide_signal: Option<i32>,
+    /// The signal offset that makes dbar read its config file again.
+    pub reload_signal: Option<i32>,
     /// The screens this bar appears on, empty for all of them.
     pub outputs: Vec<String>,
     /// Which icon theme a tray item's named icon is looked for in.
@@ -1757,6 +1763,63 @@ impl Config {
         })
     }
 
+    /// What a re-read config asks for that only a restart can give, or `None` when the
+    /// difference is all wording, colour and geometry.
+    ///
+    /// Everything named here was decided once, at startup, by something outside the config
+    /// layer: a worker thread, a channel in the event loop, a signal the process is
+    /// watching, a child program. Changing one of those while the bar runs means starting
+    /// and stopping workers at runtime, which dbar deliberately does not do - so a reload
+    /// that would need it applies nothing at all and says which key wanted it. All or
+    /// nothing, because a config file where half the keys take effect and half wait for a
+    /// restart is a file nobody can read with confidence.
+    pub fn needs_restart_for(&self, new: &Config) -> Option<String> {
+        if self.collectors() != new.collectors() {
+            return Some("a module's source or interval".to_string());
+        }
+        if self.signals() != new.signals() {
+            return Some("a module's signal".to_string());
+        }
+        if self.refreshable() != new.refreshable() {
+            return Some("which sources a click or signal can refresh".to_string());
+        }
+        if self.bar.autohide_signal != new.bar.autohide_signal
+            || self.bar.reload_signal != new.bar.reload_signal
+        {
+            return Some("[bar] autohide_signal or reload_signal".to_string());
+        }
+        let clicks = |c: &Config| c.modules().any(|module| module.on_click.is_some());
+        if clicks(self) != clicks(new) {
+            return Some("whether a click runs a program".to_string());
+        }
+        if self.needs_provider() != new.needs_provider()
+            || (self.needs_provider()
+                && (self.i3bar.command != new.i3bar.command
+                    || self.i3bar.args != new.i3bar.args
+                    || self.i3bar.names != new.i3bar.names))
+        {
+            return Some("the [i3bar] provider".to_string());
+        }
+        if self.needs_language() != new.needs_language()
+            || self.needs_mode() != new.needs_mode()
+            || self.needs_windows() != new.needs_windows()
+            || self.needs_workspaces() != new.needs_workspaces()
+        {
+            return Some("what the bar reads from the compositor".to_string());
+        }
+        // A tray's artwork is resolved once, at the size and in the theme the bar asked
+        // for when its worker started. Both are ordinary presentation keys for a bar
+        // without one, and neither is worth a restart then.
+        if self.needs_tray() != new.needs_tray()
+            || (self.needs_tray()
+                && (self.bar.icon_size != new.bar.icon_size
+                    || self.bar.icon_theme != new.bar.icon_theme))
+        {
+            return Some("the tray".to_string());
+        }
+        None
+    }
+
     pub fn parse(text: &str) -> Result<Config> {
         let raw: RawConfig = toml::from_str(text).context("parsing config")?;
         let palette = Palette::new(&raw.colors)?;
@@ -1788,6 +1851,7 @@ impl Config {
             exclusive: raw.bar.exclusive.unwrap_or(autohide.is_none()),
             autohide,
             autohide_signal: raw.bar.autohide_signal,
+            reload_signal: raw.bar.reload_signal,
             outputs: raw.bar.outputs.clone(),
             icon_theme: raw.bar.icon_theme.clone(),
         };
@@ -1883,6 +1947,21 @@ impl Config {
                  one of its own"
             );
         }
+        if let Some(offset) = config.bar.reload_signal {
+            check_signal_offset("reload_signal", offset)?;
+            if config.signals().contains_key(&offset) {
+                bail!(
+                    "[bar] reload_signal {offset} is already a module's signal; give the \
+                     reload one of its own"
+                );
+            }
+            if config.bar.autohide_signal == Some(offset) {
+                bail!(
+                    "[bar] reload_signal {offset} is also autohide_signal; one signal \
+                     cannot both show the bar and re-read the config"
+                );
+            }
+        }
         Ok(config)
     }
 
@@ -1932,6 +2011,18 @@ impl Config {
             },
         }
     }
+}
+
+/// Refuse a signal this machine does not have, naming the key that asked for it.
+fn check_signal_offset(key: &str, offset: i32) -> Result<()> {
+    let highest = signal_range();
+    if offset < 0 || offset > highest {
+        bail!(
+            "[bar] asks for {key} {offset}, but only 0 to {highest} exist on this system; \
+             they are counted from SIGRTMIN"
+        );
+    }
+    Ok(())
 }
 
 /// How many realtime signals this system has above SIGRTMIN.
@@ -2083,13 +2174,7 @@ fn parse_autohide(raw: &RawBar) -> Result<Option<Duration>> {
         );
     }
     if let Some(offset) = raw.autohide_signal {
-        let highest = signal_range();
-        if offset < 0 || offset > highest {
-            bail!(
-                "[bar] asks for autohide_signal {offset}, but only 0 to {highest} exist on \
-                 this system; they are counted from SIGRTMIN"
-            );
-        }
+        check_signal_offset("autohide_signal", offset)?;
     }
     match &raw.autohide_delay {
         Some(written) => parse_duration(written)

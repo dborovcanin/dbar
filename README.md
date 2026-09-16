@@ -128,6 +128,7 @@ root at all.
   margin and padding set per side, and an exclusive zone
 - autohide: the bar stays out of sight until the pointer reaches its edge, with a
   realtime signal to pin it in view from a keybinding
+- `reload_signal`: re-read the config file without restarting the bar
 - per-pixel transparency, so SwayFX blur shows through
 - text rendering with shaping and font fallback (`cosmic-text`)
 - native collectors for cpu, memory, battery, backlight, load, temperature,
@@ -1083,6 +1084,28 @@ signal = 8            # counted from SIGRTMIN
 ```sh
 brightnessctl set +10%; pkill -RTMIN+8 dbar
 ```
+
+`reload_signal` is the same idea for the config file itself. A theme script that
+rewrites colours, or an editor you have just saved in, can put the change on
+screen without restarting the bar - which matters most for a tray, since a
+restart makes every application register with it again:
+
+```toml
+[bar]
+reload_signal = 6
+```
+
+```sh
+pkill -RTMIN+6 dbar
+```
+
+Wording, colours, styles, formats, spacing, separators and the bar's geometry
+are taken. Sources, intervals, signals, the tray, what is read from the
+compositor and the i3bar provider are not: each was started once, so a reload
+that would need a worker started or stopped applies nothing at all and logs
+which key wanted it. A file that no longer parses leaves the running bar alone
+and logs the error, so a typo at three in the morning costs a message rather
+than the bar.
 
 `refresh_button` is the same job from the bar itself: a button given to reading
 the source again, for what is worth asking for rather than sampling.

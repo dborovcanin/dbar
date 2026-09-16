@@ -1743,6 +1743,16 @@ impl<T: DrawText> Painter<T> {
             icons: IconCache::new(),
         }
     }
+
+    /// Throw away the rasterised icons, for a config that has just been read again.
+    ///
+    /// An icon is cached under the name and size it was drawn for, so a stale entry is
+    /// never handed out - but a theme or a colour that has changed leaves artwork behind
+    /// that nothing will ask for again, and it is cheaper to redraw the few on screen than
+    /// to keep the ones that are gone.
+    pub fn forget_icons(&mut self) {
+        self.icons = IconCache::new();
+    }
 }
 
 /// The layer, at least `width` x `height`.
