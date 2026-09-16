@@ -255,13 +255,13 @@ impl State {
     fn desktop(&self, watching: Watching) -> Desktop {
         let occupied: HashSet<u64> = self.windows.values().filter_map(|h| h.workspace).collect();
         // niri keeps an empty workspace below the last one in use on every screen, so there is
-        // always somewhere to open a window. Listed, it is a number that never holds anything,
-        // so it is left off until a screen is showing it. A workspace the config named is
-        // listed whether or not anything is on it, marked empty for the module to decide.
+        // always somewhere to open a window, and one for every name its config gives. Listed,
+        // they are names that hold nothing, so an empty one is left off until a screen is
+        // showing it - the rule sway keeps by removing such a workspace itself.
         let mut listed: Vec<&NiriWorkspace> = self
             .workspaces
             .values()
-            .filter(|w| w.is_active || w.name.is_some() || occupied.contains(&w.id))
+            .filter(|w| w.is_active || occupied.contains(&w.id))
             .collect();
         listed.sort_by(|a, b| (&a.output, a.idx).cmp(&(&b.output, b.idx)));
         let workspaces = listed
@@ -273,7 +273,6 @@ impl State {
                 focused: w.is_focused,
                 visible: w.is_active,
                 urgent: w.is_urgent,
-                empty: !occupied.contains(&w.id),
             })
             .collect();
 
@@ -490,8 +489,6 @@ mod tests {
         let desktop = state.desktop(EVERYTHING);
         assert_eq!(names(&desktop), ["chat", "2"]);
         assert_eq!(desktop.workspaces[0].id, 1);
-        assert!(!desktop.workspaces[0].empty);
-        assert!(desktop.workspaces[1].empty);
         assert!(!desktop.workspaces[0].visible);
         assert!(
             desktop.workspaces[1].focused && desktop.workspaces[1].visible,
@@ -616,6 +613,20 @@ mod tests {
             let event = serde_json::from_str(line).expect("an event dbar ignores still parses");
             assert!(!state.apply(event, EVERYTHING), "{line}");
         }
+    }
+
+    /// A workspace niri keeps because its config names it is still empty, and is left off
+    /// like any other until a screen is showing it.
+    #[test]
+    fn a_named_workspace_with_nothing_on_it_is_left_off() {
+        let mut state = State::default();
+        replay(
+            &mut state,
+            &[r#"{"WorkspacesChanged":{"workspaces":[
+                    {"id":1,"idx":1,"name":"chat","output":"DP-1","is_urgent":false,"is_active":false,"is_focused":false,"active_window_id":null},
+                    {"id":2,"idx":2,"name":"web","output":"DP-1","is_urgent":false,"is_active":true,"is_focused":true,"active_window_id":null}]}}"#],
+        );
+        assert_eq!(names(&state.desktop(EVERYTHING)), ["web"]);
     }
 
     /// Two screens: each lists its own workspaces in order, an unnamed one is called by its

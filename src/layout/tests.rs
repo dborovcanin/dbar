@@ -238,47 +238,6 @@ padding = 0
     assert_eq!(on(None), ["1", "2", "3"]);
 }
 
-/// A workspace kept open with nothing on it - niri keeps every one its config names - is
-/// noise on the bar until a screen is on it, unless the module asks for the empty ones.
-#[test]
-fn an_empty_workspace_is_listed_only_while_a_screen_shows_it() {
-    let config = |show_empty: bool| {
-        format!(
-            r##"
-[left]
-groups = ["g"]
-
-[group.g]
-modules = ["ws"]
-
-[module.ws]
-source = "workspaces"
-scope = "session"
-show_empty = {show_empty}
-padding = 0
-"##
-        )
-    };
-    let mut desktop = two_screens();
-    desktop.workspaces[1].empty = true;
-    desktop.workspaces[2].empty = true;
-    let names = |show_empty: bool| {
-        let frame = workspaces_on(
-            &config(show_empty),
-            &desktop,
-            &Default::default(),
-            &Default::default(),
-        );
-        wordings(&frame)
-            .into_iter()
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    };
-
-    assert_eq!(names(false), ["1", "2"], "2 is empty but on screen");
-    assert_eq!(names(true), ["1", "2", "3"]);
-}
-
 /// One frame of a bar whose only module is `workspaces`, on the two screens the
 /// other compositor tests use.
 fn workspaces(
@@ -286,20 +245,12 @@ fn workspaces(
     switching: &std::collections::HashMap<String, Leaving>,
     collapsed: &std::collections::HashSet<String>,
 ) -> Frame {
-    workspaces_on(config, &two_screens(), switching, collapsed)
-}
-
-fn workspaces_on(
-    config: &str,
-    desktop: &Desktop,
-    switching: &std::collections::HashMap<String, Leaving>,
-    collapsed: &std::collections::HashSet<String>,
-) -> Frame {
     let cfg = Config::parse(config).expect("test config parses");
+    let desktop = two_screens();
     let inputs = Inputs {
         items: &[],
         native: &Registry::new(&Default::default()),
-        desktop,
+        desktop: &desktop,
         alt: &Default::default(),
         pages: &Default::default(),
         collapsed_groups: &Default::default(),
@@ -637,7 +588,6 @@ fn two_screens() -> Desktop {
             focused,
             visible,
             urgent: false,
-            empty: false,
         };
     Desktop {
         workspaces: vec![
@@ -3263,7 +3213,6 @@ fn benchmark_native_layout() {
                 focused: i == 2,
                 visible: i == 2,
                 urgent: false,
-                empty: false,
             })
             .collect(),
         windows: [(

@@ -84,8 +84,6 @@ pub struct TrayView {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceView {
     pub scope: Scope,
-    /// Whether a workspace with nothing on it is listed while no screen is showing it.
-    pub show_empty: bool,
     /// Workspace name to decoration. `default` is used when no exact name is present.
     /// A workspace mapped to nothing wears nothing, which is what `none` writes.
     pub icons: BTreeMap<String, Option<IconSpec>>,
@@ -651,9 +649,6 @@ struct RawModule {
     /// How much of the session a compositor module is about: `output`, which is the screen
     /// this bar is on, or `session`. Defaults to the screen.
     scope: Option<Scope>,
-    /// Whether a `workspaces` module lists a workspace with no windows that no screen is
-    /// showing. Defaults to leaving it off.
-    show_empty: Option<bool>,
     /// Whether a `tray` module draws the items whose applications say they are passive.
     /// Defaults to showing them, which is what the bar always did.
     show_passive: Option<bool>,
@@ -2227,7 +2222,6 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
             }
             Source::Workspaces(WorkspaceView {
                 scope: raw.and_then(|m| m.scope).unwrap_or_default(),
-                show_empty: raw.and_then(|m| m.show_empty).unwrap_or(false),
                 icons,
             })
         }
@@ -2373,11 +2367,6 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
         (
             "icons",
             raw.is_some_and(|m| !m.icons.is_empty()),
-            "workspaces",
-        ),
-        (
-            "show_empty",
-            raw.is_some_and(|m| m.show_empty.is_some()),
             "workspaces",
         ),
         (

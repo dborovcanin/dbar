@@ -1214,9 +1214,7 @@ fn collect<'g, 'i>(group: &'g GroupCfg, inputs: &Inputs<'i>) -> Vec<Candidate<'g
             }
             Source::Workspaces(view) => {
                 for workspace in &inputs.desktop.workspaces {
-                    if !inputs.on_this_screen(view.scope, &workspace.output)
-                        || (workspace.empty && !workspace.visible && !view.show_empty)
-                    {
+                    if !inputs.on_this_screen(view.scope, &workspace.output) {
                         continue;
                     }
                     let mut fields = Fields::default();
