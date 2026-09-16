@@ -25,6 +25,11 @@ in either as a bug.
   things that are genuinely sampled, like cpu utilisation and throughput.
 - Collectors share one timer. It wakes at the earliest deadline, reads everything due, and
   redraws once. Adding a source must not add a wake-up.
+- No activity, no timer, no wake-up. The separate ephemeral timers - collection, command
+  spinners, fold and wording travel, submenu grace, autohide - exist so each can stop
+  existing, and so animation can never turn the collector schedule into a frame clock. A
+  timer is created by the thing that needs it and dropped on the event that ends it; if you
+  cannot say what drops it, do not add it.
 - Watch allocation on the per-frame path. Layout and rendering run on every redraw; anything
   that allocates there is paid for repeatedly, forever.
 - Measure before and after anything that could matter. `/proc/PID/status` for `RssAnon`,
@@ -38,7 +43,10 @@ in either as a bug.
   tz database), `resvg` (icon themes ship their artwork as SVG, and a tray draws whatever an
   application points at; text and raster images are turned off), `signal-hook` and `libc`
   (realtime signals, child-exit notifications and low-level Unix I/O), `anyhow`, `log`,
-  `env_logger`.
+  `env_logger`. `resvg` and `tiny-skia` are version-aligned on purpose: a mismatch links two
+  rasterisers, two path stacks and two PNG decoders into the binary. Move one only with the
+  other. Footprint claims are made against the release profile only (`lto`,
+  `codegen-units = 1`, `strip`, `panic = "abort"`).
 
 Known and accepted: a changed frame repaints the whole shm buffer, although compositor damage
 is limited to changed groups. Layout runs again, while shaped and rasterised text is reused
@@ -51,13 +59,22 @@ machinery if measurement shows a material cost.
 config -> source state -> typed fields -> formatter -> layout -> Frame -> backend
 ```
 
-Two rules hold the whole design together:
+Three rules hold the whole design together:
 
 - **Protocol parsing ends at the source boundary.** i3bar blocks become `StatusItem`s, native
   collectors publish `Reading`s, and the compositor and tray keep their own typed state. Layout receives
   those current states through `Inputs`; no protocol object or I/O operation reaches geometry.
 - **Nothing below `Frame` knows about config, formats or protocols.** `Frame` is positioned
   geometry and colour, so the renderer can be replaced without touching anything above it.
+- **A module is data, formatting and interaction, never a widget.** It picks a source, names a
+  format, declares state rules and takes pointer actions. It does not nest, hold children, lay
+  itself out, own geometry or draw. Placement is the group's; painting is the renderer's.
+
+The flow is one-way, and each layer is ignorant of the next but one. A collector does not know
+padding exists. A formatter does not know Wayland exists. The renderer does not know
+`/proc/stat` exists. A cpu module does not know `tiny-skia` exists. Keeping that true is what
+lets dbar gain features without becoming a UI framework - it is the first rule to defend when a
+feature looks like it needs an exception.
 
 Values stay values. A source publishes typed fields with units; formatting reads them without
 consuming them. Never parse a number back out of text that was written to be looked at - that
@@ -78,7 +95,22 @@ Sway, niri, i3bar, PipeWire, MPRIS and the tray already do. Workers are conditio
 configuration. The single signal listener is also conditional: it exists for realtime refresh
 signals or click commands, whose children it wakes the event loop to reap. It is not part of
 the tray. Commands from the event loop must use bounded or nonblocking delivery so a stalled
-worker cannot stall Wayland dispatch.
+worker cannot stall Wayland dispatch. That bound is semantics, not allocation tuning: a status
+value superseded before it could be drawn has no viewer, so a full queue drops rather than
+grows. An unbounded channel would bank states that never reach a frame and charge memory for
+them.
+
+Thread count is not a vanity metric: single-threaded where that is honest, a worker where the
+obstacle is real. A hung filesystem, a stuck wireless driver, a stalled bus or a slow command
+must never delay the clock, the pointer or Wayland dispatch. A process that sleeps properly
+with ten threads beats one that keeps a smaller count by occasionally freezing its own
+surface.
+
+`main.rs` is the composition root: it wires Wayland, sources, workers, watchers, signals,
+compositor IPC, tray and timers. Explicit wiring beats an abstraction that hides which parts
+exist, so its length is not by itself a problem. The rule is that `main.rs` may know **that**
+something exists and must not know **how** it works. If a behaviour change needs an edit there
+beyond adding or removing a wire, it has been written in the wrong place.
 
 ## 3. Both ways of getting data are first-class
 
@@ -96,7 +128,20 @@ Deliberately absent, and staying absent:
 - CSS, or any styling language. Styles are a small cascade of named tables.
 - An embedded interpreter - no Lua, no JavaScript, no expression language in the config.
 - A widget tree, or arbitrary layout.
+- Containers, nested groups, or any hierarchy below a module. `bar -> run -> group -> module`
+  is flat on purpose, and that flatness is the asset the feature list is resting on.
+- Selector engines, user-defined layout constraints, a plugin ABI, DOM-like shared state, or a
+  general animation engine.
 - Every module Waybar has. dbar covers what a bar is actually for.
+
+The real risk here is not performance. It is feature-driven erosion of that tree: each new
+feature offers expressiveness in exchange for one more level of hierarchy. The answer is a
+format key, a state rule, a source field, a pointer action or a command - never a new level.
+
+Stated plainly, without the competitive framing: Waybar is an extensible Wayland status-bar
+framework, dbar is a purpose-built Wayland status bar. Waybar keeps the lead in module breadth,
+compositor coverage, docs and community. dbar's claim is narrower - native sources,
+event-driven, no toolkit, no stylesheet, no helper process - and worth making only while true.
 
 Scripting does belong here, but as a source rather than a language: a module can run a
 command and take what it prints, which is how anything dbar has no collector for gets onto

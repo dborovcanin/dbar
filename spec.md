@@ -384,6 +384,14 @@ There is no async runtime. `calloop` multiplexes Wayland, timers and channels.
 A thread is acceptable when it isolates genuinely blocking work or owns an
 external connection. A thread per displayed module is not.
 
+Thread count is not a vanity metric. The design is single-threaded where that is
+honest and multi-threaded where the obstacle is real: a hung filesystem, an
+unresponsive wireless driver, a stalled bus connection or a slow user command
+must not delay the clock, the pointer or Wayland dispatch. A process that sleeps
+correctly with a worker per genuinely blocking subsystem is the better program
+than one that keeps a smaller thread count by occasionally freezing its own
+surface.
+
 dbar itself starts workers only for features the resolved configuration needs:
 
 - one PipeWire worker for audio, one session-bus worker for MPRIS, and one
@@ -406,6 +414,13 @@ pipes. The tray's command queue is bounded. If a worker stalls, excess input is
 dropped and logged rather than stopping Wayland dispatch; a rejected menu
 request is not recorded as pending, so a later pointer action can retry it.
 
+Bounded delivery is a semantic decision, not an allocation optimisation. A
+status value that was superseded before it could be drawn has no viewer and no
+worth, so a full queue drops rather than grows. Backpressure keeps the loop
+showing the present; an unbounded channel would accumulate states that will
+never reach a frame and charge memory for them. Every channel out of the event
+loop is therefore bounded or nonblocking.
+
 ### 7.3 Layer boundaries
 
 The practical boundaries are:
@@ -427,9 +442,41 @@ They impose these rules:
 - Hit testing uses the same `Frame` that was drawn.
 - Renderer-neutral icon and separator descriptions remain outside tiny-skia.
 
+The flow is one-way. Each stage knows what it produces for the next one and
+nothing about the stage after that:
+
+- a collector does not know that padding, groups or outputs exist;
+- a formatter does not know that Wayland exists;
+- the renderer does not know that `/proc/stat` exists; and
+- a CPU module does not know that tiny-skia exists.
+
+The invariant underneath those is that **a module is data, formatting and
+interaction, and never a widget.** A module selects a source, names a format,
+declares state rules and accepts pointer actions. It does not nest, hold
+children, lay itself out, own geometry or draw. Placement belongs to its group,
+painting belongs to the renderer, and a module that needs either is a feature
+that has been put at the wrong layer. This rule is what allows dbar to keep
+gaining features without gaining a UI framework, and it is the first thing to
+defend when a new feature appears to need an exception.
+
 The current renderer is a direct CPU/shm implementation, not a generic backend
 trait. `Frame` is the seam that keeps another renderer possible if measurement
 ever justifies one; a speculative GPU abstraction is not a current requirement.
+
+### 7.4 The composition root
+
+`main.rs` wires the program: Wayland, status providers, signals, PipeWire, MPRIS,
+kernel watchers, slow and command collectors, compositor IPC, tray and the
+timers. Explicit wiring in one readable place is worth more than an abstraction
+that hides which parts exist, so its length is not by itself a defect.
+
+The rule that keeps it honest is that `main.rs` may know **that** something
+exists and must not know **how** it works. Startup order, conditional
+construction from the resolved configuration, and channel hookup belong there.
+Parsing, scheduling policy, protocol handling and state transitions belong to the
+module that owns them. A behaviour change that requires editing `main.rs` for
+anything beyond adding or removing a wire is a change that has been written in
+the wrong place.
 
 ## 8. Typed status and formatting
 
@@ -593,6 +640,15 @@ pass.
 
 ### 12.1 Idle
 
+The invariant behind every point below is **no activity, no timer, no wake-up.**
+dbar deliberately runs several distinct ephemeral timers - collection, command
+spinners, fold and wording travel, submenu grace and autohide - rather than one
+general scheduler, precisely so that each can cease to exist. Separate mechanisms
+are accepted here because a shared one invites the collector schedule to become a
+frame clock. Each timer is created by the activity that needs it and dropped on
+the event that ends it; a proposed timer whose owner cannot say what drops it
+does not get created.
+
 - A native-only bar runs as one process.
 - A new reading that produces the same frame causes no buffer paint or surface
   commit.
@@ -615,7 +671,7 @@ pass.
 - A slow command delays itself, not the compositor or another collector.
 
 The README records reproducible measurements for the current reference setup.
-The V0 reference workload measured about 21 MB resident, 4.6 MB of its own heap,
+The reference workload measured about 21 MB resident, 4.6 MB of its own heap,
 0.21% of one core at idle, and one process for a native configuration. These are
 regression baselines, not machine-independent ceilings.
 
@@ -628,6 +684,13 @@ count should be reported separately.
 Dependencies are part of the footprint. A new dependency needs a concrete
 capability or a substantial correctness benefit that is unreasonable to provide
 locally.
+
+Dependency *versions* are part of it too. `resvg` and `tiny-skia` are held in
+lockstep deliberately: a mismatch links two rasterisers, two path stacks and two
+PNG decoders into one binary, and neither is small. Move one only with the other.
+The release profile is tuned for a resident desktop process rather than for build
+time - `lto = true`, `codegen-units = 1`, `strip = true`, `panic = "abort"` - and
+footprint claims are made only against that profile.
 
 ## 13. Failure behaviour
 
@@ -667,10 +730,9 @@ scope, architectural constraints, source policy and the rules for future work.
 
 ## 15. Evolution
 
-The current implementation is the V0 baseline. The original native-status plan
-is complete: dbar can operate without an external status process, has typed
-sources and formats, supports the common desktop modules, and keeps i3bar
-compatibility at the boundary.
+The original native-status plan is complete: dbar can operate without an
+external status process, has typed sources and formats, supports the common
+desktop modules, and keeps i3bar compatibility at the boundary.
 
 Future work should be demand-led and incremental:
 
@@ -684,6 +746,23 @@ Future work should be demand-led and incremental:
    it as material.
 5. Introduce a different rendering backend only against a working second
    implementation and measured benefit, not as speculative abstraction.
+
+The standing risk to this project is not performance. It is feature-driven
+erosion of the model. dbar already carries native collectors, compositor
+integration, format expressions, state styling, a tray, media controls, alternate
+wordings, collapse, animation, pages, signals, autohide, app rules, separators
+and pointer routing - a large surface resting on a deliberately tiny conceptual
+tree of bar, run, group, module. The flatness of that tree is the asset, and
+every feature is an invitation to buy expressiveness by deepening it. The answer
+to a new need is a format key, a state rule, a source field, a pointer action or
+a command. It is not a new level of hierarchy.
+
+The positioning follows from that, and is worth stating plainly rather than
+competitively: Waybar is an extensible Wayland status-bar framework, and dbar is
+a purpose-built Wayland status bar. Waybar keeps the advantage in module breadth,
+compositor coverage, documentation and community size. dbar's claim is narrower -
+native sources, event-driven scheduling, no toolkit, no stylesheet, no helper
+process - and it is worth making only while it stays true.
 
 Breaking configuration changes are still possible before a stable release, but
 they are not free merely because the project is young. A change must make the
@@ -717,7 +796,11 @@ must update the default, showcase and README together.
 - Matching every module or widget exposed by a general-purpose bar.
 - CSS or another styling language.
 - Lua, JavaScript or another embedded interpreter.
-- A DOM, widget tree, plugin runtime or arbitrary layout engine.
+- A DOM, widget tree, plugin runtime, plugin ABI or arbitrary layout engine.
+- Containers, nested groups, or any level of hierarchy beneath a module.
+- Selector engines, user-defined layout constraints, or a general animation
+  engine.
+- Modules that nest, own geometry or draw themselves.
 - An async runtime.
 - A helper process for functionality available cheaply through a stable native
   interface.
