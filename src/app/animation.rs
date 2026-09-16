@@ -277,6 +277,15 @@ impl Autohide {
         self.pinned
     }
 
+    /// Take a re-read config's delay without disturbing where the bar is in hiding.
+    ///
+    /// A countdown already running keeps the deadline it was given: moving it would either
+    /// hide a bar early or hold out one that was about to go, and whatever the pointer does
+    /// next starts its countdown at the new delay anyway.
+    pub(super) fn set_delay(&mut self, delay: Duration) {
+        self.delay = delay;
+    }
+
     /// Start counting down again once whatever held the bar out has let go.
     pub(super) fn wait(&mut self, now: Instant, held: bool) {
         let staying = self.hidden || self.hovered || self.pinned || held;

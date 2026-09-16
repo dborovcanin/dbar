@@ -71,17 +71,57 @@ const LINE_WIDTH: f32 = 1.0;
 ///
 /// Returns `None` for degenerate sizes.
 pub fn edged_rect(x: f32, y: f32, w: f32, h: f32, left: f32, right: f32) -> Option<Path> {
-    if w <= 0.0 || h <= 0.0 {
+    let mut pb = PathBuilder::new();
+    match push_edged(&mut pb, x, y, w, h, left, right) {
+        true => pb.finish(),
+        false => None,
+    }
+}
+
+/// The same shape, drawn from buffers that outlive it.
+///
+/// A rounded rectangle is what this renderer draws most - the bar's ground, every island,
+/// every module wearing a background - and more than half the cost of building one is the
+/// two allocations behind it. tiny-skia gives those back with `Path::clear`, so the builder
+/// that made the last rectangle makes the next one, and a bar that redraws forever
+/// allocates for its rectangles once.
+///
+/// The buffers come back on every path this takes but one: a `finish` that refuses the
+/// shape keeps them, and the next call starts from an empty builder again.
+fn edged_with<R>(
+    pool: &mut PathBuilder,
+    (x, y, w, h): (f32, f32, f32, f32),
+    left: f32,
+    right: f32,
+    draw: impl FnOnce(&Path) -> R,
+) -> Option<R> {
+    let mut pb = std::mem::replace(pool, PathBuilder::new());
+    pb.clear();
+    if !push_edged(&mut pb, x, y, w, h, left, right) {
+        *pool = pb;
         return None;
+    }
+    let path = pb.finish()?;
+    let drawn = draw(&path);
+    *pool = path.clear();
+    Some(drawn)
+}
+
+/// Write the rectangle into `pb`, saying whether there was a shape to write.
+fn push_edged(pb: &mut PathBuilder, x: f32, y: f32, w: f32, h: f32, left: f32, right: f32) -> bool {
+    if w <= 0.0 || h <= 0.0 {
+        return false;
     }
     let limit = (w / 2.0).min(h / 2.0);
     let rl = left.clamp(0.0, limit);
     let rr = right.clamp(0.0, limit);
 
-    let mut pb = PathBuilder::new();
     if rl <= 0.0 && rr <= 0.0 {
-        pb.push_rect(Rect::from_xywh(x, y, w, h)?);
-        return pb.finish();
+        let Some(rect) = Rect::from_xywh(x, y, w, h) else {
+            return false;
+        };
+        pb.push_rect(rect);
+        return true;
     }
 
     let (cl, cr) = (rl * KAPPA, rr * KAPPA);
@@ -97,7 +137,7 @@ pub fn edged_rect(x: f32, y: f32, w: f32, h: f32, left: f32, right: f32) -> Opti
     pb.line_to(x0, y0 + rl);
     pb.cubic_to(x0, y0 + rl - cl, x0 + rl - cl, y0, x0 + rl, y0);
     pb.close();
-    pb.finish()
+    true
 }
 
 /// The leading-side region of a separator, drawn right-pointing over the gap rect.
@@ -209,6 +249,7 @@ fn draw_separator(
     scale: f32,
     transform: Transform,
     clip: Option<&Mask>,
+    pool: &mut PathBuilder,
 ) {
     if sep.shape.is_none() {
         return;
@@ -245,6 +286,7 @@ fn draw_separator(
             under,
             transform,
             clip,
+            pool,
         );
     }
 
@@ -405,6 +447,7 @@ struct Tools<'a> {
     mask: &'a mut Option<Mask>,
     icons: &'a mut IconCache,
     text: &'a mut dyn DrawText,
+    paths: &'a mut PathBuilder,
 }
 
 /// Draw an icon through the cache, rasterising it the first time it is seen at this size
@@ -910,20 +953,18 @@ fn clip_mask<'a>(
 fn fill_edged(
     pixmap: &mut PixmapMut<'_>,
     bounds: (f32, f32, f32, f32),
-    left: f32,
-    right: f32,
+    edges: (f32, f32),
     color: Color,
     transform: Transform,
     clip: Option<&Mask>,
+    pool: &mut PathBuilder,
 ) {
     if color.is_transparent() {
         return;
     }
-    let (x, y, w, h) = bounds;
-    let Some(path) = edged_rect(x, y, w, h, left, right) else {
-        return;
-    };
-    fill_path(pixmap, &path, color, transform, clip);
+    edged_with(pool, bounds, edges.0, edges.1, |path| {
+        fill_path(pixmap, path, color, transform, clip);
+    });
 }
 
 fn fill_path(
@@ -950,8 +991,17 @@ fn fill(
     color: Color,
     transform: Transform,
     clip: Option<&Mask>,
+    pool: &mut PathBuilder,
 ) {
-    fill_edged(pixmap, bounds, radius, radius, color, transform, clip);
+    fill_edged(
+        pixmap,
+        bounds,
+        (radius, radius),
+        color,
+        transform,
+        clip,
+        pool,
+    );
 }
 
 /// Render `frame` into a `wl_shm` ARGB8888 buffer.
@@ -1021,6 +1071,7 @@ fn render_menu(
         frame.background,
         transform,
         None,
+        &mut painter.paths,
     );
 
     let Painter { text, icons, .. } = painter;
@@ -1043,6 +1094,7 @@ fn render_menu(
                 row.foreground,
                 transform,
                 None,
+                &mut painter.paths,
             );
             continue;
         }
@@ -1055,6 +1107,7 @@ fn render_menu(
                 row.highlight_color,
                 transform,
                 None,
+                &mut painter.paths,
             );
         }
         if let Some(icon) = &row.icon {
@@ -1196,12 +1249,20 @@ fn render(
         frame.background,
         transform,
         None,
+        &mut painter.paths,
     );
 
     // Joined groups remain independent islands. Draw their shared transitions first,
     // so the neighbouring groups cover the overlap just as modules do inside an island.
     for separator in &frame.group_separators {
-        draw_separator(pixmap, separator, scale, transform, None);
+        draw_separator(
+            pixmap,
+            separator,
+            scale,
+            transform,
+            None,
+            &mut painter.paths,
+        );
     }
 
     // Split up front: drawing an island needs the text backend and the layer at the same
@@ -1211,6 +1272,7 @@ fn render(
         scratch,
         layer_mask,
         icons,
+        paths,
     } = painter;
     let mask = &mut clip.0;
     let (pw, ph) = (pixmap.width(), pixmap.height());
@@ -1234,7 +1296,12 @@ fn render(
                 group,
                 scale,
                 transform,
-                &mut Tools { mask, icons, text },
+                &mut Tools {
+                    mask,
+                    icons,
+                    text,
+                    paths,
+                },
             );
             continue;
         };
@@ -1246,7 +1313,12 @@ fn render(
                 group,
                 scale,
                 transform,
-                &mut Tools { mask, icons, text },
+                &mut Tools {
+                    mask,
+                    icons,
+                    text,
+                    paths,
+                },
             );
             continue;
         };
@@ -1264,6 +1336,7 @@ fn render(
                 mask: layer_mask,
                 icons,
                 text,
+                paths,
             },
         );
         composite(pixmap, layer.as_ref(), (bx, by, bw, bh), group.opacity);
@@ -1332,7 +1405,7 @@ fn draw_group(
             false => None,
         };
         for separator in group.separators.iter().filter(|s| trailing(s)) {
-            draw_separator(pixmap, separator, scale, transform, clip);
+            draw_separator(pixmap, separator, scale, transform, clip, tools.paths);
         }
     }
 
@@ -1427,7 +1500,7 @@ fn draw_group(
         !separator.cap && (group.content_right).is_some_and(|right| separator.x >= right - 0.01)
     };
     for separator in (group.separators.iter()).filter(|s| !trailing(s) && !covered(s)) {
-        draw_separator(pixmap, separator, scale, transform, clip);
+        draw_separator(pixmap, separator, scale, transform, clip, tools.paths);
     }
 
     // Where a module's ground stops. A fold moves that in over the contents, and the fills
@@ -1476,14 +1549,14 @@ fn draw_group(
         fill_edged(
             pixmap,
             (mx0, module.y, mx1 - mx0, module.height),
-            ml,
-            mr,
+            (ml, mr),
             module.background,
             transform,
             match shaped {
                 true => None,
                 false => clip,
             },
+            tools.paths,
         );
         // A wording travel can grow an icon out of a box narrower than the icon itself,
         // and a module fold carries that box over its expanded contents. Marks stop at
@@ -1722,6 +1795,9 @@ pub struct Painter<T = TextRenderer> {
     layer_mask: Option<Mask>,
     /// Rasterised icons, kept between frames.
     icons: IconCache,
+    /// The buffers every rounded rectangle is built in, kept between frames for the reason
+    /// `edged_with` gives.
+    paths: PathBuilder,
 }
 
 /// The clip mask one surface keeps between frames.
@@ -1741,6 +1817,7 @@ impl<T: DrawText> Painter<T> {
             scratch: None,
             layer_mask: None,
             icons: IconCache::new(),
+            paths: PathBuilder::new(),
         }
     }
 

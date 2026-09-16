@@ -364,3 +364,82 @@ fn a_hiding_bar_keeps_its_margin_inside_its_surface_on_the_edge_side() {
     // Before the compositor has answered with the taller size, there is no bar to place.
     assert_eq!(inset(Edge::Top, 3, 1).1, 0);
 }
+
+#[test]
+fn a_reload_keeps_what_a_module_was_doing_and_forgets_a_module_that_is_gone() {
+    let config = crate::config::Config::parse(
+        r#"
+[bar]
+height = 30
+
+[right]
+groups = ["kept", "gone"]
+
+[group.kept]
+modules = ["cpu"]
+
+[group.gone]
+modules = ["weather"]
+
+[module.cpu]
+source = "cpu"
+
+[module.weather]
+source = "cpu"
+"#,
+    )
+    .expect("the config before");
+    let mut alt = std::collections::HashMap::from([
+        ("cpu".to_string(), 1),
+        ("weather".to_string(), 1),
+        ("renamed".to_string(), 2),
+    ]);
+    let mut pages = std::collections::HashMap::from([("weather".to_string(), 3)]);
+    let mut collapsed = std::collections::HashSet::from(["cpu".to_string()]);
+    let mut groups = std::collections::HashSet::from(["kept".to_string(), "gone".to_string()]);
+
+    forget_missing(&config, &mut alt, &mut pages, &mut collapsed, &mut groups);
+    // Everything the file still names is untouched, including a module in a group that is
+    // about to go: the two are kept by different names.
+    assert_eq!(alt.get("cpu"), Some(&1));
+    assert_eq!(alt.get("weather"), Some(&1));
+    assert_eq!(pages.get("weather"), Some(&3));
+    assert!(collapsed.contains("cpu"));
+    assert!(groups.contains("gone"));
+    // A module that was never in the file is gone whether or not a reload happened.
+    assert!(!alt.contains_key("renamed"));
+
+    let smaller = crate::config::Config::parse(
+        r#"
+[bar]
+height = 30
+
+[right]
+groups = ["kept"]
+
+[group.kept]
+modules = ["cpu"]
+
+[module.cpu]
+source = "cpu"
+"#,
+    )
+    .expect("the config after");
+    forget_missing(&smaller, &mut alt, &mut pages, &mut collapsed, &mut groups);
+    assert_eq!(
+        alt.get("cpu"),
+        Some(&1),
+        "a module still there keeps its wording"
+    );
+    assert!(collapsed.contains("cpu"), "and its fold");
+    assert!(
+        !alt.contains_key("weather"),
+        "a module that is gone takes its wording"
+    );
+    assert!(pages.is_empty(), "and its page");
+    assert_eq!(
+        groups.into_iter().collect::<Vec<_>>(),
+        vec!["kept".to_string()],
+        "a group that is gone takes its fold"
+    );
+}

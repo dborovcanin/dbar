@@ -406,6 +406,32 @@ fn place(layer: &LayerSurface, cfg: &crate::config::Bar, span: Option<u32>, hidd
     }
 }
 
+/// Drop what was being kept for a module or group that a re-read config no longer has.
+///
+/// Everything a module keeps between frames is held by its name, so a module still in the
+/// file keeps what it was doing and one that is gone takes its state with it. A renamed
+/// module is a new module here, and starts open, unfolded and on its first page.
+fn forget_missing(
+    config: &Config,
+    alt: &mut std::collections::HashMap<String, usize>,
+    pages: &mut std::collections::HashMap<String, usize>,
+    collapsed: &mut std::collections::HashSet<String>,
+    collapsed_groups: &mut std::collections::HashSet<String>,
+) {
+    let modules: std::collections::HashSet<&str> =
+        config.modules().map(|m| m.name.as_str()).collect();
+    let groups: std::collections::HashSet<&str> = config
+        .positions
+        .iter()
+        .flat_map(|p| &p.groups)
+        .map(|g| g.name.as_str())
+        .collect();
+    alt.retain(|name, _| modules.contains(name.as_str()));
+    pages.retain(|name, _| modules.contains(name.as_str()));
+    collapsed.retain(|name| modules.contains(name.as_str()));
+    collapsed_groups.retain(|name| groups.contains(name.as_str()));
+}
+
 pub struct App {
     registry_state: RegistryState,
     seat_state: SeatState,
@@ -1446,9 +1472,12 @@ impl App {
         // A layer is chosen when a surface is made and cannot be moved afterwards, so this
         // is the one geometry change that costs new surfaces.
         let relayer = self.config.bar.layer != new.bar.layer;
-        let rehide = self.config.bar.autohide != new.bar.autohide;
         self.config = new;
         self.travels = Travels::default();
+        // A menu is laid out from the config it was opened with, and nothing re-places an
+        // open one. Closing them is what keeps the reload's promise that what is on screen
+        // is the file that was just read.
+        self.close_menus();
 
         if refont {
             let bar = &self.config.bar;
@@ -1463,34 +1492,19 @@ impl App {
             self.painter.forget_icons();
         }
 
-        self.forget_missing();
+        forget_missing(
+            &self.config,
+            &mut self.alt,
+            &mut self.pages,
+            &mut self.collapsed,
+            &mut self.collapsed_groups,
+        );
         match relayer {
             true => self.rebuild_bars(),
-            false => self.replace_bars(rehide),
+            false => self.replace_bars(),
         }
         self.warn_if_nowhere();
         self.invalidate();
-    }
-
-    /// Drop what was being kept for a module or group the config no longer has.
-    ///
-    /// A renamed module is a new one here, and starts open, unfolded and on its first page.
-    fn forget_missing(&mut self) {
-        let modules: std::collections::HashSet<&str> =
-            self.config.modules().map(|m| m.name.as_str()).collect();
-        let groups: std::collections::HashSet<&str> = self
-            .config
-            .positions
-            .iter()
-            .flat_map(|p| &p.groups)
-            .map(|g| g.name.as_str())
-            .collect();
-        self.alt.retain(|name, _| modules.contains(name.as_str()));
-        self.pages.retain(|name, _| modules.contains(name.as_str()));
-        self.collapsed
-            .retain(|name| modules.contains(name.as_str()));
-        self.collapsed_groups
-            .retain(|name| groups.contains(name.as_str()));
     }
 
     /// Give every bar new surfaces, for the one change a surface cannot be told about.
@@ -1507,7 +1521,7 @@ impl App {
 
     /// Put the bars that exist where the new config wants them, and judge every screen
     /// again: a config that named other outputs moves the bar rather than only resizing it.
-    fn replace_bars(&mut self, rehide: bool) {
+    fn replace_bars(&mut self) {
         for output in self.output_state.outputs().collect::<Vec<_>>() {
             let name = self
                 .output_state
@@ -1521,10 +1535,15 @@ impl App {
             }
         }
         for i in 0..self.bars.len() {
-            // A bar that is already hiding keeps where it is in that: a reload is not a
-            // reason for the bar under the pointer to disappear.
-            if rehide {
-                self.bars[i].autohide = self.config.bar.autohide.map(Autohide::new);
+            // A bar already hiding keeps where it is in that. Starting it again would put a
+            // bar that is out, and under the pointer, back against its edge, which is not
+            // something a config having been re-read should do.
+            let wanted = self.config.bar.autohide;
+            match (self.bars[i].autohide.as_mut(), wanted) {
+                (Some(hiding), Some(delay)) => hiding.set_delay(delay),
+                (Some(_), None) => self.bars[i].autohide = None,
+                (None, Some(delay)) => self.bars[i].autohide = Some(Autohide::new(delay)),
+                (None, None) => {}
             }
             let info = self.output_state.info(&self.bars[i].output);
             self.bars[i].span = span_on(

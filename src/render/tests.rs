@@ -466,7 +466,14 @@ fn alphas_across_a_join(scale: f32, module_edge: f32, opacity: f32) -> Vec<u8> {
         fill: A,
         under: B,
     };
-    draw_separator(&mut canvas, &sep, scale, transform, None);
+    draw_separator(
+        &mut canvas,
+        &sep,
+        scale,
+        transform,
+        None,
+        &mut PathBuilder::new(),
+    );
 
     for (x0, x1, color) in [(0.0, module_edge, A), (module_edge + sep.width, w, B)] {
         let (sx0, sx1) = (snap(x0, scale), snap(x1, scale));
@@ -477,6 +484,7 @@ fn alphas_across_a_join(scale: f32, module_edge: f32, opacity: f32) -> Vec<u8> {
             color,
             transform,
             None,
+            &mut PathBuilder::new(),
         );
     }
 
@@ -556,7 +564,14 @@ fn separator_row(direction: Direction, fill: Color, under: Color) -> Vec<(u8, u8
         fill,
         under,
     };
-    draw_separator(&mut pixmap.as_mut(), &sep, 1.0, Transform::identity(), None);
+    draw_separator(
+        &mut pixmap.as_mut(),
+        &sep,
+        1.0,
+        Transform::identity(),
+        None,
+        &mut PathBuilder::new(),
+    );
 
     let row = h as usize / 2;
     pixmap.pixels()[row * w as usize..(row + 1) * w as usize]
@@ -599,6 +614,7 @@ fn a_chevron_comes_to_a_point_rather_than_to_a_flat() {
                     scale,
                     Transform::from_scale(scale, scale),
                     None,
+                    &mut PathBuilder::new(),
                 );
                 // The modules either side, drawn after the separator the way a group
                 // draws them, which is what cuts a tip built out past the gap.
@@ -611,6 +627,7 @@ fn a_chevron_comes_to_a_point_rather_than_to_a_flat() {
                         color,
                         Transform::from_scale(scale, scale),
                         None,
+                        &mut PathBuilder::new(),
                     );
                 }
 
@@ -672,7 +689,14 @@ fn a_transition_leans_from_the_first_row_it_is_drawn_in() {
             fill: TILE,
             under: TILE_ALT,
         };
-        draw_separator(&mut pixmap.as_mut(), &sep, 1.0, Transform::identity(), None);
+        draw_separator(
+            &mut pixmap.as_mut(),
+            &sep,
+            1.0,
+            Transform::identity(),
+            None,
+            &mut PathBuilder::new(),
+        );
         // A cap is drawn where the island ends, so only the side its own module is on
         // is filled in behind it. That side is the one the shape has its base on, which
         // is the side `direction` does not point at.
@@ -689,6 +713,7 @@ fn a_transition_leans_from_the_first_row_it_is_drawn_in() {
                 color,
                 Transform::identity(),
                 None,
+                &mut PathBuilder::new(),
             );
         }
 
@@ -767,7 +792,14 @@ fn a_hairline_reads_the_same_way_round() {
             fill: TILE,
             under: TILE_ALT,
         };
-        draw_separator(&mut pixmap.as_mut(), &sep, 1.0, Transform::identity(), None);
+        draw_separator(
+            &mut pixmap.as_mut(),
+            &sep,
+            1.0,
+            Transform::identity(),
+            None,
+            &mut PathBuilder::new(),
+        );
         pixmap
             .pixels()
             .iter()

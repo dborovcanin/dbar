@@ -22,8 +22,8 @@ alternatives](#what-it-costs-to-leave-running), measured rather than asserted.
 Nothing else has to be installed. The collectors are dbar's own, so a config
 that names no external provider starts no child process at all.
 
-This is the **V0** milestone from [spec.md](spec.md), and it is licensed under
-[Apache 2.0](LICENSE).
+What it is for, how it is built and what is deliberately left out are in
+[spec.md](spec.md). It is licensed under [Apache 2.0](LICENSE).
 
 ## What it deliberately does not have
 
