@@ -51,6 +51,9 @@ struct SwayWorkspace {
     visible: bool,
     #[serde(default)]
     urgent: bool,
+    /// The workspace's children, tiling and floating alike, in focus order.
+    #[serde(default)]
+    focus: Vec<u64>,
 }
 
 /// The workspace list a `GET_WORKSPACES` reply carries.
@@ -66,6 +69,7 @@ fn workspaces_of(body: &[u8]) -> Result<Vec<Workspace>> {
             focused: w.focused,
             visible: w.visible,
             urgent: w.urgent,
+            empty: w.focus.is_empty(),
         })
         .collect())
 }
@@ -705,14 +709,15 @@ mod tests {
     #[test]
     fn a_workspace_says_which_screen_it_is_on() {
         let list = workspaces_of(
-            br#"[{"id":4,"name":"1","output":"DP-1","focused":true,"visible":true},
-                {"id":7,"name":"2","output":"HDMI-A-1","visible":true}]"#,
+            br#"[{"id":4,"name":"1","output":"DP-1","focused":true,"visible":true,"focus":[9]},
+                {"id":7,"name":"2","output":"HDMI-A-1","visible":true,"focus":[]}]"#,
         )
         .expect("a workspace list parses");
         assert_eq!(list[0].output, "DP-1");
         assert_eq!(list[1].output, "HDMI-A-1");
         assert_eq!(list[1].id, 7);
         assert!(!list[1].focused);
+        assert!(!list[0].empty && list[1].empty);
     }
 
     #[test]

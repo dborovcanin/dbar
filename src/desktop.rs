@@ -86,6 +86,9 @@ pub struct Workspace {
     pub focused: bool,
     pub visible: bool,
     pub urgent: bool,
+    /// Whether no window is on it. A compositor keeps an empty workspace around for its
+    /// own reasons - niri for every one its config names - and a bar may not want them.
+    pub empty: bool,
 }
 
 /// The keyboard layout the compositor has active.

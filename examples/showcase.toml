@@ -434,6 +434,10 @@ overlap = 1
 #   scope      how much of the session a workspaces or
 #              window module is about: "output", the
 #              screen its bar is on, or "session"  default: "output"
+#   show_empty whether a workspaces module lists a workspace
+#              with no windows that no screen is showing,
+#              like one niri keeps because its config names
+#              it                                   default: false
 #   show_passive  whether a tray module draws the items whose
 #              applications say they are passive     default: true
 #   order      the tray ids to put first, in order; everything
@@ -491,6 +495,7 @@ source = "workspaces"
 scope = "output"
 style = "plain"
 padding = 9
+# show_empty = true
 
 [module.workspaces.states.focused]
 focused = true

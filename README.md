@@ -598,6 +598,9 @@ A `workspaces` module expands into one rectangle per workspace, each with
 its own state and its own click target - clicking switches to that workspace.
 `focused` and `visible` join `urgent` as state conditions. `icons` maps the
 workspace name to something drawn after it; `default` can supply a fallback.
+A workspace with no windows is left off unless a screen is showing it, which
+matters on niri, where every workspace the config names always exists;
+`show_empty = true` lists those too.
 A value beginning with `$` names a native dbar icon, while any other value is
 ordinary text, including emoji and icon-font glyphs. A native icon is drawn like
 any other icon, `gap` away from the name; text is shaped as part of the name,

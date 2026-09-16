@@ -257,7 +257,7 @@ impl State {
         // niri keeps an empty workspace below the last one in use on every screen, so there is
         // always somewhere to open a window. Listed, it is a number that never holds anything,
         // so it is left off until a screen is showing it. A workspace the config named is
-        // listed whether or not anything is on it.
+        // listed whether or not anything is on it, marked empty for the module to decide.
         let mut listed: Vec<&NiriWorkspace> = self
             .workspaces
             .values()
@@ -273,6 +273,7 @@ impl State {
                 focused: w.is_focused,
                 visible: w.is_active,
                 urgent: w.is_urgent,
+                empty: !occupied.contains(&w.id),
             })
             .collect();
 
@@ -489,6 +490,8 @@ mod tests {
         let desktop = state.desktop(EVERYTHING);
         assert_eq!(names(&desktop), ["chat", "2"]);
         assert_eq!(desktop.workspaces[0].id, 1);
+        assert!(!desktop.workspaces[0].empty);
+        assert!(desktop.workspaces[1].empty);
         assert!(!desktop.workspaces[0].visible);
         assert!(
             desktop.workspaces[1].focused && desktop.workspaces[1].visible,
