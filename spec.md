@@ -10,9 +10,10 @@ behaviour.
 
 ## 1. Product definition
 
-dbar is a minimal, standalone Wayland status bar for Sway, SwayFX and niri. It should
-be cheap enough to forget about, configurable enough to keep, and understandable
-enough that a user can own the whole setup in one TOML file.
+dbar is a minimal, standalone Wayland status bar for Sway, SwayFX, niri and
+Hyprland. It should be cheap enough to forget about, configurable enough to
+keep, and understandable enough that a user can own the whole setup in one TOML
+file.
 
 Standalone means that dbar can collect and render an ordinary desktop status by
 itself. A native-only configuration starts no status daemon and no helper
@@ -68,10 +69,10 @@ Two short rules summarize the product:
 ## 3. Supported environment
 
 dbar targets Linux compositors that implement `wlr-layer-shell`, specifically
-Sway, SwayFX and niri today. The compositor owns output discovery, workspace and
-window state, keyboard layout, positioning, and frame pacing. Another layer-shell
-compositor shows the bar, but its compositor modules stay empty: dbar reads that
-state only from Sway's IPC or niri's event stream.
+Sway, SwayFX, niri and Hyprland today. The compositor owns output discovery,
+workspace and window state, keyboard layout, positioning, and frame pacing. Another
+layer-shell compositor shows the bar, but its compositor modules stay empty: dbar
+reads that state only from Sway's IPC, niri's event stream or Hyprland's sockets.
 
 The current presentation stack is:
 
@@ -103,13 +104,14 @@ configured subset, and follows outputs as they are added and removed.
 | `time` | system clock and time-zone database | aligned timer |
 | `command` | an argv supplied by the user | streaming, periodic, or once/on demand |
 
-Compositor integrations are built into the same process and read Sway's IPC or
-niri's event stream, whichever dbar runs under:
+Compositor integrations are built into the same process and read Sway's IPC,
+niri's event stream or Hyprland's sockets, whichever dbar runs under:
 
 - `workspaces`;
 - `window`;
 - `language`; and
-- `mode`, which stays empty under niri, since niri has no binding modes.
+- `mode`, which stays empty under niri, since niri has no binding modes, and
+  follows the submap under Hyprland.
 
 The `tray` source implements StatusNotifierItem discovery, icons, activation,
 menus, passive-item filtering, and configured ordering.
@@ -344,7 +346,7 @@ file or generating one on the user's behalf.
           ┌────────────────────────┼────────────────────────┐
           ▼                        ▼                        ▼
   native collectors          pushed services          external inputs
- /proc /sys / netlink     PipeWire/MPRIS/Sway/niri   command / i3bar / tray
+ /proc /sys / netlink    PipeWire/MPRIS/compositor   command / i3bar / tray
           │                        │                        │
           └────────────────────────┴────────────────────────┘
                                    │
@@ -413,8 +415,11 @@ dbar itself starts workers only for features the resolved configuration needs:
 
 - one PipeWire worker for audio, one session-bus worker for MPRIS, and one
   session-bus worker for the tray;
-- one compositor worker, following Sway's subscription or niri's event stream,
-  plus a command worker when a click can switch workspaces;
+- one compositor worker, following Sway's subscription, niri's event stream or
+  Hyprland's, plus a command worker when a click can switch workspaces. A request
+  that fails is fatal to the worker where the connection carrying it cannot be
+  resynchronized - Sway's framed stream, niri's - and is retried a few times where
+  each request has a connection of its own, as Hyprland's do;
 - one reader for an i3bar provider, plus a writer when it accepts clicks;
 - one shared kernel-watch worker for watchable sources;
 - one worker per command source, and one per sampled source whose read can

@@ -1,6 +1,6 @@
 pkgbase = dbar
 	pkgdesc = A small, event-driven Wayland status bar for Sway and SwayFX
-	pkgver = 0.6.0
+	pkgver = 0.9.2
 	pkgrel = 1
 	url = https://github.com/dborovcanin/dbar
 	arch = x86_64

@@ -70,8 +70,9 @@ exclusive = true       # default: true; reserve the space so windows do not sit 
 # is. Left out, dbar watches for nothing and keeps no listener.
 # reload_signal = 6
 # Which screens to appear on, named the way the compositor names them - `swaymsg
-# -t get_outputs` or `niri msg outputs` lists them. Left out, or a single "*", is
-# every screen there is and every one plugged in later, each getting a bar of its own.
+# -t get_outputs`, `niri msg outputs` or `hyprctl monitors` lists them. Left out,
+# or a single "*", is every screen there is and every one plugged in later, each
+# getting a bar of its own.
 # outputs = ["DP-1", "HDMI-A-1"]
 # Which icon theme a tray item's named icon is looked for in. An application
 # usually ships its own into `hicolor`, which is where dbar looks when the theme

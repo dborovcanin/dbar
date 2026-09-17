@@ -1,6 +1,6 @@
 <h1>dbar <img src="docs/gallery/logo.png" alt="dbar logo" width="144"></h1>
 
-A small, event-driven Wayland status bar for Sway, SwayFX and Niri. It renders with
+A small, event-driven Wayland status bar for Sway, SwayFX, Niri and Hyprland. It renders with
 `tiny-skia` on a `wlr-layer-shell` surface and reads what it shows itself, from
 `/proc`, `/sys` and PipeWire. Any i3bar-compatible provider can supply the rest.
 
@@ -76,13 +76,13 @@ sudo make install                                  # keep it: /usr/bin/dbar
 
 ### What it needs
 
-Sway, SwayFX or niri. Any compositor with `wlr-layer-shell` can show the bar,
-but its workspaces, window title, keyboard layout and binding mode are read from
-Sway's IPC or niri's event stream. The initial downloaded binary targets current
-Arch Linux and uses its system xkbcommon, Wayland and PipeWire libraries, which
-are normally already present on a Sway or niri desktop. Building from
-source additionally needs Rust 1.89 or newer and `clang` to generate the
-PipeWire bindings:
+Sway, SwayFX, niri or Hyprland. Any compositor with `wlr-layer-shell` can show
+the bar, but its workspaces, window title, keyboard layout and binding mode are
+read from Sway's IPC, niri's event stream or Hyprland's sockets. The initial
+downloaded binary targets current Arch Linux and uses its system xkbcommon,
+Wayland and PipeWire libraries, which are normally already present on such a
+desktop. Building from source additionally needs Rust 1.89 or newer and `clang`
+to generate the PipeWire bindings:
 
 ```sh
 # Arch
@@ -93,8 +93,8 @@ sudo apt install rustc cargo clang pkg-config \
     libxkbcommon-dev libwayland-dev libpipewire-0.3-dev
 ```
 
-On a machine already running Sway or niri most of these are present; `clang` and the
-`-dev` packages usually are not.
+On a machine already running one of those compositors most of these are present;
+`clang` and the `-dev` packages usually are not.
 
 PipeWire and D-Bus are only *used* if a config asks for the volume or the media
 module, and are ignored if it does not — but the PipeWire headers are needed to
@@ -115,6 +115,11 @@ exec_always pkill -x dbar; dbar
 ```kdl
 // or in ~/.config/niri/config.kdl
 spawn-at-startup "dbar"
+```
+
+```ini
+# or in ~/.config/hypr/hyprland.conf
+exec-once = dbar
 ```
 
 `dbar` with no arguments reads `~/.config/dbar/config.toml`, and falls back to
@@ -568,8 +573,9 @@ icon size to the font size. dbar's own icons are independent of both.
 
 ### Workspaces, the focused window and the keyboard layout
 
-These come from the compositor rather than the status provider: from Sway's IPC
-or from niri's event stream, whichever dbar is running under.
+These come from the compositor rather than the status provider: from Sway's IPC,
+from niri's event stream or from Hyprland's sockets, whichever dbar is running
+under.
 
 ```toml
 [module.workspaces]
@@ -600,7 +606,8 @@ its own state and its own click target - clicking switches to that workspace.
 `focused` and `visible` join `urgent` as state conditions. `icons` maps the
 workspace name to something drawn after it; `default` can supply a fallback.
 A workspace with no windows is left off unless a screen is showing it, on every
-compositor, including a workspace niri keeps because its config names it.
+compositor, including a workspace niri keeps because its config names it and one
+a Hyprland rule keeps persistent.
 A value beginning with `$` names a native dbar icon, while any other value is
 ordinary text, including emoji and icon-font glyphs. A native icon is drawn like
 any other icon, `gap` away from the name; text is shaped as part of the name,
@@ -656,6 +663,16 @@ position on its screen, so `$name` is `1`, `2` and so on. It always keeps one
 empty workspace below the last one in use, and that one is left off the list
 until a screen is showing it. X11 programs reach niri as Wayland clients, so
 `$class` stays empty there.
+
+Under Hyprland they follow its event socket, and the differences are Hyprland's.
+A `mode` module shows the submap held, which is what Hyprland calls a binding
+mode. Numbered workspaces are listed before workspaces made by name, screen by
+screen; special workspaces are scratchpads rather than places on the bar and are
+left off, but a screen with one open reports the window inside it, since that is
+what is on top. A window asks for attention once and Hyprland never reports it
+stopping, so `urgent` is cleared when that window is focused or closes. The
+keyboard layout is read from the device list, which is where its index lives, so
+a `language` module needs Hyprland 0.51.1 or newer and stays empty below that.
 
 These sources were called `sway:workspaces`, `sway:window`, `sway:language` and
 `sway:mode` before they followed niri as well. A config that still uses those

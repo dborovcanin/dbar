@@ -8,6 +8,7 @@ mod dbus;
 mod desktop;
 mod format;
 mod geometry;
+mod hypr;
 mod icon;
 mod layout;
 mod lines;

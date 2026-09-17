@@ -1,8 +1,8 @@
 # dbar
 
-A small, event-driven Wayland status bar for Sway, SwayFX and niri. It reads what it shows from
-`/proc` and `/sys`, renders with `tiny-skia` on a `wlr-layer-shell` surface, and can also
-take data from any i3bar-protocol provider.
+A small, event-driven Wayland status bar for Sway, SwayFX, niri and Hyprland. It reads
+what it shows from `/proc` and `/sys`, renders with `tiny-skia` on a `wlr-layer-shell`
+surface, and can also take data from any i3bar-protocol provider.
 
 `spec.md` is the standing plan: architecture, phases, and what is deliberately out
 of scope. Read it before starting anything structural.
@@ -91,14 +91,14 @@ ownership into layout.
 
 No async runtime. The event loop is `calloop`; cheap reads happen on the main thread, and
 anything that genuinely blocks gets a worker thread feeding a `calloop` channel, the way
-Sway, niri, i3bar, PipeWire, MPRIS and the tray already do. Workers are conditional on the resolved
-configuration. The single signal listener is also conditional: it exists for realtime refresh
-signals or click commands, whose children it wakes the event loop to reap. It is not part of
-the tray. Commands from the event loop must use bounded or nonblocking delivery so a stalled
-worker cannot stall Wayland dispatch. That bound is semantics, not allocation tuning: a status
-value superseded before it could be drawn has no viewer, so a full queue drops rather than
-grows. An unbounded channel would bank states that never reach a frame and charge memory for
-them.
+Sway, niri, Hyprland, i3bar, PipeWire, MPRIS and the tray already do. Workers are conditional
+on the resolved configuration. The single signal listener is also conditional: it exists for
+realtime refresh signals or click commands, whose children it wakes the event loop to reap. It
+is not part of the tray. Commands from the event loop must use bounded or nonblocking delivery
+so a stalled worker cannot stall Wayland dispatch. That bound is semantics, not allocation
+tuning: a status value superseded before it could be drawn has no viewer, so a full queue drops
+rather than grows. An unbounded channel would bank states that never reach a frame and charge
+memory for them.
 
 Thread count is not a vanity metric: single-threaded where that is honest, a worker where the
 obstacle is real. A hung filesystem, a stuck wireless driver, a stalled bus or a slow command

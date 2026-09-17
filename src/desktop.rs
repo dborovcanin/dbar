@@ -3,8 +3,8 @@
 //!
 //! This is the compositor's state in the bar's own terms. A backend speaks its compositor's
 //! IPC on threads of its own and publishes a whole `Desktop`; layout reads that and never
-//! learns which compositor it came from, or how that compositor spells a command. Sway and
-//! niri are the backends so far.
+//! learns which compositor it came from, or how that compositor spells a command. Sway,
+//! niri and Hyprland are the backends so far.
 
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
@@ -169,7 +169,8 @@ impl Publisher {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     /// Both ways of naming the workspace travel, and each backend uses the one its compositor
-    /// switches by: sway takes a name, and niri an id.
+    /// switches by: sway takes a name, niri an id, and Hyprland one or the other depending
+    /// on how the workspace was made.
     FocusWorkspace { id: u64, name: String },
 }
 
@@ -238,6 +239,19 @@ impl Watching {
     }
 }
 
+/// How long a request to a compositor may take before the bar stops waiting on it.
+///
+/// Each backend asks its compositor on the main thread, before the event loop is running, so
+/// a compositor wedged on its own main thread would otherwise be a bar that never draws and
+/// never says why. Bounded, that becomes the error path every backend already has.
+///
+/// Request sockets only. An event stream is meant to sit idle for hours and is left
+/// unbounded, and so is a request socket once the bar is up, where giving up part way
+/// through a reply would leave a shared connection out of step with its protocol. A backend
+/// that gives every request a connection of its own keeps the bound, since a request that
+/// gives up there costs nothing but that connection.
+pub const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Whether another message has already arrived on a compositor's socket, so a burst can be
 /// taken in one go.
 ///
@@ -258,6 +272,7 @@ pub fn more_waiting(stream: &UnixStream) -> bool {
 /// The compositors dbar can talk to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Backend {
+    Hyprland,
     Niri,
     Sway,
 }
@@ -266,15 +281,22 @@ impl Backend {
     /// The compositor this session is running, which each one says by the socket it puts
     /// in the environment.
     pub fn detect() -> Result<Backend> {
-        // niri first: it hands its socket to everything it starts, and a niri started inside
-        // a Sway session - which is how it is usually tried out - passes Sway's along too.
+        // Sway last: it hands its socket to everything it starts, so a compositor started
+        // inside a Sway session - which is how one is usually tried out - passes Sway's
+        // along with its own.
         if std::env::var_os("NIRI_SOCKET").is_some() {
             return Ok(Backend::Niri);
+        }
+        if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+            return Ok(Backend::Hyprland);
         }
         if std::env::var_os("SWAYSOCK").is_some() {
             return Ok(Backend::Sway);
         }
-        bail!("neither NIRI_SOCKET nor SWAYSOCK is set; dbar follows niri and Sway")
+        bail!(
+            "none of NIRI_SOCKET, HYPRLAND_INSTANCE_SIGNATURE or SWAYSOCK is set; dbar \
+             follows niri, Hyprland and Sway"
+        )
     }
 
     /// Connect, read what the compositor has now, and forward its changes into the event
@@ -285,6 +307,7 @@ impl Backend {
         watching: Watching,
     ) -> Result<()> {
         match self {
+            Backend::Hyprland => crate::hypr::spawn(sender, watching),
             Backend::Niri => crate::niri::spawn(sender, watching),
             Backend::Sway => crate::sway::spawn(sender, watching),
         }
@@ -293,6 +316,7 @@ impl Backend {
     /// Start the thread that carries clicks to the compositor.
     pub fn commands(self) -> Commands {
         match self {
+            Backend::Hyprland => Commands::spawn("hypr-commands", crate::hypr::run_command),
             Backend::Niri => Commands::spawn("niri-commands", crate::niri::run_command),
             Backend::Sway => Commands::spawn("sway-commands", crate::sway::run_command),
         }

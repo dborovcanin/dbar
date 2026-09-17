@@ -14,7 +14,8 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
 use crate::desktop::{
-    Command, Desktop, DesktopEvent, Layout, Publisher, Watching, Window, Workspace, more_waiting,
+    Command, Desktop, DesktopEvent, Layout, Publisher, REQUEST_TIMEOUT, Watching, Window,
+    Workspace, more_waiting,
 };
 use crate::lines::{self, Lines};
 
@@ -328,6 +329,12 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
     // Asked here rather than on the thread, so a socket that is not there or a niri that
     // refuses is reported at startup instead of silently leaving the modules empty.
     let mut stream = connect()?;
+    // Bounded for the one exchange below, so a niri that has stopped answering is an error
+    // rather than a bar that never draws. The bound is lifted once the answer is in: this
+    // same socket is the event stream from then on, and is meant to sit idle for hours.
+    stream
+        .set_read_timeout(Some(REQUEST_TIMEOUT))
+        .context("bounding how long niri may take to answer")?;
     stream
         .write_all(b"\"EventStream\"\n")
         .context("asking niri for its event stream")?;
@@ -337,6 +344,11 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
         .context("niri closed its socket instead of answering")?
         .context("reading niri's answer")?;
     check(&reply.text).context("asking niri for its event stream")?;
+    lines
+        .reader()
+        .get_ref()
+        .set_read_timeout(None)
+        .context("letting the event stream wait again")?;
     if watching.mode {
         log::info!("niri has no binding modes, so a mode module stays empty");
     }
@@ -413,6 +425,9 @@ fn request(command: &Command) -> String {
 pub fn run_command(command: Command) {
     let result = (|| -> Result<()> {
         let mut stream = connect()?;
+        stream
+            .set_read_timeout(Some(REQUEST_TIMEOUT))
+            .context("bounding how long niri may take to answer")?;
         stream
             .write_all(format!("{}\n", request(&command)).as_bytes())
             .context("sending niri a request")?;

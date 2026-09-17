@@ -12,7 +12,8 @@ use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
 use crate::desktop::{
-    Command, Desktop, DesktopEvent, Layout, Publisher, Watching, Window, Workspace, more_waiting,
+    Command, Desktop, DesktopEvent, Layout, Publisher, REQUEST_TIMEOUT, Watching, Window,
+    Workspace, more_waiting,
 };
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
@@ -84,6 +85,33 @@ fn socket_path() -> Result<PathBuf> {
 fn connect() -> Result<UnixStream> {
     let path = socket_path()?;
     UnixStream::connect(&path).with_context(|| format!("connecting to {}", path.display()))
+}
+
+/// Stop a request waiting on the compositor for ever. Never for the event subscription.
+fn bound(stream: &UnixStream) -> Result<()> {
+    stream
+        .set_read_timeout(Some(REQUEST_TIMEOUT))
+        .context("bounding how long a request may wait")?;
+    stream
+        .set_write_timeout(Some(REQUEST_TIMEOUT))
+        .context("bounding how long a request may take to send")
+}
+
+/// Let the query connection wait again, once the bar is up and drawing.
+///
+/// The bound is worth having while the main thread is inside `spawn`, where a compositor
+/// that never answers is a bar that never appears. It is the wrong trade afterwards: a
+/// reply is a header and a body, so a read that gives up part way through leaves this
+/// connection out of step with the protocol, and there is no recovering a framed stream -
+/// the backend stops and every compositor module on the bar empties. Waiting costs a
+/// desktop that is briefly stale instead, on a thread that holds nothing up.
+fn unbound(stream: &UnixStream) -> Result<()> {
+    stream
+        .set_read_timeout(None)
+        .context("letting a query wait again")?;
+    stream
+        .set_write_timeout(None)
+        .context("letting a query be sent again")
 }
 
 fn send(stream: &mut UnixStream, kind: u32, payload: &[u8]) -> Result<()> {
@@ -383,6 +411,7 @@ pub fn run_command(command: Command) {
     };
     let result = (|| -> Result<()> {
         let mut stream = connect()?;
+        bound(&stream)?;
         send(&mut stream, RUN_COMMAND, command.as_bytes())?;
         let (_, body) = recv(&mut stream)?;
         log::debug!(
@@ -410,6 +439,9 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
     // at startup instead of silently leaving the modules empty.
     let mut events = connect()?;
     let mut queries = connect()?;
+    // Only the query connection is bounded, and only for the reads below. `events` is the
+    // subscription and is meant to sit idle between things happening.
+    bound(&queries)?;
 
     // A workspace list and a window title both move with the workspace, so both follow
     // workspace events; only a window module has any use for a title changing, which is
@@ -457,6 +489,7 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
             None
         });
     }
+    unbound(&queries)?;
     let mut publisher = Publisher::new(sender);
     publisher.publish(&state);
 
