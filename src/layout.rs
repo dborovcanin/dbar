@@ -192,7 +192,7 @@ pub fn menu(
         .iter()
         .map(|row| match row.separator {
             true => String::new(),
-            false => truncate(&row.label, room, text),
+            false => truncate(row.label.clone(), room, text),
         })
         .collect();
 
@@ -762,42 +762,62 @@ const ELLIPSIS: &str = "\u{2026}";
 
 /// The longest prefix of `text` that fits in `budget`, with an ellipsis marking the cut.
 ///
-/// Widths come from the text backend, so the search is over character boundaries by
-/// bisection rather than by counting bytes, which would cut multi-byte characters in half.
+/// Widths come from the text backend, so the cut is found by bisection, and every position
+/// it measures at is a character boundary: bisecting on bytes alone would cut a multi-byte
+/// character in half.
 ///
 /// Only a window of the text is ever measured. Measuring means shaping, which is charged
 /// per character and cached by string, and what arrives here is somebody else's: a window
 /// title, a line from a script, a track name. A module a few hundred pixels wide can show
 /// a few hundred characters, so shaping a hundred thousand of them to find that out would
 /// be the sender deciding how much work the bar does, and how much memory the cache holds.
-fn truncate(text: &str, budget: f32, measure: &mut dyn Measure) -> String {
-    let (text, whole) = window(text, budget, measure);
-    if whole && measure.measure(text) <= budget {
-        return text.to_string();
+///
+/// The wording is taken by value and cut in place. Every module's wording passes through
+/// here on every frame, and nearly all of it fits: handing that case back the string it
+/// arrived in is what keeps the ordinary frame from copying each one to say so.
+fn truncate(mut text: String, budget: f32, measure: &mut dyn Measure) -> String {
+    let (head, whole) = window(&text, budget, measure);
+    let end = head.len();
+    if whole && measure.measure(head) <= budget {
+        return text;
     }
     let ellipsis = measure.measure(ELLIPSIS);
     if ellipsis > budget {
-        return String::new();
+        text.clear();
+        return text;
     }
+    // Nothing past the window can be drawn, so the search is over what is left of it.
+    text.truncate(end);
 
-    let cuts: Vec<usize> = text
-        .char_indices()
-        .map(|(i, _)| i)
-        .chain(std::iter::once(text.len()))
-        .collect();
-    let (mut lo, mut hi, mut best) = (0usize, cuts.len() - 1, 0usize);
+    // Over byte positions snapped down to character boundaries rather than over a list of
+    // them: building that list allocated once per module per frame, in proportion to text
+    // dbar did not write, and the boundaries are already in the string.
+    let (mut lo, mut hi, mut best) = (0usize, text.len(), 0usize);
     while lo <= hi {
-        let mid = (lo + hi) / 2;
-        if measure.measure(&text[..cuts[mid]]) + ellipsis <= budget {
+        let mut mid = lo + (hi - lo) / 2;
+        while mid > lo && !text.is_char_boundary(mid) {
+            mid -= 1;
+        }
+        if measure.measure(&text[..mid]) + ellipsis <= budget {
             best = mid;
-            lo = mid + 1;
+            let mut next = mid + 1;
+            while next < text.len() && !text.is_char_boundary(next) {
+                next += 1;
+            }
+            lo = next;
         } else if mid == 0 {
             break;
         } else {
-            hi = mid - 1;
+            let mut previous = mid - 1;
+            while previous > 0 && !text.is_char_boundary(previous) {
+                previous -= 1;
+            }
+            hi = previous;
         }
     }
-    format!("{}{ELLIPSIS}", text[..cuts[best]].trim_end())
+    text.truncate(text[..best].trim_end().len());
+    text.push_str(ELLIPSIS);
+    text
 }
 
 /// The most characters that are ever shaped to lay out one string.
@@ -1005,7 +1025,10 @@ enum Decoration<'g> {
 fn collect<'g, 'i>(group: &'g GroupCfg, inputs: &Inputs<'i>) -> Vec<Candidate<'g, 'i>> {
     #[cfg(test)]
     tests::COLLECTIONS.with(|count| count.set(count.get() + 1));
-    let mut out = Vec::new();
+    // One candidate per module is the ordinary case; the compositor's lists expand past it
+    // and grow the vector themselves. Asking for the modules up front is what keeps an
+    // every-frame vector from doubling its way there from nothing.
+    let mut out = Vec::with_capacity(group.modules.len());
     let (items, native): (&'i [StatusItem], &'i Registry) = (inputs.items, inputs.native);
 
     let from_item = |module: &'g ModuleCfg, item: &'i StatusItem| Candidate {
@@ -1188,6 +1211,7 @@ fn collect<'g, 'i>(group: &'g GroupCfg, inputs: &Inputs<'i>) -> Vec<Candidate<'g
                     // arrived in rather than shuffling when an application restarts.
                     items.sort_by_key(|item| view.rank(&item.id));
                 }
+                out.reserve(items.len());
                 for item in items {
                     let mut fields = Fields::default();
                     fields.set("title", Value::Text(item.title.clone()));
@@ -1213,6 +1237,7 @@ fn collect<'g, 'i>(group: &'g GroupCfg, inputs: &Inputs<'i>) -> Vec<Candidate<'g
                 }
             }
             Source::Workspaces(view) => {
+                out.reserve(inputs.desktop.workspaces.len());
                 for workspace in &inputs.desktop.workspaces {
                     if !inputs.on_this_screen(view.scope, &workspace.output) {
                         continue;
@@ -1347,7 +1372,9 @@ fn size_group(
         });
         return finish_group(group, ends, between, modules);
     }
-    for candidate in collect(group, inputs) {
+    let candidates = collect(group, inputs);
+    modules.reserve(candidates.len());
+    for candidate in candidates {
         let Candidate {
             module,
             text: content,
@@ -1606,7 +1633,7 @@ fn size_group(
             // when the config is read, and a glyph cannot be measured until there are
             // fonts to measure it with.
             let content = match cap.is_finite() && !folded {
-                true => truncate(&content, cap - fixed, text),
+                true => truncate(content, cap - fixed, text),
                 false => content,
             };
             // Truncating to nothing takes the gap with it, the same as folding does.
@@ -2077,7 +2104,10 @@ fn place(
     let draw_separators = !separator.shape.is_none();
 
     let mut modules: Vec<PlacedModule> = Vec::with_capacity(sized.modules.len());
-    let mut separators = Vec::new();
+    let mut separators = Vec::with_capacity(match draw_separators {
+        true => sized.modules.len() + 1,
+        false => 0,
+    });
 
     let ends = sized.ends;
     let lead = ends.left_width();
@@ -2332,7 +2362,7 @@ fn size_joined_run(
     text: &mut dyn Measure,
     budget: f32,
 ) -> Vec<SizedGroup> {
-    let mut out: Vec<SizedGroup> = Vec::new();
+    let mut out: Vec<SizedGroup> = Vec::with_capacity(groups.len());
     let mut left = budget;
     for group in groups {
         let mut ends = group.ends;
@@ -2449,7 +2479,7 @@ pub fn compute(
             return size_joined_run(&position.groups, separator, inputs, height, text, budget);
         }
         let mut left = budget;
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(position.groups.len());
         for group in &position.groups {
             let Some(sized) = size_group(group, inputs, height, text, left, None) else {
                 continue;

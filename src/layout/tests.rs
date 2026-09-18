@@ -971,7 +971,7 @@ fn a_very_long_line_is_not_measured_end_to_end() {
 
     let long = "x".repeat(256 * 1024);
     let mut measure = Longest(0);
-    let shown = truncate(&long, 20.0, &mut measure);
+    let shown = truncate(long, 20.0, &mut measure);
     assert_eq!(shown.chars().count(), 20, "19 characters and an ellipsis");
     assert!(
         measure.0 <= 128,
@@ -991,7 +991,7 @@ fn a_very_long_line_is_not_measured_end_to_end() {
     }
     let empty_looking = "\u{200b}".repeat(64 * 1024);
     let mut measure = Weightless(0);
-    truncate(&empty_looking, 20.0, &mut measure);
+    truncate(empty_looking, 20.0, &mut measure);
     assert!(
         measure.0 <= MOST_SHAPED,
         "shaped {} characters of text that is no width at all",
@@ -1000,10 +1000,53 @@ fn a_very_long_line_is_not_measured_end_to_end() {
 
     // A line that fits is still handed back whole, however close to the budget it is.
     let mut measure = Longest(0);
-    assert_eq!(truncate("short", 20.0, &mut measure), "short");
+    assert_eq!(truncate("short".to_string(), 20.0, &mut measure), "short");
     assert_eq!(
-        truncate("exactly twenty chars", 20.0, &mut measure),
+        truncate("exactly twenty chars".to_string(), 20.0, &mut measure),
         "exactly twenty chars"
+    );
+}
+
+/// The cut is found by bisecting positions in the string, and most of the positions in a
+/// string of multi-byte characters are inside one. Landing on any of them would panic, and
+/// a bar draws whatever a window is called - which is to say, any alphabet there is.
+#[test]
+fn a_cut_lands_between_characters_however_wide_they_are() {
+    /// One unit per character, so a budget is a character count whatever the encoding.
+    struct PerChar;
+    impl Measure for PerChar {
+        fn measure(&mut self, text: &str) -> f32 {
+            text.chars().count() as f32
+        }
+    }
+
+    // Two, three and four bytes to the character, and a family emoji whose parts are
+    // joined by characters that are not a cut either.
+    for text in [
+        "привет мир, это очень длинный заголовок окна",
+        "これはとても長いウィンドウのタイトルです",
+        "𝔞𝔟𝔠𝔡𝔢𝔣𝔤𝔥𝔦𝔧𝔨𝔩𝔪𝔫𝔬𝔭𝔮𝔯𝔰𝔱",
+        "👩‍👩‍👧‍👦 family family family family",
+    ] {
+        for budget in 1..=24 {
+            let shown = truncate(text.to_string(), budget as f32, &mut PerChar);
+            assert!(
+                shown.chars().count() <= budget,
+                "{shown:?} is wider than the {budget} it was cut to"
+            );
+            if shown != text {
+                assert!(
+                    shown.is_empty() || shown.ends_with('\u{2026}'),
+                    "{shown:?} was cut without saying so"
+                );
+            }
+        }
+    }
+
+    // The widest prefix that fits is the one taken, rather than a cheaper one nearby.
+    assert_eq!(
+        truncate("ααααααααα".to_string(), 5.0, &mut PerChar),
+        "αααα\u{2026}"
     );
 }
 
