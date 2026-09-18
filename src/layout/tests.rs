@@ -2699,6 +2699,53 @@ padding = 0
     assert!(title(&shut).len() > title(&open).len());
 }
 
+/// A module wider than what is written on it - `min_width`, or a reading that shed a
+/// digit - has room to spare, and the icon is not the part of it that should take any.
+/// Splitting the spare room either side of the icon slides the picture half a character
+/// sideways every time the number under it changes width, which reads as the icon
+/// twitching while the bar is turned up.
+#[test]
+fn spare_room_in_a_module_goes_to_the_wording_and_not_the_icon() {
+    let config = r##"
+[bar]
+height = 34
+icon_size = 17
+[right]
+groups = ["s"]
+[group.s]
+modules = ["vol"]
+[module.vol]
+format = "$text"
+min_width = 66
+padding = 6
+icon = "$headphones"
+"##;
+    let cfg = Config::parse(config).unwrap();
+    let native = Registry::new(&Default::default());
+    let none = Default::default();
+    let at = |text: &str| {
+        let items = [item("vol", text)];
+        let inputs = group_inputs(&items, &native, &none);
+        let frame = compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None);
+        let m = &frame.groups[0].modules[0];
+        (m.icon.as_ref().expect("an icon").x, m.text_x, m.width)
+    };
+
+    let narrow = at("5");
+    for text in ["50", "100"] {
+        let wider = at(text);
+        // The box never moved and neither did the icon; only the wording under it grew
+        // into the room the box was keeping.
+        assert_eq!(wider.2, narrow.2);
+        assert_eq!(wider.0, narrow.0);
+        assert!(wider.1 < narrow.1);
+    }
+
+    // And the wording is still centred in the room that is left, rather than pushed
+    // against the icon it follows.
+    assert!(narrow.1 > narrow.0 + 17.0 + 6.0);
+}
+
 /// The island a fold arrives at is one icon, and the icon the first module already
 /// draws is the one it lands on: a config names the same picture for both so the fold
 /// reads as everything else sliding away from it. That only works if the two agree on

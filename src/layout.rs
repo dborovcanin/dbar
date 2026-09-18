@@ -2002,16 +2002,41 @@ impl SizedModule {
         if self.icon_after_text || (self.icon_advance <= 0.0 && self.written_icon_advance <= 0.0) {
             return 0.0;
         }
-        // Start from the same content origin `place` uses. A native icon can change size on
+        // Start from the same icon origin `place` uses. A native icon can change size on
         // the way, so its destination is based on the size it will be wearing rather than on
         // its expanded advance. A configured glyph is part of the wording run and keeps the
         // measured width of that glyph. Source-owned text decorations trail the wording and
         // never set `written_icon_advance`, which deliberately leaves their current behaviour.
-        let content = self.icon_advance + self.text_width;
-        let from = ((self.width - content) / 2.0).max(self.style.padding);
+        let from = self.icon_origin();
         let mark = self.mark_width(&shut.style);
         let to = (shut.module - mark) / 2.0;
         to - from - self.shift
+    }
+
+    /// Where the wording sits inside the module's own box, measured from its left edge.
+    ///
+    /// Contents narrower than the box they were fitted at sit in the middle of it, which is
+    /// what `min_width` is for.
+    fn content_origin(&self) -> f32 {
+        let content = self.icon_advance + self.text_width;
+        ((self.width - content) / 2.0).max(self.style.padding)
+    }
+
+    /// Where the icon sits inside that box.
+    ///
+    /// A box with room to spare gives all of it to the wording rather than splitting it
+    /// either side of the icon: a reading that gains a digit would otherwise slide its own
+    /// icon half a character sideways, which is the one part of a module that has nothing
+    /// to do with what the reading says. An icon with no wording beside it is the whole of
+    /// the module and keeps the middle, which is where a fold lands.
+    fn icon_origin(&self) -> f32 {
+        if self.icon.is_none() || self.text.is_empty() {
+            return self.content_origin();
+        }
+        match self.icon_after_text {
+            true => self.width - self.style.padding - self.mark_width(&self.style),
+            false => self.style.padding,
+        }
     }
 
     /// Width of the mark this module will still be drawing in `style` once its wording has
@@ -2122,11 +2147,10 @@ fn place(
             0 => sized.leading.unwrap_or(drawn_width),
             _ => drawn_width,
         };
-        // Icon and text are centred together inside the module box - the one it was
-        // measured at, plus wherever a fold is carrying it. Centring them in a travelling
-        // box instead would land them by the width the island happens to have rather than
-        // on the icon the shut island draws.
-        let content_width = m.icon_advance + m.text_width;
+        // Wording sits in the middle of the module box - the one it was measured at, plus
+        // wherever a fold is carrying it. Centring it in a travelling box instead would land
+        // it by the width the island happens to have rather than on the icon the shut island
+        // draws.
         let carried = match i {
             0 => m.shift + sized.shift,
             _ => m.shift,
@@ -2136,16 +2160,15 @@ fn place(
         // floor changes nothing; a box a click is carrying between two wordings can be
         // narrower than what is written in it, and centring that would hang the first
         // characters off the left of the module and into the one before it.
-        let content_x = x + ((m.width - content_width) / 2.0).max(m.style.padding) + carried;
+        let content_x = x + m.content_origin() + carried;
         let icon_gap = if m.text.is_empty() {
             0.0
         } else {
             m.style.gap()
         };
-        let icon_x = match m.icon_after_text {
-            true => content_x + m.text_width + icon_gap,
-            false => content_x,
-        };
+        // Spare room in the box belongs to the wording, so the icon is placed from its own
+        // origin rather than from where the wording starts.
+        let icon_x = x + m.icon_origin() + carried;
         let placed_icon = m.icon.map(|(icon, level)| PlacedIcon {
             icon,
             level,

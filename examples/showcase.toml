@@ -141,6 +141,9 @@ foreground = "$text"
 padding = 4
 background = "#00000000" # default: transparent
 radius = 0               # default: 0
+# Room the wording does not need is the wording's: it sits in the middle of what
+# is left while the icon stays where it is, so a reading that gains a digit does
+# not slide its own icon sideways.
 min_width = 0            # default: 0
 # An icon is written one way everywhere one can be written, including a
 # workspace's and the one a fold leaves behind. `$name` is one of dbar's own
