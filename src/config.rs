@@ -1684,6 +1684,32 @@ impl Config {
         wanted
     }
 
+    /// What each command module says its program will publish, by the command that runs it.
+    ///
+    /// A command's declared fields are deliberately not part of what makes two commands the
+    /// same command: two modules naming one program share one worker and the union of what
+    /// they declare. But the schema is what that worker parses the program's output with,
+    /// and it is handed over once, when the worker starts - so it belongs to the things a
+    /// reload cannot change.
+    ///
+    /// The order fields were written in is not meaning, so they are sorted by name here:
+    /// moving a line changes the file and not what the command promises.
+    pub fn command_schemas(
+        &self,
+    ) -> HashMap<crate::collect::CommandSpec, Vec<(&'static str, crate::status::Kind)>> {
+        let mut schemas = HashMap::new();
+        for module in self.modules() {
+            let Source::Native(Which::Command(spec)) = &module.source else {
+                continue;
+            };
+            let mut fields: Vec<(&'static str, crate::status::Kind)> =
+                spec.fields.iter().map(|f| (f.name, f.kind)).collect();
+            fields.sort_unstable_by_key(|(name, _)| *name);
+            schemas.insert(spec.clone(), fields);
+        }
+        schemas
+    }
+
     /// Which sources each realtime signal reads again, by offset from SIGRTMIN.
     ///
     /// One signal may refresh several sources, and several modules may share one signal;
@@ -1777,6 +1803,13 @@ impl Config {
     pub fn needs_restart_for(&self, new: &Config) -> Option<String> {
         if self.collectors() != new.collectors() {
             return Some("a module's source or interval".to_string());
+        }
+        // What a command declares is not part of which command it is, so a schema that
+        // changed gets this far: the same program, on the same schedule, promising
+        // something else. The worker parsing its output was given the old promise when it
+        // started and has no way to be told about the new one.
+        if self.command_schemas() != new.command_schemas() {
+            return Some("what a command module says it publishes".to_string());
         }
         if self.signals() != new.signals() {
             return Some("a module's signal".to_string());

@@ -2295,6 +2295,53 @@ fn a_reload_takes_wording_and_colour_and_refuses_what_a_worker_was_started_for()
     }
 }
 
+/// A command's worker is handed the schema once, when it starts, and parses every line
+/// the program prints with that. What the config declares is therefore not wording: a
+/// reload that changed it would leave the worker dropping the fields the new formats ask
+/// for and reading the ones they do not.
+#[test]
+fn a_command_that_promises_something_else_needs_a_restart() {
+    let declaring = |fields: &str, format: &str| {
+        one_module(&format!(
+            "source = \"command\"\ncommand = [\"weather\"]\ninterval = \"10m\"\n\
+             fields = {fields}\nformat = \"{format}\"\n"
+        ))
+    };
+    let old = Config::parse(&declaring("{ temp = \"number\" }", "$temp")).expect("the first");
+
+    // The same program, on the same schedule, promising something else: a field renamed,
+    // a field that changed kind, and a field added.
+    for (fields, format) in [
+        ("{ warmth = \"number\" }", "$warmth"),
+        ("{ temp = \"text\" }", "$temp"),
+        ("{ temp = \"number\", wind = \"number\" }", "$temp"),
+    ] {
+        let new = Config::parse(&declaring(fields, format)).expect(fields);
+        let what = old
+            .needs_restart_for(&new)
+            .unwrap_or_else(|| panic!("{fields} should need a restart"));
+        assert!(what.contains("publishes"), "{fields}: said {what}");
+    }
+
+    // New wording over the same promise is exactly what a reload is for, and the order the
+    // fields were written in is not part of the promise.
+    for (fields, format) in [
+        ("{ temp = \"number\" }", "it is $temp.n(d: 1) out"),
+        ("{ wind = \"number\", temp = \"number\" }", "$temp"),
+    ] {
+        let new = Config::parse(&declaring(fields, format)).expect(fields);
+        let old = match fields.contains("wind") {
+            true => Config::parse(&declaring(
+                "{ temp = \"number\", wind = \"number\" }",
+                "$temp",
+            ))
+            .expect("both fields"),
+            false => Config::parse(&declaring("{ temp = \"number\" }", "$temp")).expect("one"),
+        };
+        assert_eq!(old.needs_restart_for(&new), None, "{fields}");
+    }
+}
+
 #[test]
 fn icon_size_is_presentation_until_a_tray_has_been_drawn_at_it() {
     // A tray item's artwork is resolved once, at the size and in the theme the worker was

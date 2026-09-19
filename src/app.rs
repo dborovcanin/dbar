@@ -1444,8 +1444,9 @@ impl App {
             );
             return;
         }
-        self.reconfigure(new);
-        log::info!("the config was read again");
+        if self.reconfigure(new) {
+            log::info!("the config was read again");
+        }
     }
 
     /// Take a config that only changed wording, colour and geometry.
@@ -1455,7 +1456,7 @@ impl App {
     /// still in the file keeps what it was doing, and one that is gone takes its state with
     /// it. Nothing here starts, stops or asks anything of a worker: that is what
     /// `needs_restart_for` refused on the way in.
-    fn reconfigure(&mut self, new: Config) {
+    fn reconfigure(&mut self, new: Config) -> bool {
         let refont = (
             self.config.bar.font_family.clone(),
             self.config.bar.font_size,
@@ -1468,6 +1469,28 @@ impl App {
         // A layer is chosen when a surface is made and cannot be moved afterwards, so this
         // is the one geometry change that costs new surfaces.
         let relayer = self.config.bar.layer != new.bar.layer;
+
+        // The one thing here that can fail is asking for a font the machine may not have,
+        // so it is done first, against the file that was just read and before anything has
+        // been changed. A font that is not there refuses the whole reload rather than
+        // leaving the geometry and colours of one file with the lettering of another - and
+        // leaves the config alone, so installing the font and reloading the same file
+        // again is a reload that has something to do.
+        let text = match refont {
+            true => match TextRenderer::new(
+                &new.bar.font_family,
+                new.bar.font_size,
+                &new.bar.font_fallback,
+            ) {
+                Ok(text) => Some(text),
+                Err(e) => {
+                    log::error!("nothing was reloaded, so the bar is unchanged: {e:#}");
+                    return false;
+                }
+            },
+            false => None,
+        };
+
         self.config = new;
         self.travels = Travels::default();
         // A menu is laid out from the config it was opened with, and nothing re-places an
@@ -1475,17 +1498,12 @@ impl App {
         // is the file that was just read.
         self.close_menus();
 
-        if refont {
-            let bar = &self.config.bar;
-            match TextRenderer::new(&bar.font_family, bar.font_size, &bar.font_fallback) {
-                // Shaped runs and rasterised icons were measured against the old font, so
-                // the caches go with it. One shaping pass on the next frame, and nothing
-                // kept that was made for a file that is gone.
-                Ok(text) => self.painter = render::Painter::new(text),
-                Err(e) => log::error!("keeping the font already loaded: {e:#}"),
-            }
-        } else {
-            self.painter.forget_icons();
+        match text {
+            // Shaped runs and rasterised icons were measured against the old font, so the
+            // caches go with it. One shaping pass on the next frame, and nothing kept that
+            // was made for a file that is gone.
+            Some(text) => self.painter = render::Painter::new(text),
+            None => self.painter.forget_icons(),
         }
 
         forget_missing(
@@ -1501,18 +1519,22 @@ impl App {
         }
         self.warn_if_nowhere();
         self.invalidate();
+        true
     }
 
     /// Give every bar new surfaces, for the one change a surface cannot be told about.
+    ///
+    /// The surfaces that exist go, and then every screen is judged again rather than only
+    /// the ones that had a bar a moment ago: a reload that moved the layer may have named
+    /// other outputs in the same breath, and putting the bars back where they already were
+    /// would answer neither half of that.
     fn rebuild_bars(&mut self) {
         let outputs: Vec<wl_output::WlOutput> =
             self.bars.iter().map(|bar| bar.output.clone()).collect();
         for output in &outputs {
             self.drop_bar(output);
         }
-        for output in outputs {
-            self.add_bar(output);
-        }
+        self.replace_bars();
     }
 
     /// Put the bars that exist where the new config wants them, and judge every screen
@@ -1879,16 +1901,22 @@ impl App {
         needed
     }
 
-    /// Mark every bar as needing a redraw, and draw the ones the compositor is ready for.
+    /// Mark every bar as needing a redraw.
     ///
     /// What changed is what the bars show, and they all show the same thing, so a reading
     /// arriving is a redraw on each screen. They are laid out separately because their
     /// widths differ, but the work of collecting was done once.
+    ///
+    /// Nothing is drawn from here. The loop draws what is dirty once a dispatch is done,
+    /// so a burst of events - a player's metadata, a volume change and a uevent in the
+    /// same wake-up - is one layout and one frame rather than one of each per message.
+    /// Drawing here as well would lay the bar out again for every message in the batch,
+    /// and a frame whose pixels did not move requests no callback to hold the next one
+    /// back.
     fn invalidate(&mut self) {
         for bar in &mut self.bars {
             bar.dirty = true;
         }
-        self.draw_if_needed();
     }
 
     /// Draw every bar that has something to draw and no frame callback outstanding.
