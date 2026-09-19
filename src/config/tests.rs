@@ -460,6 +460,19 @@ fn a_source_that_arrives_on_its_own_cannot_be_asked() {
     }
 }
 
+/// Battery and temperature readings arrive through worker channels, but they are still
+/// collectors dbar owns and can be brought forward through the worker's trigger.
+#[test]
+fn a_worker_collector_can_be_asked_for_a_fresh_reading() {
+    for (source, settings) in [("battery", ""), ("temperature", "\nchip = \"nvme\"")] {
+        let cfg = Config::parse(&one_module(&format!(
+            "source = {source:?}{settings}\nrefresh_button = \"left\""
+        )))
+        .unwrap_or_else(|e| panic!("{source} can be refreshed: {e:#}"));
+        assert_eq!(cfg.refreshable().len(), 1);
+    }
+}
+
 #[test]
 fn refreshing_cannot_take_a_button_something_else_has() {
     let e = Config::parse(&one_module(

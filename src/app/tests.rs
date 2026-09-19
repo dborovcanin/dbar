@@ -2,6 +2,30 @@ use super::*;
 use crate::config::ClickActions;
 
 #[test]
+fn a_battery_uevent_requests_a_worker_read() {
+    let battery = Which::Battery;
+    let mut native = Registry::new(&std::collections::HashMap::from([(
+        battery.clone(),
+        std::time::Duration::from_secs(30),
+    )]));
+    assert!(
+        native.next_due().is_none(),
+        "battery is not on the UI timer"
+    );
+
+    let (sender, asked) = std::sync::mpsc::sync_channel(1);
+    let triggers =
+        std::collections::HashMap::from([(battery.clone(), crate::collect::Trigger::new(sender))]);
+    route_watch_event(&triggers, &mut native, watch::Event::Changed(battery));
+
+    assert_eq!(asked.try_recv(), Ok(()), "the worker was asked");
+    assert!(
+        native.next_due().is_none(),
+        "the pushed placeholder stayed off the UI timer"
+    );
+}
+
+#[test]
 fn a_submenu_flips_across_its_row_at_a_horizontal_screen_edge() {
     let root = menu_constraints(false);
     assert!(root.contains(xdg_positioner::ConstraintAdjustment::SlideX));

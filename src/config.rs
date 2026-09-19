@@ -1536,9 +1536,10 @@ fn click_actions(raw: &RawClickActions, module: &str) -> Result<ClickActions> {
 
 /// Whether a source can be read again on demand, and what to say when it cannot.
 ///
-/// Everything dbar reads itself can be. Of the sources that arrive rather than being read,
-/// only a command can be asked, and only one that answers: a streaming command says what
-/// it has when it has it, so there is no run to bring forward.
+/// Everything dbar reads itself can be, including a collector read on a worker thread.
+/// Of the sources that publish independently, only a command can be asked, and only one
+/// that answers: a streaming command says what it has when it has it, so there is no run
+/// to bring forward.
 fn can_refresh(source: &Source) -> std::result::Result<(), &'static str> {
     match source {
         Source::Native(Which::Command(spec)) => match spec.run {
@@ -1548,7 +1549,7 @@ fn can_refresh(source: &Source) -> std::result::Result<(), &'static str> {
             ),
             _ => Ok(()),
         },
-        Source::Native(which) if which.pushed() => Err(
+        Source::Native(which) if which.pushed() && !which.blocking() => Err(
             "this source arrives when it changes rather than being read, so there is \
              nothing to ask it for",
         ),

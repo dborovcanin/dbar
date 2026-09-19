@@ -435,9 +435,9 @@ fn main() -> Result<()> {
         }
     }
 
-    // A source whose read can wait on something outside this machine - a filesystem that
-    // has stopped answering, a wireless driver - is read on a thread of its own, so a
-    // mount that hangs cannot take the clock and the pointer down with it.
+    // A source whose read can wait on a filesystem, daemon, driver or firmware is read on
+    // a thread of its own, so one slow device cannot take the clock and pointer down with
+    // it.
     let slow: Vec<crate::collect::Which> = config_collectors
         .keys()
         .filter(|which| which.blocking())
@@ -447,10 +447,12 @@ fn main() -> Result<()> {
         let (slow_tx, slow_rx) = calloop::channel::sync_channel(QUEUED_UPDATES);
         for which in slow {
             let interval = config_collectors[&which];
-            let askable = askable.contains(&which);
-            if let Some(trigger) =
-                crate::collect::slow::spawn(which.clone(), interval, askable, slow_tx.clone())
-            {
+            if let Some(trigger) = crate::collect::slow::spawn(
+                which.clone(),
+                interval,
+                askable.contains(&which),
+                slow_tx.clone(),
+            ) {
                 app.set_trigger(which, trigger);
             }
         }

@@ -108,7 +108,7 @@ pub fn spawn(
     let rest = rest.to_vec();
     // A streaming command is never asked: it says what it has when it has it, and there
     // is no run to bring forward.
-    let channel = (askable && run != Run::Stream).then(mpsc::channel::<()>);
+    let channel = (askable && run != Run::Stream).then(|| mpsc::sync_channel::<()>(1));
     let (trigger, asked) = match channel {
         Some((ask, asked)) => (Some(super::Trigger::new(ask)), Some(asked)),
         None => (None, None),

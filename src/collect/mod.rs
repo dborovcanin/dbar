@@ -4,10 +4,10 @@
 //! no formatting and holds no opinion about how it is drawn, so the same reading serves a
 //! module that shows a percentage and one that shows a bar.
 //!
-//! Collectors run on the event loop rather than on threads. A `/proc` read takes
-//! microseconds, so a thread would cost more than it saves; the sources that genuinely
-//! block - D-Bus, PipeWire - get a thread each when they arrive, and reach the loop the
-//! same way the compositor connection already does.
+//! Cheap collectors run on the event loop rather than on threads. A `/proc` read takes
+//! microseconds, so a thread would cost more than it saves; sources that can wait on a
+//! driver, daemon or remote filesystem get a thread each and reach the loop the same way
+//! the compositor connection already does.
 
 pub mod audio;
 pub mod backlight;
@@ -216,18 +216,27 @@ impl Which {
         matches!(self, Which::Audio | Which::Media | Which::Command(_)) || self.blocking()
     }
 
-    /// Whether reading this source can wait on something outside this machine's control.
+    /// Whether reading this source can wait on something outside the event loop's control.
     ///
     /// `statvfs` answers when the filesystem does, which for a network mount or a FUSE
     /// daemon that has gone may be never; a wireless link is a netlink request and a wait
-    /// for the driver to answer. Everything else here is a file under `/proc` or `/sys`
-    /// that the kernel fills in on the spot.
+    /// for the driver to answer. Battery and explicitly selected temperature attributes
+    /// are sysfs files, but reading them may still ask firmware or hardware through their
+    /// drivers. The default temperature source only selects the CPU drivers listed in
+    /// `temperature::CPU_CHIPS`; the measured default path stays on the shared timer.
+    ///
+    /// Backlight remains on the shared timer deliberately. Moving only its reads would
+    /// leave adjustment writes on the event loop; that path needs measurement and, if it
+    /// proves material, one worker that orders writes with the reads they cause.
     ///
     /// A source like that is read on a thread of its own and arrives the way a command's
     /// reading does, because the alternative is a mount that stopped answering stopping
     /// the clock, the pointer and the compositor's own events with it.
     pub fn blocking(&self) -> bool {
-        matches!(self, Which::Disk(_) | Which::Network(_))
+        matches!(
+            self,
+            Which::Battery | Which::Temperature(Some(_)) | Which::Disk(_) | Which::Network(_)
+        )
     }
 
     /// The collector itself, whichever thread is going to read it.
@@ -249,20 +258,21 @@ impl Which {
 
 /// The way to ask a source for another reading before its schedule would have one.
 ///
-/// A module asks by being clicked or by being sent its signal. The thread behind the
-/// source is waiting on this rather than sleeping, so the reading is taken when the ask
-/// arrives rather than when the interval it was in the middle of runs out.
-pub struct Trigger(std::sync::mpsc::Sender<()>);
+/// A module asks by being clicked or sent its signal, and a watcher asks when the kernel
+/// reports a change. The thread behind the source waits on this rather than sleeping, so
+/// the reading is taken when the ask arrives rather than when its interval runs out.
+pub struct Trigger(std::sync::mpsc::SyncSender<()>);
 
 impl Trigger {
-    pub(crate) fn new(sender: std::sync::mpsc::Sender<()>) -> Trigger {
+    pub(crate) fn new(sender: std::sync::mpsc::SyncSender<()>) -> Trigger {
         Trigger(sender)
     }
 
     pub fn ask(&self) {
-        // A thread that has gone is a source that stopped answering, which the bar
-        // already knows from the last reading it sent.
-        let _ = self.0.send(());
+        // One pending ask is enough: several notifications or impatient clicks still
+        // want one fresh reading, not one per event. A full queue and a worker that has
+        // gone are both deliberately silent, and neither may stall the event loop.
+        let _ = self.0.try_send(());
     }
 }
 
@@ -714,7 +724,7 @@ mod tests {
         }
     }
 
-    /// The two sources whose read can wait on something outside this machine are never
+    /// Sources whose read can wait on a driver, daemon or filesystem are never
     /// read on the bar's own thread: their readings arrive from a thread of their own,
     /// and the registry only holds them.
     #[test]
@@ -723,17 +733,32 @@ mod tests {
         assert!(disk.blocking() && disk.pushed());
         let wifi = Which::Network(None);
         assert!(wifi.blocking() && wifi.pushed());
-        // Everything else is a file the kernel fills in on the spot.
+        let battery = Which::Battery;
+        assert!(battery.blocking() && battery.pushed());
+        let temperature = Which::Temperature(Some("nvme".to_string()));
+        assert!(temperature.blocking() && temperature.pushed());
+        let default_temperature = Which::Temperature(None);
+        assert!(!default_temperature.blocking() && !default_temperature.pushed());
         for which in all() {
             assert_eq!(
                 which.blocking(),
-                matches!(which, Which::Disk(_) | Which::Network(_)),
+                matches!(
+                    which,
+                    Which::Battery
+                        | Which::Temperature(Some(_))
+                        | Which::Disk(_)
+                        | Which::Network(_)
+                ),
                 "{} is classified wrongly",
                 which.describe()
             );
         }
 
-        let wanted = HashMap::from([(disk.clone(), Duration::from_secs(1))]);
+        let wanted = HashMap::from([
+            (disk.clone(), Duration::from_secs(1)),
+            (battery, Duration::from_secs(1)),
+            (temperature, Duration::from_secs(1)),
+        ]);
         let mut registry = Registry::new(&wanted);
         assert!(!registry.tick(), "the timer has nothing to read");
         assert!(registry.next_due().is_none(), "and nothing to wake up for");
@@ -773,6 +798,17 @@ mod tests {
             !registry.arrived(&disk, Err(anyhow::anyhow!("still gone"))),
             "staying stale is not"
         );
+    }
+
+    #[test]
+    fn refresh_requests_are_bounded_and_coalesced() {
+        let (sender, asked) = std::sync::mpsc::sync_channel(1);
+        let trigger = Trigger::new(sender);
+        trigger.ask();
+        trigger.ask();
+        trigger.ask();
+        assert_eq!(asked.try_recv(), Ok(()));
+        assert_eq!(asked.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty));
     }
 
     /// A source that has gone is asked less and less often, wherever it is read: the

@@ -481,7 +481,7 @@ pub struct App {
     travels: Travels,
     /// Which sources each realtime signal reads again.
     signals: std::collections::HashMap<i32, Vec<Which>>,
-    /// The way to ask a command module's program for another reading, by source.
+    /// The way to ask a worker for another reading, by source.
     triggers: std::collections::HashMap<Which, crate::collect::Trigger>,
     /// Command sources with a run on its way, and when that run started.
     ///
@@ -711,7 +711,7 @@ impl App {
         self.name_count_warned = true;
     }
 
-    /// Remember how to ask a command module's program for another reading.
+    /// Remember how to ask a worker for another reading.
     pub fn set_trigger(&mut self, which: Which, trigger: crate::collect::Trigger) {
         self.triggers.insert(which, trigger);
     }
@@ -750,15 +750,11 @@ impl App {
 
     /// Ask one source for a fresh reading, however that source is read.
     ///
-    /// A collector is brought forward on the shared timer. A command is not read at all -
-    /// its program runs on a thread of its own - so it is asked there instead, and the
-    /// reading arrives the way every other one from it does.
+    /// A cheap collector is brought forward on the shared timer. A command or collector
+    /// that can block runs on a thread of its own, so it is asked there instead and its
+    /// reading arrives through the event loop.
     fn refresh_source(&mut self, which: &Which) {
-        if let Some(trigger) = self.triggers.get(which) {
-            trigger.ask();
-            return;
-        }
-        self.native.refresh(which);
+        request_reading(&self.triggers, &mut self.native, which);
     }
 
     /// The source behind a module, by name.
@@ -1876,13 +1872,7 @@ impl App {
     /// interval, which needs a timer if every remaining source was watched and the timer
     /// had therefore stopped.
     pub fn on_watch(&mut self, event: watch::Event) -> bool {
-        match event {
-            watch::Event::Changed(which) => {
-                log::debug!("{} changed", which.name());
-                self.native.refresh(&which);
-            }
-            watch::Event::Lost(which) => self.native.set_watched(&which, false),
-        }
+        route_watch_event(&self.triggers, &mut self.native, event);
         self.collect();
         let needed = !self.collect_scheduled && self.native.is_scheduled();
         self.collect_scheduled |= needed;
@@ -2380,6 +2370,36 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// Route a kernel notification to the place that owns the source's next read.
+///
+/// Kept outside `App` so the important worker-versus-registry decision can be exercised
+/// without constructing Wayland objects in a unit test.
+fn route_watch_event(
+    triggers: &std::collections::HashMap<Which, crate::collect::Trigger>,
+    native: &mut Registry,
+    event: watch::Event,
+) {
+    match event {
+        watch::Event::Changed(which) => {
+            log::debug!("{} changed", which.name());
+            request_reading(triggers, native, &which);
+        }
+        watch::Event::Lost(which) => native.set_watched(&which, false),
+    }
+}
+
+/// Ask a source wherever its collector lives.
+fn request_reading(
+    triggers: &std::collections::HashMap<Which, crate::collect::Trigger>,
+    native: &mut Registry,
+    which: &Which,
+) {
+    match triggers.get(which) {
+        Some(trigger) => trigger.ask(),
+        None => native.refresh(which),
     }
 }
 
