@@ -2420,7 +2420,9 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
                 && run == crate::collect::command::Run::Stream
             {
                 bail!(
-                    "module {module_name:?} sets `timeout`, but a streaming command is meant                      to keep running; a timeout only applies to a command that is run for an                      answer, which is what an `interval` asks for"
+                    "module {module_name:?} sets `timeout`, but a streaming command is \
+                     meant to keep running; a timeout only applies to a command that is run \
+                     for an answer, which is what an `interval` asks for"
                 );
             }
             Source::Native(Which::Command(crate::collect::CommandSpec {

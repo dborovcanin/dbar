@@ -133,7 +133,8 @@ fn adjust_in(class: &Path, step: f64) -> Result<()> {
     let path = device.join("brightness");
     std::fs::write(&path, wanted.to_string()).with_context(|| {
         format!(
-            "writing {}; dbar changes the brightness itself, which needs write access -              the usual way is membership of the `video` group",
+            "writing {}; dbar changes the brightness itself, which needs write access - \
+             the usual way is membership of the `video` group",
             path.display()
         )
     })
