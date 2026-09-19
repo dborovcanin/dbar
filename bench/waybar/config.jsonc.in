@@ -1,0 +1,137 @@
+// Waybar, written to match examples/gruvbox-islands.toml module for module: the
+// same fifteen things, in the same places, on the same intervals, drawing an icon
+// wherever dbar draws one, so the README's comparison is about what each bar
+// costs rather than about what each bar was asked to show.
+//
+// The icons are the one place the two bars cannot be made identical. dbar draws
+// its own vector artwork at `icon_size = 20`; Waybar has no such thing, so each
+// module is given the Nerd Font glyph for the picture dbar draws there. A glyph
+// is a shaped-and-cached character rather than a rasterised path, which is if
+// anything cheaper - the asymmetry is against dbar, not for it. They are Nerd Font
+// codepoints, so the font named in style.css has to be one that carries them.
+//
+// Rendered by run.sh, which fills in the two machine-specific paths. Do not
+// point Waybar at this file directly.
+{
+  "layer": "bottom",
+  "position": "top",
+  "height": 34,
+
+  // gruvbox-islands.toml puts margin = 3 around the bar itself.
+  "margin-top": 3,
+  "margin-left": 3,
+  "margin-right": 3,
+
+  // dbar's [left], [center] and [right] runs, group for group: the clock is the
+  // centred one, and the media module leads the right-hand run rather than
+  // sitting in the middle.
+  "modules-left": ["sway/workspaces", "sway/mode", "sway/window"],
+  "modules-center": ["clock"],
+  "modules-right": [
+    "mpris",
+    "custom/weather",
+    "tray",
+    "cpu",
+    "memory",
+    "temperature",
+    "sway/language",
+    "network",
+    "wireplumber",
+    "backlight",
+    "battery"
+  ],
+
+  // dbar's workspaces module draws every workspace the compositor reports, not
+  // only the ones on this output, and states say which is focused and which is
+  // visible elsewhere. `all-outputs` is what makes Waybar draw the same buttons.
+  //
+  // dbar also names an icon for workspaces 0 to 3 and falls back to the
+  // workspace's own name for the rest. Waybar cannot mix the two: `format-icons`
+  // takes literal strings, and a "default" of "{name}" is drawn as those six
+  // characters rather than substituted. So this draws names throughout, which
+  // leaves dbar rasterising an icon Waybar does not - again against dbar.
+  "sway/workspaces": {
+    "all-outputs": true,
+    "disable-scroll": true,
+    "format": "{name}"
+  },
+
+  //  is the keyboard dbar's mode module wears.
+  "sway/mode": { "format": " {}" },
+  "sway/window": { "max-length": 48 },
+
+  // dbar's media module reads MPRIS over D-Bus; so does this. dbar's icon is a
+  // button - it shows what a click would do - so playing wears pause ()
+  // and paused wears play (), the same way round.
+  "mpris": {
+    "format": "{status_icon} {artist} {title}",
+    "status-icons": { "playing": "", "paused": "" },
+    "max-length": 48
+  },
+
+  // dbar draws tray artwork at icon_size = 20 with 6px of padding.
+  "tray": { "icon-size": 20, "spacing": 6 },
+
+  // The intervals are dbar's: cpu 2s, memory 5s, temperature 5s, battery 30s,
+  // clock 1m. Waybar counts in seconds.  is a processor, 󰍛 a
+  // memory stick,  a thermometer.
+  "cpu": { "interval": 2, "format": " {usage}%" },
+  "memory": { "interval": 5, "format": "󰍛 {percentage}%" },
+
+  // Pointed at the same sensor dbar's default picks - the CPU chip, not the
+  // thinkpad one i3status-rs is configured for. That asymmetry is the README's,
+  // and it is between i3status-rs and the other two rather than inside this file.
+  "temperature": {
+    "interval": 5,
+    "hwmon-path": "@TEMP_INPUT@",
+    "format": " {temperatureC}°C"
+  },
+
+  "sway/language": { "format": " {short}" },
+
+  //  is the wireless fan,  a wired network, 󰤮 a link that
+  // has gone - the three pictures dbar's network module and its offline state
+  // draw.
+  "network": {
+    "interval": 2,
+    "format-wifi": " {essid}",
+    "format-ethernet": " {ifname}",
+    "format-disconnected": "󰤮"
+  },
+
+  // dbar reads PipeWire directly; wireplumber is Waybar's PipeWire module. dbar
+  // grades its volume icon and swaps it for headphones () and for muted
+  // (), so this does too.
+  "wireplumber": {
+    "format": "{icon} {volume}%",
+    "format-muted": " {volume}%",
+    "format-icons": { "headphone": "", "default": ["", "", ""] }
+  },
+
+  //  is the sun dbar's brightness module draws.
+  "backlight": { "format": " {percent}%" },
+
+  // dbar shows the percentage and swaps the icon for a charging one on mains:
+  //  is a battery and 󰂄 the one with a bolt through it. The units
+  // are dbar's: its fields carry them, so its formatter writes "%" and "°C"
+  // on its own and Waybar has to be told.
+  "battery": {
+    "interval": 30,
+    "format": " {capacity}%",
+    "format-charging": "󰂄 {capacity}%",
+    "format-plugged": "󰂄 {capacity}%"
+  },
+
+  // The same script dbar runs, with the same arguments, fetched once at startup -
+  // dbar's weather module is `interval = "once"`. The shim only reshapes what the
+  // script prints, including the script's own weather glyph, so the fetch and the
+  // icon are identical and no bar is charged for a web service during a
+  // measurement window.
+  "custom/weather": {
+    "exec": "@BENCH@/waybar/weather-shim.sh @DBAR_ROOT@",
+    "interval": "once"
+  },
+
+  //  is the clock face dbar's time module draws.
+  "clock": { "interval": 60, "format": " {:%a %d %b  %H:%M}" }
+}

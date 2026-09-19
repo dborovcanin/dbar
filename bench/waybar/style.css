@@ -1,0 +1,154 @@
+/* The gruvbox islands of examples/gruvbox-islands.toml, as closely as a
+   stylesheet can say them: the same colours, the same 16px radius, the same 3px
+   gaps, the same font at the same size, and the same runs of modules sharing one
+   island in alternating shades.
+
+   The comparison is about what a bar costs to leave running, so a stylesheet
+   that drew gradients and shadows would be measuring the theme. This draws what
+   dbar draws and nothing more.
+
+   The one shape that cannot be matched is dbar's `curve` separator, which turns
+   one shade into the next with a sigmoid. Waybar's vocabulary is a box with a
+   border-radius, so a run's modules simply alternate between the two greys and
+   the run's outer corners are rounded. That is one fill per module either way -
+   dbar is doing strictly more drawing here, not less. */
+
+* {
+	/* gruvbox-islands.toml's own font and its own fallback list, in its own
+	   order: Symbols Nerd Font carries this file's icons, and the rest are what
+	   a weather glyph, a track title or a window title may need. */
+	font-family: "Noto Sans", "Symbols Nerd Font", "Noto Sans Symbols 2",
+		"Noto Color Emoji", "Noto Sans CJK JP", "Noto Sans Arabic",
+		"Noto Sans Hebrew", "Noto Sans Thai", "Noto Sans Devanagari", sans-serif;
+	font-size: 18px;
+	border: none;
+	border-radius: 0;
+	min-height: 0;
+}
+
+window#waybar {
+	background: #282828; /* bg0 */
+	color: #d5c4a1;      /* fg2 */
+}
+
+/* Every module is an island or part of one: 3px of gap on the left, the bar's
+   own margin providing the rest. `padding` is gruvbox-islands.toml's style
+   padding of 4. */
+#mode,
+#window,
+#mpris,
+#tray,
+#cpu,
+#memory,
+#temperature,
+#language,
+#network,
+#wireplumber,
+#backlight,
+#battery,
+#clock,
+#custom-weather {
+	padding: 0 4px;
+	margin: 0 0 0 3px;
+	background: #3c3836; /* bg1 - the island's own material */
+}
+
+/* Single-module islands: both corners cut the same way, as [group.*.edges] says. */
+#workspaces,
+#mode,
+#window,
+#mpris,
+#tray,
+#custom-weather,
+#clock {
+	border-radius: 16px;
+}
+
+#workspaces {
+	background: #3c3836;
+	padding: 0 3px;
+	margin: 0 0 0 3px;
+}
+
+/* [module.workspaces]: dim by default, a raised pill for one visible on another
+   output, the accent for the focused one, critical for urgent. The 13px radius
+   is the island's 16 less the 3px it sits in, so the curves run parallel. */
+#workspaces button {
+	padding: 0 10px;
+	margin: 3px 1px;
+	border-radius: 13px;
+	color: #a89984; /* fg4 - style.dim */
+	background: transparent;
+}
+
+#workspaces button.visible {
+	background: #504945; /* bg2 - style.pill */
+	color: #d5c4a1;
+}
+
+#workspaces button.focused {
+	background: #83a598; /* bright blue - style.focused */
+	color: #282828;
+}
+
+#workspaces button.urgent {
+	background: #fb4934; /* bright red - style.critical */
+	color: #282828;
+}
+
+/* [group.mode]: the warning colour, because it is a state you want out of. */
+#mode {
+	background: #fabd2f;
+	color: #282828;
+}
+
+/* [group.time]: the one module that carries a colour of its own. */
+#clock {
+	background: #83a598;
+	color: #282828;
+}
+
+/* The three shared islands - system, network, power. The modules carry the
+   background themselves and alternate tile/tile_alt, and only the ends of the
+   run are rounded, so each run reads as one strip. */
+#memory,
+#network,
+#backlight {
+	background: #504945; /* bg2 - style.tile_alt */
+}
+
+#cpu,
+#language,
+#wireplumber {
+	border-radius: 16px 0 0 16px;
+	margin: 0 0 0 3px;
+}
+
+#temperature,
+#network,
+#battery {
+	border-radius: 0 16px 16px 0;
+}
+
+/* Inside a run the modules touch: no gap between them, only at the ends. */
+#memory,
+#temperature,
+#network,
+#backlight,
+#battery {
+	margin: 0;
+}
+
+/* gruvbox-islands.toml pins the numeric modules at min_width so the bar does not
+   shuffle sideways when a percentage crosses ten. */
+#cpu,
+#memory,
+#wireplumber,
+#backlight,
+#battery {
+	min-width: 77px;
+}
+
+#temperature {
+	min-width: 80px;
+}

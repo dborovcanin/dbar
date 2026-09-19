@@ -2295,6 +2295,25 @@ fn a_reload_takes_wording_and_colour_and_refuses_what_a_worker_was_started_for()
     }
 }
 
+/// The benchmark runs its own copy of the example bar, and the table in the README only
+/// means what it says while the two are the same bar. Everything below `[bar]` has to
+/// match, once the one path the bench spells out is relative again.
+#[test]
+fn the_benchmark_runs_the_example_bar_it_says_it_runs() {
+    let example = include_str!("../../examples/gruvbox-islands.toml");
+    let bench = include_str!("../../bench/dbar/config.toml.in").replace("@DBAR_ROOT@/", "");
+    let below = |text: &str| {
+        let at = text.find("\n[bar]").expect("a [bar] table");
+        text[at..].to_string()
+    };
+    assert_eq!(
+        below(&bench),
+        below(example),
+        "bench/dbar/config.toml.in and examples/gruvbox-islands.toml have drifted apart"
+    );
+    Config::parse(&bench).expect("the bench config is a config");
+}
+
 /// A command's worker is handed the schema once, when it starts, and parses every line
 /// the program prints with that. What the config declares is therefore not wording: a
 /// reload that changed it would leave the worker dropping the fields the new formats ask

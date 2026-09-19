@@ -1,0 +1,701 @@
+# dbar, as the benchmark runs it.
+#
+# The bench's own copy of examples/gruvbox-islands.toml: every module, interval,
+# style and icon is the file it was copied from, and everything below `[bar]`
+# should stay diffable against it -
+#
+#     diff <(sed -n '/^\[bar\]/,$p' examples/gruvbox-islands.toml) \
+#          <(sed -n '/^\[bar\]/,$p' bench/dbar/config.toml.in | sed 's|@DBAR_ROOT@/||')
+#
+# It lives here so that all three bars in the comparison are configured in one
+# place, beside waybar/config.jsonc.in and i3status/status.toml, and so that a
+# change to the example bar cannot quietly change what was measured.
+#
+# Rendered by run.sh, which fills in the one machine-specific path. Do not point
+# dbar at this file directly.
+
+[bar]
+height = 34
+position = "top"
+# The bar sits under floating windows, so one dragged across the top of the
+# screen passes over it rather than behind it. Tiled windows never reach it -
+# the exclusive zone keeps the strip to itself.
+layer = "bottom"
+margin = 3
+gap = 3
+font = "Noto Sans 18"
+
+# What to draw a character the bar's own font has no glyph for.
+#
+# A bar shows text it did not write: workspace names carrying Nerd Font glyphs, a window
+# title in Japanese, a track with an emoji in it. When the font above runs out, dbar tries
+# these in order, and the shorter the list the sooner it stops looking.
+#
+# That length is the whole point. Without one, dbar searches every font on the machine and
+# reads each one it tries, so a single Nerd Font glyph in a workspace name can stall the
+# bar for tens of milliseconds and leave tens of megabytes of font files mapped for as long
+# as it runs - on a machine with a wall of patched programming fonts installed, all of them.
+#
+# `Symbols Nerd Font` is the one that matters here: it is the glyphs on their own, so the
+# search finds them in one file instead of wandering through every patched font that also
+# carries them. Everything else covers a script `Noto Sans` does not.
+#
+# Naming them replaces dbar's own choice rather than adding to it, and a family listed here
+# has to be installed - dbar says so at startup rather than drawing empty boxes later.
+# Delete the line and dbar picks a set like this one from whatever it finds.
+fallback = [
+  "Symbols Nerd Font",
+  "Noto Sans Symbols 2",
+  "Noto Color Emoji",
+  "Noto Sans CJK JP",
+  "Noto Sans Arabic",
+  "Noto Sans Hebrew",
+  "Noto Sans Thai",
+  "Noto Sans Devanagari",
+]
+
+icon_size = 20
+
+# ---------------------------------------------------------------------------
+# Colours - Gruvbox dark.
+#
+# The two greys are the whole of the bar's own weight: `surface` is what an
+# island is made of, `raised` is the same material one step lighter. Everything
+# with a hue on it means something - focus, or a reading worth looking at.
+#
+# Both are opaque. What SwayFX blurs through is the groups' own `opacity`, which
+# fades each island once it is finished rather than fading the colours that go
+# into it - see the note there.
+# ---------------------------------------------------------------------------
+
+[colors]
+background = "#282828" # bg0
+surface = "#3c3836"    # bg1
+raised = "#504945"     # bg2, the same island one shade up
+text = "#d5c4a1"       # fg2 - fg1 reads white against these greys
+subtext = "#a89984"    # fg4
+accent = "#83a598"     # bright blue
+warning = "#fabd2f"    # bright yellow
+critical = "#fb4934"   # bright red
+
+[left]
+groups = ["desktop", "mode", "window"]
+
+[center]
+groups = ["time"]
+
+[right]
+groups = ["playing", "weather", "tray", "system", "network", "power"]
+
+# ---------------------------------------------------------------------------
+# Styles
+#
+# `panel` is worn by anything that sits alone on its group's own background.
+# `tile` and `tile_alt` are for the groups that hold several modules: they
+# alternate, because the curve between two modules is filled from the module
+# behind it, so a boundary only exists where the two sides differ.
+#
+# The two alarms are what a state rule swaps in when a reading stops being
+# ordinary. The rest exist for the workspaces, which are the one place on the
+# bar where several things are true at once.
+# ---------------------------------------------------------------------------
+
+[style.panel]
+foreground = "$text"
+padding = 4
+icon_gap = 3
+
+[style.tile]
+background = "$surface"
+foreground = "$text"
+padding = 4
+icon_gap = 3
+
+[style.tile_alt]
+background = "$raised"
+foreground = "$text"
+padding = 4
+icon_gap = 3
+
+[style.warning]
+background = "$warning"
+foreground = "$background"
+padding = 4
+icon_gap = 3
+
+[style.critical]
+background = "$critical"
+foreground = "$background"
+padding = 4
+icon_gap = 3
+
+# A pill inside a panel: its own rounded background, sitting on the group's. The
+# workspaces use it to say which ones exist on another output.
+#
+# The radius is the island's less the padding it sits in - 16 - 3 - so the two
+# curves run parallel. Asking for the island's own 16 here does not draw 16: a
+# radius is capped at half the box, and the pill is 6px shorter than the island,
+# so it would come out a stadium against the island's rounded rectangle.
+[style.pill]
+background = "$raised"
+foreground = "$text"
+padding = 10
+radius = 13
+
+[style.focused]
+background = "$accent"
+foreground = "$background"
+padding = 10
+radius = 13
+
+[style.dim]
+foreground = "$subtext"
+padding = 10
+
+# The pointer picks a module out without moving anything: hover is paint-only,
+# so nothing resizes as the mouse crosses the bar.
+[style.hovered]
+background = "$raised"
+foreground = "$text"
+
+# ---------------------------------------------------------------------------
+# Groups
+#
+# Every group is the same island: one rounded strip, both corners cut the same
+# way. Uniformity is the point - a shape that differs should mean something
+# differs, and here nothing does.
+#
+# Where an island holds one module it carries its own background and the module
+# is bare. Where it holds several, the modules carry the background themselves,
+# alternating between the two greys, and a `curve` is drawn where they meet: a
+# sigmoid with horizontal tangents at both ends, so one shade turns into the
+# next without a line anywhere. The group leaves its own background unset there,
+# since the modules cover it end to end.
+#
+# `opacity` is what lets that sit on a wallpaper. An island is drawn opaque and
+# faded once, as a finished thing, so everything inside it meets everything else
+# at full strength: a filled separator lays its ground across the whole gap and
+# its shape over the top, and two overlapping fills that were each already
+# translucent would leave the shape heavier than the modules it runs between.
+# Alpha written into a colour is applied once per fill; this is applied once per
+# island, which is the level a person means by "see-through bar" anyway.
+#
+# `width` is how long the curve has to turn over. There is no `overlap`: that
+# bleeds a separator a fraction under its neighbours to cover the seam two
+# antialiased edges leave between them, and these edges are snapped to whole
+# pixels, so there is no seam to cover.
+# ---------------------------------------------------------------------------
+
+[group.desktop]
+modules = ["workspaces"]
+background = "$surface"
+radius = 16
+# opacity = 0.8
+padding = 3
+spacing = 3
+
+[group.desktop.edges]
+left = "round"
+right = "round"
+
+# The compositor's binding mode, which is only on the bar while there is one to
+# report. It sits between the workspaces and the window because that is where the
+# eye already is when the keyboard stops doing what it usually does, and it wears
+# the warning colour for the same reason: this is a state you are in and want out
+# of.
+[group.mode]
+modules = ["mode"]
+background = "$warning"
+radius = 16
+# opacity = 0.8
+
+[group.mode.edges]
+left = "round"
+right = "round"
+
+[group.window]
+modules = ["title"]
+background = "$surface"
+radius = 16
+# opacity = 0.8
+
+[group.window.edges]
+left = "round"
+right = "round"
+
+# What is playing leads the right-hand run, and only appears when something is
+# playing: a bar with nothing on it draws nothing. It sits here rather than in
+# the centre so that folding it down to its icon does not leave the icon
+# stranded in the middle of an empty bar.
+[group.playing]
+modules = ["media"]
+background = "$surface"
+radius = 16
+# opacity = 0.8
+
+[group.playing.edges]
+left = "round"
+right = "round"
+
+# Whatever else is running and wants somewhere to put an icon. The island holds
+# no modules of its own: one appears per application, and the group is not drawn
+# at all while nothing is in the tray.
+[group.tray]
+modules = ["tray"]
+background = "$surface"
+radius = 16
+
+[group.tray.edges]
+left = "round"
+right = "round"
+
+# What the machine is doing with itself: how hard it is working, how much it is
+# holding, and how hot that is making it. Three readings of one thing, so they
+# share one island and run into each other rather than being ruled apart.
+[group.system]
+# Right click anywhere in this island to fold it; right click Tux to expand again.
+collapsible = true
+collapse_button = "right"
+# The island travels between its two widths instead of jumping between them. Leave
+# this out and the fold is one redraw, which is what it costs at rest either way:
+# the timer runs only while an island is moving and stops when it arrives.
+collapse_animation = "250ms"
+modules = ["cpu", "memory", "temperature"]
+radius = 16
+# opacity = 0.8
+
+[group.system.collapsed]
+style = "tile"
+icon = "$tux"
+
+[group.system.separator]
+shape = "curve"
+width = 10
+direction = "right"
+color = "previous"
+
+[group.system.edges]
+left = "round"
+right = "round"
+
+# The keyboard's layout sits next to the network because both are about what the
+# machine is connected to rather than what it is doing.
+[group.network]
+modules = ["language", "network"]
+radius = 16
+# opacity = 0.8
+
+[group.network.separator]
+shape = "curve"
+width = 10
+direction = "right"
+color = "previous"
+
+[group.network.edges]
+left = "round"
+right = "round"
+
+[group.power]
+modules = ["volume", "brightness", "battery"]
+radius = 16
+# opacity = 0.8
+
+[group.power.separator]
+shape = "curve"
+width = 10
+direction = "right"
+color = "previous"
+
+[group.power.edges]
+left = "round"
+right = "round"
+
+# The weather sits beside the clock because both are about the world outside the
+# machine rather than the machine.
+[group.weather]
+modules = ["weather"]
+background = "$surface"
+radius = 16
+# opacity = 0.8
+
+[group.weather.edges]
+left = "round"
+right = "round"
+
+# The clock is what the eye goes to, so it is the one thing that carries a
+# colour of its own.
+[group.time]
+modules = ["clock"]
+background = "$accent"
+radius = 16
+# opacity = 0.8
+
+[group.time.edges]
+left = "round"
+right = "round"
+
+# ---------------------------------------------------------------------------
+# Modules
+#
+# Fixed widths where a number moves, so the bar does not shuffle sideways every
+# time a percentage crosses ten. A left click swaps `format_alt` in and back.
+#
+# Inside the three shared islands the styles alternate, `tile`, `tile_alt`,
+# `tile`, and an alarm style simply takes a module's turn: the curve on either
+# side of it then runs from the ordinary grey into the alarm colour, which is
+# what makes one hot reading read as part of the same strip rather than a badge
+# stuck onto it.
+# ---------------------------------------------------------------------------
+
+# Three states, so a glance says which workspace is here, which is on the other
+# screen and which is asking for attention. Everything else is a quiet number.
+[module.workspaces]
+source = "workspaces"
+icons = { "0" = "$arch", "1" = "$slack", "2" = "$code", "3" = "$chrome" }
+style = "dim"
+
+[module.workspaces.states.focused]
+focused = true
+style = "focused"
+
+[module.workspaces.states.visible]
+visible = true
+style = "pill"
+
+[module.workspaces.states.urgent]
+urgent = true
+style = "critical"
+radius = 13
+
+# `controls = true` makes the module the remote as well as the display: a left
+# click plays and pauses, and the wheel moves between tracks. dbar asks the
+# player over the session bus and draws what the player then reports, so what is
+# on the bar is what actually happened.
+# The menu a tray icon opens, which for several applications is the only way in:
+# a network applet has no activation at all and keeps everything here.
+[menu]
+background = "$surface"
+foreground = "$text"
+highlight = "$raised"
+disabled = "$subtext"
+separator = "$raised"
+
+# An application's own icon, drawn as it shipped it. A right click opens the menu
+# behind it, a left click is what the application calls being activated - usually
+# showing its window - and the middle button is its second action. There is
+# nothing to write here: the picture is the whole module, and `format` is empty by
+# default because of it.
+[module.tray]
+source = "tray"
+style = "panel"
+padding = 6
+
+# An application asking to be noticed says so, and the icon is left alone while
+# the island around it changes: recolouring someone else's artwork would be
+# guessing at what it is a picture of.
+[module.tray.states.attention]
+field = "status"
+equals = "attention"
+background = "$critical"
+
+[module.media]
+source = "media"
+controls = true
+collapsible = true
+format = "{$artist  }$title"
+style = "panel"
+max_width = 320
+# The icon is a button, so it shows what a click will do rather than what is
+# already happening: while a track plays, clicking pauses it.
+icon = "$pause"
+
+[module.media.states.paused]
+field = "status"
+equals = "paused"
+foreground = "$subtext"
+icon = "$play"
+
+# `default` is what a keyboard does anyway, so the module says nothing then and the
+# island goes with it - the bar grows a segment exactly when the mode does.
+[module.mode]
+source = "mode"
+format = "$mode"
+style = "panel"
+foreground = "$background"
+icon = "$keyboard"
+
+[module.title]
+source = "window"
+style = "panel"
+max_width = 420
+
+[module.cpu]
+source = "cpu"
+interval = "2s"
+format = "$utilization.n(d:0)"
+min_width = 77
+style = "tile"
+icon = "$cpu"
+
+[module.cpu.states.busy]
+above = 85
+style = "warning"
+
+[module.cpu.states.unreadable]
+state = "error"
+style = "critical"
+
+# Click for what is actually in use rather than the share.
+[module.memory]
+source = "memory"
+interval = "5s"
+format = "$percent.n(d:0)"
+format_alt = "$used.n(d:1) of $total.n(d:0){  swap $swap_percent}"
+alt_animation = "120ms"
+min_width = 77
+style = "tile_alt"
+icon = "$memory"
+
+[module.memory.states.full]
+above = 90
+style = "warning"
+
+# The processor's own sensor, found by driver name. A laptop sits in the
+# fifties and sixties all day, so the collector's own rating decides when this
+# is worth colouring rather than a number picked here.
+[module.temperature]
+source = "temperature"
+interval = "5s"
+format = "$temp.n(d:0)"
+format_alt = "$temp.n(d:0) $label"
+min_width = 80
+style = "tile"
+icon = "$temperature"
+
+[module.temperature.states.warm]
+state = "warning"
+style = "warning"
+
+[module.temperature.states.hot]
+state = "critical"
+style = "critical"
+
+# The compositor says which layout is active, and says so again the moment it is
+# switched, so this is never read on a timer. A click shows the full name.
+[module.language]
+source = "language"
+format = "$short"
+format_alt = "$layout"
+style = "tile"
+icon = "$keyboard"
+
+# What to call each layout, keyed by xkb's own name for it. Optional: a layout
+# with no line here is abbreviated instead, and "English (US)" would be "US".
+# These are the layouts this bar was written on; swap in your own.
+[module.language.layouts]
+"English (US)" = "EN"
+"Serbian (Latin)" = "SR"
+"Serbian" = "RS"
+
+# Follows whichever interface is actually up, so unplugging a cable moves it to
+# the wireless card without a restart.
+[module.network]
+source = "network"
+interval = "2s"
+# The network's name when there is one, falling back to the interface: a cable
+# has no name to give, and neither has a card that has joined nothing.
+#
+# `format_alt` is a list, so a left click goes round three views rather than
+# toggling between two: what it is on, what it is doing, and how well it can
+# hear it. The icon grades on the signal, so it says that much without a click.
+#
+# The three are very different lengths, so `alt_animation` gives the module the
+# same treatment the island gets from `collapse_animation`: it travels between
+# the width one wording asked for and the width the next one wants instead of
+# jumping, and the modules beside it slide along with it. Leave it out and the
+# swap is one redraw. Either way it costs nothing at rest - the timer runs only
+# while something is moving and stops the frame it arrives.
+format = "$ssid|$device"
+format_alt = ["$down{  $up}", "$signal.n(d:0){  $dbm.n(d:0) dBm}"]
+alt_animation = "120ms"
+style = "tile_alt"
+icon = "$wifi"
+
+[module.network.states.offline]
+field = "state"
+equals = "down"
+icon = "$wifi-off"
+
+# PipeWire says when the volume moves, so this is never sampled: it follows the
+# default output, which is what the volume keys move, and follows it to a headset
+# the moment one is plugged in.
+[module.volume]
+source = "audio"
+# Scroll over it to change the volume, middle click to mute. dbar sets it itself
+# rather than running a helper, and shows what PipeWire accepted rather than what
+# was asked for.
+scroll = "5%"
+format = "$volume.n(d:0)"
+format_alt = "$volume.n(d:0)  $device"
+min_width = 77
+style = "tile"
+icon = "$volume"
+
+# Muted is not a volume of zero - the level is still there, waiting - so the icon
+# says so and the number goes quiet rather than changing.
+#
+# Muted headphones are neither just muted nor just headphones, and a rule that
+# names both readings beats one that names either alone, so this is what wins
+# when they are both true.
+[module.volume.states.headphones_muted]
+fields = { muted = "yes", port = "headphones" }
+foreground = "$subtext"
+icon = "$headphones-muted"
+
+[module.volume.states.muted]
+field = "muted"
+equals = "yes"
+foreground = "$subtext"
+icon = "$volume-muted"
+
+# Which socket the sound is leaving by. PipeWire says so the moment a jack is
+# plugged in, so the icon follows the headphones onto your head without a poll
+# and without a helper.
+[module.volume.states.port]
+field = "port"
+equals = "headphones"
+icon = "$headphones"
+
+# The kernel reports a brightness change, so this is read when it moves and
+# never in between - no interval, and nothing to press after a brightness key.
+[module.brightness]
+source = "backlight"
+# Scrolling writes the controller's own file, which needs write access to it -
+# on most systems that is membership of the `video` group. The number that then
+# appears is the one the panel accepted, reported back by the kernel.
+scroll = "5%"
+format = "$brightness.n(d:0)"
+min_width = 77
+style = "tile_alt"
+icon = "$brightness"
+
+# Braces hold what should disappear rather than draw half a sentence: a machine
+# on mains has no time remaining to report and does not mention one.
+[module.battery]
+source = "battery"
+interval = "30s"
+# The percentage is the whole of it at rest; a click asks for the detail, and
+# another for how long the charge is expected to last. What is left is an
+# estimate from the current draw, so it is worth a click rather than a place on
+# the bar at all times.
+format = "$percent.n(d:0)"
+format_alt = [
+  "$percent.n(d:0)  $status{  $power.n(d:1)}  health $health.n(d:0)",
+  "$percent.n(d:0){  $time.dur(style:short) left}",
+]
+min_width = 77
+style = "tile"
+icon = "$battery"
+
+# On the mains, not charging: a battery held at full, or at whatever cap a
+# charge threshold sets, still reports `not charging`, and the icon should say
+# the charger is in rather than that the battery is on its own.
+[module.battery.states.plugged]
+field = "supply"
+equals = "mains"
+icon = "$battery-charging"
+
+# The battery rates its own situation and only alarms while it is draining: the
+# same 10% with the charger in is fine.
+[module.battery.states.warning]
+state = "warning"
+style = "warning"
+
+[module.battery.states.critical]
+state = "critical"
+style = "critical"
+
+# The weather, from a script of your own - see `weather.sh` beside this file. dbar
+# has no collector for it and should not grow one, so the module is a `command`
+# and dbar's side of it is a source like any other: it publishes fields, a format
+# decides the wording, and state rules apply.
+#
+# `interval = "once"` fetches it at startup and then leaves it alone. A reading
+# that costs a request to somebody else's server is worth asking for rather than
+# taking on a schedule, and `refresh_button` is what asks: a middle click fetches
+# again, a right click moves through the three wordings - the full reading, the
+# forecast, and a short one - and the wheel moves between the places.
+# Wanting it on a schedule after all is one line - `interval = "30m"` - and the
+# click goes on working.
+[module.weather]
+source = "command"
+# Relative to wherever dbar was started, which is the repository root if you are
+# trying this out of a checkout. An installed bar wants the absolute path to
+# wherever you keep the script - there is no shell here to expand anything.
+command = ["@DBAR_ROOT@/examples/weather.sh"]
+# The knobs, in the order the script reads them: $1, $2, then everything left.
+# They live here rather than in the script, so moving city is a line in the config
+# and the script stays the same script.
+params = [
+  "metric", # units
+  # The key itself, or a file holding one - which is the one worth using, since a
+  # config that goes into a git repository should not be carrying a credential.
+  # dbar runs argv directly, with no shell anywhere, so nothing here is expanded
+  # by dbar; the `~` below is expanded by weather.sh, which is a script and can
+  # afford to be forgiving about a path it was handed.
+  #
+  # Nothing is installed there, and that is deliberate: with no key the script
+  # says so, the module draws "unavailable" and stays clickable, and the rest of
+  # the bar is unaffected. Put a free OpenWeatherMap key in that file to see it.
+  "~/.config/dbar/owm.key",
+  # Where. The places come last because they are the part that grows: add one and
+  # the module grows a page, while the fetch stays one fetch.
+  "45.2517,19.8369", # Novi Sad
+  "44.8147,20.4143", # Belgrade
+  "43.9365,18.7986", # Sarajevo
+]
+interval = "once"
+# One line per place, and the wheel turns them. Both wordings below are about
+# whichever place is showing, so paging costs no format of its own.
+pages = true
+refresh_button = "middle"
+alt_button = "right"
+# What the script publishes, and what kind each is. Declaring them is what lets a
+# typo in the format below be a startup error rather than a blank space, and what
+# makes $temp a number that a threshold could read rather than a piece of text.
+fields = { icon = "text", weather = "text", location = "text", temp = "number", wind = "number", direction = "text", forecast_icon = "text", forecast_avg = "number", forecast_min = "number", forecast_max = "number" }
+# The chain on $weather is what keeps the module on the bar when the fetch failed:
+# a format whose fields are all missing draws nothing, and a module that draws
+# nothing has nothing left to click to try again.
+format = "{$icon }$weather|'unavailable'{ ($location)}{ $temp.n(d:0) °C}{, $wind.n(d:1) m/s $direction}"
+format_alt = [
+  "{$forecast_icon }{$location, }next 9 h: $forecast_avg.n(d:0)|'unavailable'{ °C ($forecast_min.n(d:0) to $forecast_max.n(d:0))}",
+  # The short one, for when the full reading is more bar than it is worth: the
+  # script's own glyph and the temperature, and nothing that grows with the place
+  # name or the wind. `collapsible` cannot do this job - folding shows the style's
+  # icon, which is a vector from dbar's own set, and the glyph here is text the
+  # script published, so the two would sit side by side.
+  "{$icon }$temp.n(d:0)|'unavailable'",
+]
+style = "panel"
+
+# The script rates its own reading with `state=error` when it could not fetch,
+# and dbar does the same when the script itself could not be run. Either way the
+# module greys rather than shouting: the weather being an hour old is worth
+# noticing and not worth an alarm, and a left click asks again.
+[module.weather.states.stale]
+state = "error"
+foreground = "$subtext"
+
+[module.clock]
+source = "time"
+# On the minute, rather than drifting from whenever dbar started.
+interval = "1m"
+format = "$now.time(f:'%a %d %b  %H:%M')"
+# A bar shows the time; a calendar is a different thing, and it belongs to a program of
+# your own rather than to dbar. The argv is run directly, so there is no shell here and
+# nothing to quote.
+on_click = { left = ["examples/sway_calendar.sh"] }
+style = "panel"
+foreground = "$background"
+icon = "$clock"

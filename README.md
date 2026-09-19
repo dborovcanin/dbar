@@ -207,42 +207,45 @@ Idle should cost nothing, and the only way to know is to measure it against
 what a Sway user would otherwise run. All three bars below were up at the same
 time, on the same screen, showing the same things:
 
-| idle                  | resident  | heap       | CPU        | processes | threads |
-| --------------------- | --------- | ---------- | ---------- | --------- | ------- |
-| **dbar**              | **21 MB** | **4.6 MB** | **0.21 %** | **1**     | 10¹     |
-| swaybar + i3status-rs | 62 MB     | 14.4 MB    | 0.51 %     | 2         | 9       |
-| Waybar                | 76 MB     | 17.9 MB    | 0.75 %     | 1         | 25      |
+| idle                  | resident    | heap       | CPU        | processes | threads |
+| --------------------- | ----------- | ---------- | ---------- | --------- | ------- |
+| **dbar**              | **15.4 MB** | **3.2 MB** | **0.16 %** | **1**     | 12¹     |
+| swaybar + i3status-rs | 55.0 MB     | 12.6 MB    | 0.60 %     | 2         | 8       |
+| Waybar                | 75.2 MB     | 20.4 MB    | 1.40 %     | 1         | 39      |
 
-¹ This is the thread count of the measured build. The same configuration now
-starts 11: its `on_click` command enables one shared signal listener so exited
-click programs are reaped even while the bar is otherwise idle. This listener
-also carries configured realtime refresh signals. It is started only when one
-of those features is present; the tray still owns one worker thread.
+¹ Twelve for this configuration, and each of them is a thing this config asked
+for: the bar itself, the tray, MPRIS, PipeWire, sway's events and sway's
+commands, the kernel watcher, the weather command, the signal listener a click
+that runs a program brings with it, and one read-worker each for the network and
+the battery - both of which answer through a driver and so do not belong on the
+thread that draws. One more belongs to PipeWire's own library. A bar that reads
+less starts fewer, and none of them wakes while nothing is happening.
 
 CPU is a share of one core, averaged over three consecutive two-minute windows;
-the spread across those windows was 0.19–0.23 % for dbar, 0.49–0.53 % for
-swaybar and 0.63–0.85 % for Waybar. Resident memory is `VmRSS`, which counts the
+the spread across those windows was 0.15–0.17 % for dbar, 0.58–0.62 % for
+swaybar and 1.38–1.42 % for Waybar. Resident memory is `VmRSS`, which counts the
 font files and shared libraries a bar has mapped; heap is `RssAnon`, which is
 what it allocated for itself. Both are worth knowing and they answer different
 questions - the first is what the machine gives up to have a bar on screen, the
 second is what the bar is actually holding.
 
-Then the same three over two minutes of ordinary use - a pointer crossing the
-bars, modules hovered and clicked, workspaces switched:
+Then the same three over two minutes of a pointer crossing all of them, about
+thirty-five moves a second, driven from a script so that every bar gets the same
+two minutes and the run can be repeated:
 
-| in use                | resident    | heap       | CPU        |
+| pointer crossing them | resident    | heap       | CPU        |
 | --------------------- | ----------- | ---------- | ---------- |
-| **dbar**              | **21.5 MB** | **5.0 MB** | **0.35 %** |
-| swaybar + i3status-rs | 62.5 MB     | 14.5 MB    | 0.82 %     |
-| Waybar                | 81 MB       | 19.0 MB    | 1.16 %     |
+| **dbar**              | **15.4 MB** | **3.2 MB** | **0.29 %** |
+| swaybar + i3status-rs | 55.0 MB     | 12.6 MB    | 0.67 %     |
+| Waybar                | 75.3 MB     | 20.4 MB    | 1.82 %     |
 
 And what each one is before it starts:
 
 |                       | binary        | shared libraries |
 | --------------------- | ------------- | ---------------- |
 | **dbar**              | **7.1 MB**    | **4**            |
-| swaybar + i3status-rs | 0.1 + 17.4 MB | 46 / 29          |
-| Waybar                | 2.1 MB        | 116              |
+| swaybar + i3status-rs | 0.1 + 17.4 MB | 45 / 28          |
+| Waybar                | 2.1 MB        | 115              |
 
 Waybar's binary is the smallest of the three and its dependency list is the
 longest, which is the same fact twice: it is a GTK application, so most of it is
@@ -251,31 +254,46 @@ PipeWire - and carries the rest.
 
 ### How this was measured
 
-On SwayFX 0.6 (Sway 1.12), a Ryzen 7 PRO 5850U, one 2560x1440 output at scale 1,
-with all three bars running simultaneously so that no run got a quieter machine
-than another. CPU is `utime + stime` from `/proc/PID/stat` differenced across the
+On SwayFX 0.6 (Sway 1.12.0), a Ryzen 7 PRO 5850U, with two outputs connected and
+every bar drawing on both - 2560x1440 and 1920x1200, each at scale 1 - and all
+three bars running simultaneously so that no run got a quieter machine than
+another. CPU is `utime + stime` from `/proc/PID/stat` differenced across the
 window; memory is read from `/proc/PID/status` at the end of it. Both bars that
 run helpers are counted whole - swaybar plus the `i3status-rs` it starts.
 
-dbar ran [examples/gruvbox-islands.toml](examples/gruvbox-islands.toml): fifteen modules -
-workspaces, binding mode, window title, media, weather, tray, cpu, memory,
-temperature, keyboard layout, network, volume, brightness, battery and the clock.
+Everything the run needs is in [bench/](bench), including the configuration each
+bar was given: dbar's is a copy of
+[examples/gruvbox-islands.toml](examples/gruvbox-islands.toml) kept beside the
+other two, with fifteen modules - workspaces, binding mode, window title, media,
+weather, tray, cpu, memory, temperature, keyboard layout, network, volume,
+brightness, battery and the clock.
 
-Waybar ran a configuration written to match it module for module, against
-Waybar 0.15.0. swaybar ran against i3status-rs 0.36.1 with eleven blocks -
-weather, music, cpu, memory, temperature, keyboard layout, net, battery,
-backlight, sound and time - with swaybar itself drawing the workspaces, the
-binding mode and the tray. That is fourteen things rather than fifteen: it has
-no window title, so it is doing slightly *less* work than the other two, not
-more.
+Waybar ran a configuration written to match it module for module *and to draw
+what it draws*, against Waybar 0.15.0: an icon on every module, the same gruvbox
+islands with the same radius and gaps, the same font at the same size, the same
+fixed widths, the tray at the same icon size. swaybar ran against i3status-rs
+0.36.1 with eleven blocks - weather, music, cpu, memory, temperature, keyboard
+layout, net, battery, backlight, sound and time - with swaybar itself drawing the
+workspaces, the binding mode and the tray. That is fourteen things rather than
+fifteen: it has no window title, so it is doing slightly *less* work than the
+other two, not more.
+
+These numbers are lower for dbar and higher for Waybar than the ones this table
+carried before, and only the first of those is dbar getting cheaper. Waybar's
+configuration here used to be a plain one - bare numbers on a flat strip - and a
+plain bar is cheaper to draw than a themed one; both bars also drew on two
+screens this time rather than one. [bench/README.md](bench/README.md) says which
+of the three changes is which.
 
 The weather module is a script fetching from a web service in all three, on the
 same interval, so none of them is being charged for somebody else's network.
 
-The idle numbers are three windows each and tight enough to trust. The in-use
-row is a single human pass rather than a synthetic one, which makes it
-indicative rather than statistical: it is one person using the bars for two
-minutes, and every bar got the same two minutes.
+The idle numbers are three windows each and tight enough to trust. The pointer
+row is one window, with the moves sent from a script rather than made by a hand,
+which is what makes it repeatable: the same 6,593 moves crossed all three bars.
+It is a heavier pointer than a person's - at a hand's pace, dbar's cost is not
+distinguishable from its idle one - and no button was ever pressed, so nothing
+was clicked, folded or switched.
 
 None of this makes dbar better at what a bar is for. It reads what it shows
 itself, from `/proc`, `/sys`, netlink and PipeWire, and draws it with a

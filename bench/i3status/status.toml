@@ -1,0 +1,126 @@
+icons_format = "{icon}"
+
+[theme]
+theme = "gruvbox-dark"
+[theme.overrides]
+separator = ""
+separator_bg = "auto"
+# theme:begin i3status
+separator_fg = "#eceff4"
+idle_bg = "#2e3440"
+idle_fg = "#eceff4"
+info_bg = "#81a1c1"
+info_fg = "#2e3440"
+good_bg = "#a3be8c"
+good_fg = "#2e3440"
+warning_bg = "#ebcb8b"
+warning_fg = "#2e3440"
+critical_bg = "#bf616a"
+critical_fg = "#2e3440"
+# theme:end
+
+[icons]
+icons = "material-nf"
+
+[[block]]
+block = "weather"
+format = " $icon $weather ($location) $temp, $wind m/s $direction "
+format_alt = " $icon_ffin Forecast (9 hour avg) {$temp_favg ({$temp_fmin}-{$temp_fmax})|Unavailable} "
+# autolocate = true
+[block.service]
+# name = "metno"
+name = "openweathermap"
+units = "metric"
+coordinates = ["45.2517", "19.8369"] # Novi Sad
+# coordinates = ["44.8161", "20.3948"] # Novi Beograd
+# coordinates = ["43.9365", "18.7986"] # Sokolac
+forecast_hours = 9
+# [block.theme_overrides]
+# idle_bg = "#98971a"
+
+
+# [[block]]
+# block = "focused_window"
+# [block.format]
+# full = " $title.str(max_w:15) |"
+# short = " $title.str(max_w:10) |"
+
+[[block]]
+block = "music"
+format = " $icon {$combo.str(max_w:20) $play |}"
+[[block.click]]
+button = "left"
+action = "play_pause"
+[[block.click]]
+button = "up"
+action = "volume_up"
+[[block.click]]
+button = "down"
+action = "volume_down"
+[[block.click]]
+button = "forward"
+action = "seek_forward"
+[[block.click]]
+button = "back"
+action = "seek_backward"
+
+[[block]]
+block = "cpu"
+interval = 5
+format = " $icon $utilization "
+format_alt = "$icon $frequency{ $boost|} $barchart "
+
+[[block]]
+block = "memory"
+format = "$icon $mem_used_percents.eng(w:1)"
+format_alt = "$icon_swap $mem_total_used.eng(w:3,u:B,p:Mi)/($mem_total_used_percents.eng(w:2))"
+
+[[block]]
+block = "temperature"
+interval = 5
+chip = "thinkpad-isa-0000"
+inputs = ["CPU"]
+format = " $icon $min"
+[block.theme_overrides]
+info_bg = { link = "idle_bg" }
+
+[[block]]
+block = "keyboard_layout"
+driver = "kbddbus"
+format = " $layout "
+
+[[block]]
+block = "net"
+format = "$icon {$signal_strength $ssid |Wired connection}"
+
+[[block]]
+block = "battery"
+driver = "upower"
+format = " $icon $percentage "
+not_charging_format = " $icon $percentage"
+[block.theme_overrides]
+good_bg = { link = "idle_bg" }
+good_fg = { link = "idle_fg" }
+
+[[block]]
+block = "backlight"
+
+[[block]]
+block = "sound"
+headphones_indicator = true
+max_vol = 100
+format = "$icon {$volume.eng(w:2)|}"
+
+[[block]]
+block = "time"
+interval = 5
+format = " $icon $timestamp.datetime(f:'%R \ueab0 %a %d. %b', l:sr_RS) "
+[[block.click]]
+button = "left"
+cmd = "~/dotfiles/scripts/dbar/calendar.sh"
+
+# [[block]]
+# block = "pomodoro"
+# format = "$icon  {$message|}"
+# notify_cmd = "notify-send '{msg}'"
+# blocking_cmd = false
