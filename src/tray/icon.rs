@@ -5,6 +5,7 @@
 //! the bar asked for, which is what the renderer blends and the only form anything below
 //! `Frame` ever sees.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::dbus::Value;
@@ -15,6 +16,15 @@ use crate::icon::Raster;
 /// A tray icon is drawn at bar height and arrives over a bus dbar does not control, so the
 /// only sane thing to do with an absurd one is to decline it rather than allocate for it.
 const LARGEST: i64 = 512;
+
+/// The most encoded data one icon may carry.
+///
+/// Four MiB leaves room for an incompressible 512-pixel RGBA icon, a 16-bit source that
+/// is normalised to 8-bit by the decoder, and ordinary metadata. More than that is not
+/// useful artwork for a bar and can arrive either over D-Bus or from an application-named
+/// file. The same bound applies to SVG: its parser also builds an owned tree from
+/// application-selected input.
+const MAX_ICON_BYTES: usize = 4 * 1024 * 1024;
 
 /// The best of the pixmaps an item handed over, scaled to `target`.
 ///
@@ -139,7 +149,7 @@ fn span(index: u32, target: u32, source: u32) -> (u32, u32) {
 /// ships its own artwork points at it without installing a theme.
 pub fn from_name(name: &str, extra: Option<&str>, theme: &str, target: u32) -> Option<Raster> {
     let file = find(name, extra, theme, target)?;
-    let bytes = std::fs::read(&file).ok()?;
+    let bytes = read_icon(&file)?;
     match is_svg(&file) {
         true => from_svg(&bytes, target),
         false => from_png(&bytes, target),
@@ -152,16 +162,71 @@ fn is_svg(path: &Path) -> bool {
 }
 
 /// An icon handed over as PNG, which is how a menu item carries one.
+///
+/// A menu's bytes have already been received by the D-Bus layer at this boundary. The
+/// encoded cap limits retained decode work here; bounding receipt itself would require a
+/// connection-wide message-size policy rather than an icon-decoder decision.
 pub fn from_png(bytes: &[u8], target: u32) -> Option<Raster> {
-    // tiny-skia already decodes PNG for its own loading, so this half costs no dependency
-    // at all - only the code that was already there becoming reachable.
+    let expected = png_dimensions(bytes)?;
     let decoded = tiny_skia::Pixmap::decode_png(bytes).ok()?;
     let (width, height) = (decoded.width(), decoded.height());
-    if width == 0 || height == 0 || width as i64 > LARGEST || height as i64 > LARGEST {
+    // Keep the old validation after decode as a second check, and require the decoder to
+    // agree with the mandatory IHDR inspected above.
+    if (width, height) != expected || !dimensions_fit(width, height) {
         return None;
     }
     // tiny-skia hands back premultiplied RGBA, which is what the renderer blends.
     Some(scale(decoded.data(), width, height, target))
+}
+
+/// Read only as much of a themed PNG or SVG file as dbar is willing to parse.
+///
+/// Checking the resulting slice later is too late for a file: an unbounded `std::fs::read`
+/// would already have allocated for all of it. `take` also holds the bound if the file is
+/// replaced or grows after its metadata was inspected.
+fn read_icon(path: &Path) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    if file
+        .metadata()
+        .ok()
+        .is_some_and(|metadata| metadata.len() > MAX_ICON_BYTES as u64)
+    {
+        return None;
+    }
+    read_icon_bytes(file)
+}
+
+fn read_icon_bytes(reader: impl Read) -> Option<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(MAX_ICON_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= MAX_ICON_BYTES).then_some(bytes)
+}
+
+/// Inspect the PNG header before allocating and decoding its pixels.
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() > MAX_ICON_BYTES {
+        return None;
+    }
+    // IHDR is required to be the first chunk: signature, 13-byte chunk length and name,
+    // then its big-endian width and height. The decoder still owns CRC and full-format
+    // validation; this only learns enough to decline an absurd allocation before it.
+    let header = bytes.get(..24)?;
+    if header[..8] != [137, 80, 78, 71, 13, 10, 26, 10]
+        || header[8..12] != 13u32.to_be_bytes()
+        || &header[12..16] != b"IHDR"
+    {
+        return None;
+    }
+    let width = u32::from_be_bytes(header[16..20].try_into().ok()?);
+    let height = u32::from_be_bytes(header[20..24].try_into().ok()?);
+    dimensions_fit(width, height).then_some((width, height))
+}
+
+fn dimensions_fit(width: u32, height: u32) -> bool {
+    width > 0 && height > 0 && width as i64 <= LARGEST && height as i64 <= LARGEST
 }
 
 /// A themed icon that is a drawing, rendered at the size it will be shown.
@@ -335,6 +400,14 @@ fn size_of(path: &Path, root: &Path) -> u32 {
 mod tests {
     use super::*;
 
+    fn png(width: u32, height: u32, colour: [u8; 4]) -> Vec<u8> {
+        let mut pixmap = tiny_skia::Pixmap::new(width, height).expect("a test pixmap");
+        pixmap.fill(tiny_skia::Color::from_rgba8(
+            colour[0], colour[1], colour[2], colour[3],
+        ));
+        pixmap.encode_png().expect("a test PNG")
+    }
+
     /// One pixmap entry as the bus delivers it: width, height, then ARGB bytes.
     fn pixmap(width: i64, height: i64, fill: [u8; 4]) -> Value {
         let pixels = std::iter::repeat_n(fill, (width * height) as usize)
@@ -365,6 +438,34 @@ mod tests {
         let value = pixmap(1, 1, [255, 10, 20, 30]);
         let raster = from_pixmaps(&value, 1).expect("one pixmap is enough");
         assert_eq!(raster.pixels, vec![10, 20, 30, 255]);
+    }
+
+    /// The preflight changes no decoding semantics: tiny-skia still supplies exactly the
+    /// premultiplied pixels the renderer used before the bound existed.
+    #[test]
+    fn a_bounded_png_keeps_tiny_skias_pixels() {
+        let bytes = png(1, 1, [200, 100, 50, 128]);
+        let decoded = tiny_skia::Pixmap::decode_png(&bytes).expect("tiny-skia decodes its PNG");
+        assert_eq!(
+            from_png(&bytes, 1).expect("the bounded PNG").pixels,
+            decoded.data()
+        );
+    }
+
+    /// An otherwise valid PNG is declined from its header, before the frame decoder is
+    /// asked to allocate its pixel area.
+    #[test]
+    fn an_oversized_png_is_refused_from_its_header() {
+        let bytes = png(LARGEST as u32 + 1, 1, [0, 0, 0, 255]);
+        assert_eq!(png_dimensions(&bytes), None);
+        assert_eq!(from_png(&bytes, 20), None);
+    }
+
+    /// A named file is stopped after the byte beyond the limit even when its reader never
+    /// ends, so checking the slice later cannot hide an unbounded file allocation.
+    #[test]
+    fn an_encoded_icon_input_is_read_only_to_its_limit() {
+        assert_eq!(read_icon_bytes(std::io::repeat(0)), None);
     }
 
     /// Scaling down keeps detail that scaling up invents, so the smallest size at or above
