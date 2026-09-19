@@ -26,6 +26,38 @@ use anyhow::{Context as _, Result, bail};
 /// application would take the whole tray down with it.
 const CALL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The largest message the bar will hold while it arrives.
+///
+/// Everything dbar is told over this bus is small: a player's title, a menu, an icon an
+/// application drew. The biggest of those by far is a tray pixmap, and a whole set of them
+/// at every size an application ships is still a fraction of this. The bus daemon has a
+/// ceiling of its own, far above anything useful, so without one here a peer's mistake -
+/// or its malice - would be answered by growing a buffer to meet it.
+///
+/// Past this the connection is dropped rather than the message skipped: the tray reconnects
+/// on its own, and applications re-register, so the cost of being wrong here is a moment of
+/// an empty tray rather than a thread wedged mid-message.
+const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// How much may be held aside while one call waits for its answer.
+///
+/// A call reads past whatever is ahead of its reply and keeps it to hand back afterwards.
+/// What arrives in the meantime is other applications' traffic, and on an ordinary bus it
+/// is a handful of small signals; a peer shouting on the bus for the length of a call would
+/// otherwise be held here in full.
+///
+/// The budget is in bytes because a count alone is not a memory ceiling: a few hundred
+/// messages of the largest size a message may be is gigabytes. The count is kept as well,
+/// for the other shape of the same problem - a flood of tiny signals, each cheap on the
+/// wire and not cheap once parsed.
+const MAX_DEFERRED_BYTES: usize = 64 * 1024 * 1024;
+const MAX_DEFERRED_MESSAGES: usize = 4096;
+
+/// Whether what is being held aside has outgrown what the bar will hold for one call.
+fn over_deferred_budget(messages: usize, bytes: usize) -> bool {
+    messages > MAX_DEFERRED_MESSAGES || bytes > MAX_DEFERRED_BYTES
+}
+
 /// How long the message at the front of `bytes` is, once enough of its header is there.
 ///
 /// The length of the fields array sits at the end of the fixed header, and the body
@@ -129,6 +161,10 @@ pub enum Kind {
 #[derive(Clone, Debug)]
 pub struct Message {
     pub kind: Kind,
+    /// How many bytes this message took on the wire, which is what a held message is
+    /// charged against the budget above. The parsed form is larger, and differently so per
+    /// body, so this is a floor rather than a measure of what it costs to keep.
+    pub size: usize,
     /// This message's own serial, which is what a reply to it has to quote.
     pub serial: u32,
     pub path: Option<String>,
@@ -211,6 +247,9 @@ pub struct Connection {
     /// application that is waiting on the answer. Dropping either is how a bar loses an
     /// update or hangs a program, so they are kept and handed out in order afterwards.
     deferred: std::collections::VecDeque<Message>,
+    /// What those messages took on the wire, kept as a running total rather than summed
+    /// on every read: the budget is checked once per message a waiting call passes over.
+    deferred_bytes: usize,
 }
 
 impl Connection {
@@ -228,6 +267,7 @@ impl Connection {
             serial: 0,
             pending: Vec::new(),
             deferred: std::collections::VecDeque::new(),
+            deferred_bytes: 0,
         };
         connection.authenticate()?;
         connection
@@ -265,18 +305,40 @@ impl Connection {
         // it back: taking a message off the queue only to return it to the front of that
         // same queue is a loop with no end.
         let mut held = Vec::new();
+        let mut held_bytes = 0;
         let answer = loop {
             match self.read_message_by(Some(deadline)) {
                 Ok(message) if message.reply_serial == Some(serial) => break message,
-                Ok(message) => held.push(message),
+                Ok(message) => {
+                    held_bytes += message.size;
+                    held.push(message);
+                }
                 Err(e) => {
-                    self.deferred.extend(held);
+                    self.defer(held);
                     return Err(e);
                 }
             }
+            // Whatever was already waiting counts too: the budget is on what the
+            // connection is holding, not on what this one call collected.
+            if over_deferred_budget(
+                held.len() + self.deferred.len(),
+                held_bytes + self.deferred_bytes,
+            ) {
+                // The held messages are about to be dropped, and some of them are signals
+                // saying what an application is now showing. Carrying on with a connection
+                // that has lost them would leave the bar drawing a tray that quietly
+                // stopped matching what is running, so the connection ends here: whatever
+                // reads it next gets an error, and the worker behind it builds a new one
+                // and asks everything again.
+                self.poison();
+                bail!(
+                    "the bus sent more than the bar will hold while {member} waited for \
+                     its answer, so the connection was dropped"
+                );
+            }
         };
         // Back in the order they arrived, behind anything that was already waiting.
-        self.deferred.extend(held);
+        self.defer(held);
 
         if answer.kind == Kind::Error {
             let name = answer.error.as_deref().unwrap_or("an unnamed error");
@@ -284,6 +346,26 @@ impl Connection {
             bail!("{member} failed: {name} {detail}");
         }
         Ok(answer.body)
+    }
+
+    /// Set messages aside for whoever reads next, keeping the running total with them.
+    fn defer(&mut self, messages: impl IntoIterator<Item = Message>) {
+        for message in messages {
+            self.deferred_bytes += message.size;
+            self.deferred.push_back(message);
+        }
+    }
+
+    /// End this connection, whatever anybody does with it next.
+    ///
+    /// Shutting the socket is what makes that stick: a read returns nothing, which every
+    /// caller already treats as the bus having gone, and the worker holding it reconnects
+    /// and asks for the state again rather than carrying on from what it last heard.
+    fn poison(&mut self) {
+        let _ = self.socket.shutdown(std::net::Shutdown::Both);
+        self.deferred.clear();
+        self.deferred_bytes = 0;
+        self.pending.clear();
     }
 
     /// Send a method call and do not wait for the answer.
@@ -436,6 +518,7 @@ impl Connection {
     /// and in the order it arrived.
     pub fn receive(&mut self) -> Result<Message> {
         if let Some(message) = self.deferred.pop_front() {
+            self.deferred_bytes = self.deferred_bytes.saturating_sub(message.size);
             return Ok(message);
         }
         self.read_message()
@@ -506,6 +589,14 @@ impl Connection {
         let Some(total) = message_length(&self.pending) else {
             return Ok(None);
         };
+        // Judged from the header, so nothing is read towards a message this size. The
+        // connection goes with it: the message stays at the front of the stream whatever
+        // happens next, so a connection that keeps it is one every later read fails on,
+        // and callers that shrug an error off would carry on against it forever.
+        if total > MAX_MESSAGE_BYTES {
+            self.poison();
+            bail!("a peer announced a {total}-byte message, which is more than the bar will hold");
+        }
         if self.pending.len() < total {
             return Ok(None);
         }
@@ -643,6 +734,7 @@ fn parse_message(raw: &[u8]) -> Result<Message> {
     let serial = reader.u32()?;
     let mut message = Message {
         kind,
+        size: raw.len(),
         serial,
         path: None,
         interface: None,
@@ -1002,6 +1094,7 @@ mod tests {
             serial: 0,
             pending: Vec::new(),
             deferred: std::collections::VecDeque::new(),
+            deferred_bytes: 0,
         };
         bus.pending.extend_from_slice(&signal("First"));
         bus.pending.extend_from_slice(&signal("Second"));
@@ -1025,6 +1118,97 @@ mod tests {
         let whole = signal("Third");
         bus.pending.extend_from_slice(&whole[..whole.len() - 1]);
         assert!(!bus.has_message());
+    }
+
+    /// The budget is two questions, not one: a few enormous messages and a flood of small
+    /// ones are the same problem arriving by different routes.
+    #[test]
+    fn what_is_held_aside_is_budgeted_by_bytes_as_well_as_by_count() {
+        assert!(!over_deferred_budget(1, 1));
+        assert!(!over_deferred_budget(
+            MAX_DEFERRED_MESSAGES,
+            MAX_DEFERRED_BYTES
+        ));
+        // A handful of messages, each near the largest one allowed.
+        assert!(over_deferred_budget(8, MAX_DEFERRED_BYTES + 1));
+        // Nothing but small ones, and too many of them to keep.
+        assert!(over_deferred_budget(MAX_DEFERRED_MESSAGES + 1, 4096));
+    }
+
+    /// Dropping what was held aside loses signals, so the connection that lost them must
+    /// not be usable afterwards: the worker holding it has to build a new one and ask
+    /// again rather than carry on from a state that quietly stopped being true.
+    #[test]
+    fn a_connection_that_gave_up_on_what_it_held_is_finished() {
+        let (socket, peer) = UnixStream::pair().expect("a socket pair");
+        let mut bus = Connection {
+            socket,
+            serial: 0,
+            pending: vec![1, 2, 3],
+            deferred: std::collections::VecDeque::new(),
+            deferred_bytes: 0,
+        };
+        let raw = build_message(
+            1,
+            4,
+            0,
+            &[
+                (1u8, Arg::Path("/org/example")),
+                (2u8, Arg::Str("org.example.Thing")),
+                (3u8, Arg::Str("Held")),
+            ],
+            &[],
+        );
+        let message = parse_message(&raw).expect("a signal");
+        let size = message.size;
+        bus.defer([message]);
+        assert_eq!(bus.deferred_bytes, size, "what is held is counted");
+
+        bus.poison();
+        assert!(bus.deferred.is_empty() && bus.deferred_bytes == 0);
+        assert!(
+            bus.receive().is_err(),
+            "a poisoned connection has nothing left to give"
+        );
+        // The peer sees the same thing from its side, which is what makes it stick.
+        drop(peer);
+    }
+
+    /// The header says how long a message will be before any of it has arrived, so an
+    /// absurd length is refused there rather than met with a buffer that grows to it - and
+    /// the connection ends there too, because the message it refused is still at the front
+    /// of the stream and nothing can read past it.
+    #[test]
+    fn a_message_larger_than_the_bar_will_hold_drops_the_connection() {
+        let (socket, _other) = UnixStream::pair().expect("a socket pair");
+        let mut bus = Connection {
+            socket,
+            serial: 0,
+            pending: Vec::new(),
+            deferred: std::collections::VecDeque::new(),
+            deferred_bytes: 0,
+        };
+        // A fixed header claiming a body far past the ceiling, and nothing else: the
+        // refusal cannot be waiting for the rest of it to turn up.
+        let mut header = vec![b'l', 4, 0, 1];
+        header.extend_from_slice(&(MAX_MESSAGE_BYTES as u32 + 1).to_le_bytes());
+        header.extend_from_slice(&1u32.to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes());
+        bus.pending.extend_from_slice(&header);
+
+        let e = bus.take_message().expect_err("the message is refused");
+        assert!(
+            format!("{e:#}").contains("more than the bar will hold"),
+            "{e:#}"
+        );
+        assert!(
+            bus.pending.is_empty(),
+            "nothing is left to read the refused message out of"
+        );
+        assert!(
+            bus.receive().is_err(),
+            "and the connection it arrived on is finished"
+        );
     }
 
     #[test]

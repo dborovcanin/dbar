@@ -62,7 +62,7 @@ struct Uevents {
 ///
 /// A watch that cannot be set up is not an error: the source keeps its interval, which is
 /// what it would have had anyway.
-pub fn spawn(sender: calloop::channel::Sender<Event>, asked: &[Which]) -> Watching {
+pub fn spawn(sender: calloop::channel::SyncSender<Event>, asked: &[Which]) -> Watching {
     let mut attributes = Vec::new();
     let mut wanted = Vec::new();
     for which in Which::WATCHABLE.iter().filter(|w| asked.contains(w)) {
@@ -254,7 +254,7 @@ fn next_uevent(socket: &OwnedFd, buffer: &mut [u8]) -> Result<Option<String>> {
 fn run(
     mut attributes: Vec<Attribute>,
     mut uevents: Option<Uevents>,
-    sender: calloop::channel::Sender<Event>,
+    sender: calloop::channel::SyncSender<Event>,
 ) {
     let mut buffer = vec![0u8; 8192];
     while !attributes.is_empty() || uevents.is_some() {
@@ -320,7 +320,7 @@ fn run(
 fn report_attributes(
     attributes: &mut Vec<Attribute>,
     fds: &[libc::pollfd],
-    sender: &calloop::channel::Sender<Event>,
+    sender: &calloop::channel::SyncSender<Event>,
 ) -> bool {
     // A change and a vanished file both arrive as POLLERR, and only the read tells them
     // apart: the attribute still reads while it exists.
@@ -358,7 +358,7 @@ fn report_attributes(
 fn drain(
     listening: &Uevents,
     buffer: &mut [u8],
-    sender: &calloop::channel::Sender<Event>,
+    sender: &calloop::channel::SyncSender<Event>,
 ) -> Result<bool> {
     // One change arrives as several messages - a charger moves the mains supply and the
     // battery both - so the queue is emptied first and each source is read once.

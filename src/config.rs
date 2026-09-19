@@ -274,8 +274,9 @@ fn share_command_fields(positions: &mut [Position; 3]) -> Result<()> {
         }
     }
 
-    // Leaked once per shared command while the config is read, the same as the schemas it
-    // is built from, so the fields stay `'static` for the thread that parses the output.
+    // Leaked per shared command while the config is read, the same as the schemas it is
+    // built from, so the fields stay `'static` for the thread that parses the output - and
+    // the same handful of bytes per reload as those, for the same reason.
     let unions: HashMap<CommandSpec, &'static [FieldSpec]> = shared
         .into_iter()
         .filter(|(_, union)| union.mixed)
@@ -2378,8 +2379,17 @@ fn resolve_source(module_name: &str, raw: Option<&RawModule>) -> Result<Source> 
                     let mut specs = Vec::with_capacity(declared.len());
                     for (name, kind) in declared {
                         specs.push(FieldSpec {
-                            // The config is read once, so a name that outlives it is a
-                            // handful of bytes rather than a leak that grows.
+                            // A field's name outlives the config it came from, because the
+                            // thread parsing the command's output holds it for as long as
+                            // it runs and a reading holds it after that.
+                            //
+                            // A reload re-reads the file and leaks these again: a handful
+                            // of bytes per command module that never come back. It is left
+                            // that way because a reload is a person pressing a key, and
+                            // owning these instead means `Arc` where every source has a
+                            // `&'static str` - the registry, the readings, the formats. If
+                            // dbar ever reloads on its own, that arithmetic changes and
+                            // this is the first thing to fix.
                             name: Box::leak(name.clone().into_boxed_str()),
                             kind: field_kind(kind)
                                 .with_context(|| format!("in [module.{module_name}.fields]"))?,

@@ -105,7 +105,7 @@ impl Commands {
 }
 
 /// Start watching the session bus, and report what is playing as it changes.
-pub fn spawn(sender: calloop::channel::Sender<Reading>) -> Result<Commands> {
+pub fn spawn(sender: calloop::channel::SyncSender<Reading>) -> Result<Commands> {
     let (read, write) = crate::worker::pipe().context("making a pipe for media commands")?;
     std::thread::Builder::new()
         .name("media".to_string())
@@ -125,7 +125,7 @@ pub fn spawn(sender: calloop::channel::Sender<Reading>) -> Result<Commands> {
 /// Also how the thread learns the bar has gone: the channel closes with it, and a track
 /// nobody is going to draw is not worth reconnecting for.
 fn silence(
-    sender: &calloop::channel::Sender<Reading>,
+    sender: &calloop::channel::SyncSender<Reading>,
 ) -> Result<(), std::sync::mpsc::SendError<Reading>> {
     let mut fields = Fields::default();
     for spec in FIELDS {
@@ -162,7 +162,7 @@ impl Playing {
     }
 }
 
-fn run(sender: &calloop::channel::Sender<Reading>, commands: &OwnedFd) -> Result<()> {
+fn run(sender: &calloop::channel::SyncSender<Reading>, commands: &OwnedFd) -> Result<()> {
     let mut bus = Connection::session()?;
     // Every player's property changes, and every player appearing or going away.
     bus.add_match(&format!(
@@ -279,7 +279,7 @@ fn act(bus: &mut Connection, name: Option<&str>, command: Command) {
 /// Find the player worth showing and send what it is playing, if it has changed.
 fn publish(
     bus: &mut Connection,
-    sender: &calloop::channel::Sender<Reading>,
+    sender: &calloop::channel::SyncSender<Reading>,
     showing: &mut Option<Playing>,
     name: &mut Option<String>,
     identities: &mut Identities,

@@ -209,7 +209,7 @@ impl Commands {
 
 /// Start watching the bus for tray items, at the icon size the bar will draw them.
 pub fn spawn(
-    sender: calloop::channel::Sender<Event>,
+    sender: calloop::channel::SyncSender<Event>,
     size: u32,
     theme: String,
 ) -> Result<Commands> {
@@ -412,7 +412,7 @@ impl Icons {
 }
 
 fn run(
-    sender: &calloop::channel::Sender<Event>,
+    sender: &calloop::channel::SyncSender<Event>,
     wake: &OwnedFd,
     orders: &mpsc::Receiver<Command>,
     size: u32,
@@ -1082,7 +1082,7 @@ fn fingerprint(value: &Value) -> u64 {
 fn act(
     bus: &mut Connection,
     tray: &Tray,
-    sender: &calloop::channel::Sender<Event>,
+    sender: &calloop::channel::SyncSender<Event>,
     command: &Command,
 ) {
     let key = match command {
@@ -1150,7 +1150,7 @@ fn act(
     }
 }
 
-fn publish(sender: &calloop::channel::Sender<Event>, tray: &Tray) {
+fn publish(sender: &calloop::channel::SyncSender<Event>, tray: &Tray) {
     let items = tray.items.iter().map(|t| t.item.clone()).collect();
     let _ = sender.send(Event::State(Box::new(TrayState { items })));
 }

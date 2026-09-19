@@ -60,13 +60,39 @@ pub enum Command {
     ToggleMute,
 }
 
+/// A command, and when the pointer asked for it.
+///
+/// PipeWire's channel keeps what it is handed until the loop it belongs to comes to read
+/// it, and there is no loop to read it while the connection is being made again. A volume
+/// step is a relative move, so one that waited out a reconnect is not a smaller version of
+/// what was asked for - it is a jump from a wheel somebody turned a minute ago.
+struct Ask {
+    command: Command,
+    at: std::time::Instant,
+}
+
 /// The way back into the PipeWire thread, since the connection cannot be touched from
 /// anywhere else.
-pub type Commands = pw::channel::Sender<Command>;
+///
+/// Sending never blocks and never drops: the queue behind it is PipeWire's own, and the
+/// bar's side of it is a pointer, so what it holds is one entry per turn of a wheel. What
+/// it does not do is guarantee anybody is listening, which is why each one is stamped.
+pub struct Commands(pw::channel::Sender<Ask>);
+
+impl Commands {
+    pub fn send(&self, command: Command) -> Result<(), Command> {
+        self.0
+            .send(Ask {
+                command,
+                at: std::time::Instant::now(),
+            })
+            .map_err(|ask| ask.command)
+    }
+}
 
 /// Start listening to PipeWire, and report readings as they change.
-pub fn spawn(sender: calloop::channel::Sender<Reading>) -> Result<Commands> {
-    let (commands, receiver) = pw::channel::channel::<Command>();
+pub fn spawn(sender: calloop::channel::SyncSender<Reading>) -> Result<Commands> {
+    let (commands, receiver) = pw::channel::channel::<Ask>();
     std::thread::Builder::new()
         .name("audio".to_string())
         .spawn(move || {
@@ -81,7 +107,7 @@ pub fn spawn(sender: calloop::channel::Sender<Reading>) -> Result<Commands> {
             );
         })
         .context("spawning the audio thread")?;
-    Ok(commands)
+    Ok(Commands(commands))
 }
 
 /// Say that there is no volume to report, which is what a bar without PipeWire has.
@@ -89,7 +115,7 @@ pub fn spawn(sender: calloop::channel::Sender<Reading>) -> Result<Commands> {
 /// Also how the thread learns the bar has gone: the channel closes with it, and a volume
 /// nobody is going to draw is not worth reconnecting for.
 fn absent(
-    sender: &calloop::channel::Sender<Reading>,
+    sender: &calloop::channel::SyncSender<Reading>,
 ) -> Result<(), std::sync::mpsc::SendError<Reading>> {
     let mut fields = Fields::default();
     for spec in FIELDS {
@@ -182,7 +208,7 @@ struct Sinks {
     default: Option<String>,
     by_id: HashMap<u32, Sink>,
     cards: HashMap<u32, Card>,
-    sender: calloop::channel::Sender<Reading>,
+    sender: calloop::channel::SyncSender<Reading>,
     /// The last reading sent, so an event that changes nothing does not redraw the bar.
     last: Sent,
 }
@@ -339,8 +365,8 @@ impl Sinks {
 /// returning, so a connection that failed leaves the caller holding the channel it needs to
 /// try again.
 fn run(
-    sender: &calloop::channel::Sender<Reading>,
-    commands: &mut Option<pw::channel::Receiver<Command>>,
+    sender: &calloop::channel::SyncSender<Reading>,
+    commands: &mut Option<pw::channel::Receiver<Ask>>,
 ) -> Result<()> {
     pw::init();
     let main_loop = pw::main_loop::MainLoopRc::new(None).context("creating the PipeWire loop")?;
@@ -431,10 +457,18 @@ fn run(
     let receiver = commands
         .take()
         .context("the audio thread was started without a way to be asked for anything")?;
+    // Anything asked for before this connection existed was asked of a bar that could not
+    // answer, and the wheel has stopped turning since. Applying it now would move the
+    // volume by every step taken while PipeWire was away, all at once.
+    let live = std::time::Instant::now();
     let attached = {
         let sinks = sinks.clone();
-        receiver.attach(main_loop.loop_(), move |command| {
-            apply(&sinks, command);
+        receiver.attach(main_loop.loop_(), move |ask| {
+            if ask.at < live {
+                log::debug!("dropping a volume command from before PipeWire came back");
+                return;
+            }
+            apply(&sinks, ask.command);
         })
     };
 

@@ -325,7 +325,7 @@ impl State {
 const EVENT_LIMIT: usize = 16 * 1024 * 1024;
 
 /// Ask niri for its event stream and forward what it says into the event loop.
-pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching) -> Result<()> {
+pub fn spawn(sender: calloop::channel::SyncSender<DesktopEvent>, watching: Watching) -> Result<()> {
     // Asked here rather than on the thread, so a socket that is not there or a niri that
     // refuses is reported at startup instead of silently leaving the modules empty.
     let mut stream = connect()?;

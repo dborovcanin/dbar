@@ -202,6 +202,22 @@ impl<V> Generations<V> {
 const WIDTHS_KEPT: usize = 256;
 const SHAPES_KEPT: usize = 64;
 
+/// How many rasterised glyphs cosmic-text may hold before they are all let go.
+///
+/// The caches above bound what dbar keeps: widths, shaped buffers and finished runs, two
+/// generations each. The glyph images behind them belong to cosmic-text's own cache, which
+/// has no bound and no eviction - a run being dropped does not drop the glyphs it was made
+/// of. A clock has a fixed alphabet and settles at a few dozen; window titles and track
+/// names do not, and a long session in several scripts accumulates every glyph it has ever
+/// drawn.
+///
+/// Letting the whole cache go at a high-water mark is crude, and deliberately so: a policy
+/// that evicted the least recently used glyph would need accounting the rasteriser does not
+/// offer. A finished run owns its pixels, so nothing on screen depends on this, and what it
+/// costs when it happens is one more shaping pass for whatever is drawn next. At this size
+/// it will not happen at all on a bar showing one language.
+const GLYPHS_KEPT: usize = 2048;
+
 /// Families to try when the configured one is generic or missing.
 const FALLBACK_FAMILIES: &[&str] = &[
     "Liberation Sans",
@@ -470,20 +486,41 @@ impl TextRenderer {
             return None;
         }
         let metrics = self.metrics();
-        let TextRenderer {
-            fonts,
-            family,
-            swash,
-            shaped,
-            active,
-            ..
-        } = self;
-        let Shaped { shapes, runs, .. } = &mut shaped[*active];
-        runs.get_or_insert(text, || {
-            let buffer = shapes.get_or_insert(text, || shape(fonts, family, metrics, text));
-            rasterise(buffer, fonts, swash)
-        })
-        .as_ref()
+        {
+            let TextRenderer {
+                fonts,
+                family,
+                swash,
+                shaped,
+                active,
+                ..
+            } = self;
+            let Shaped { shapes, runs, .. } = &mut shaped[*active];
+            runs.get_or_insert(text, || {
+                let buffer = shapes.get_or_insert(text, || shape(fonts, family, metrics, text));
+                rasterise(buffer, fonts, swash)
+            });
+        }
+        // Checked once this run's own glyphs are in, so the cache is never left standing
+        // above the mark: a single run can carry a line's worth of new glyphs, and looking
+        // before rasterising would hold them all until something else was drawn.
+        self.trim_glyphs();
+        self.shaped[self.active].runs.get(text)?.as_ref()
+    }
+
+    /// Let go of every rasterised glyph once there are more than the budget allows.
+    ///
+    /// The run that was just finished owns its pixels, so nothing on screen is touched;
+    /// what this costs is rasterising again whatever is drawn next.
+    fn trim_glyphs(&mut self) {
+        if self.swash.image_cache.len() < GLYPHS_KEPT {
+            return;
+        }
+        log::debug!(
+            "letting {} rasterised glyphs go; they are cached without a bound",
+            self.swash.image_cache.len()
+        );
+        self.swash = SwashCache::new();
     }
 }
 

@@ -51,14 +51,25 @@ Without -c, dbar reads $XDG_CONFIG_HOME/dbar/config.toml and falls back to its
 built-in defaults when that file does not exist.
 ";
 
-/// How many updates from somebody else's program may be waiting for the bar at once.
+/// How many updates from anything that is not the bar's own thread may be waiting at once.
 ///
-/// A script and an i3bar provider both send on their own thread, and the bar draws on
-/// this one. Left unbounded, a program printing faster than the bar can draw would queue
-/// every one of those updates - memory the bar cannot get back, spent on states nobody
-/// will ever see, and a bar working through a backlog rather than showing what is true
-/// now. A full queue blocks the sender instead, which is backpressure the program itself
-/// feels: it is the shape a pipe already has.
+/// A script, an i3bar provider, PipeWire, a player, the compositor, the tray and the
+/// kernel watcher all send on their own threads, and the bar draws on this one. Left
+/// unbounded, anything reporting faster than the bar can draw would queue every one of
+/// those updates - memory the bar cannot get back, spent on states nobody will ever see,
+/// and a bar working through a backlog rather than showing what is true now. A full queue
+/// blocks the sender instead, which is backpressure whatever is talking feels: it is the
+/// shape a pipe already has.
+///
+/// Blocking is safe in that direction only because nothing going the other way ever waits:
+/// a tray activation, a compositor click and a refresh all drop when their queue is full,
+/// a media command drops when its pipe is, and a volume step is handed to PipeWire's own
+/// queue without blocking. So a worker held here can never be holding something the loop
+/// is waiting for.
+///
+/// The volume queue is the one that is not bounded, deliberately: a step is a relative
+/// move, so dropping one loses part of what the hand on the wheel asked for, and the only
+/// thing filling it is a pointer.
 ///
 /// A handful, because everything past the newest update is going to be drawn over anyway;
 /// the depth is only there so an ordinary burst is not paced by the frame rate.
@@ -360,7 +371,7 @@ fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!("inserting the status source: {e}"))?;
     }
 
-    let (signal_tx, signal_rx) = calloop::channel::channel();
+    let (signal_tx, signal_rx) = calloop::channel::sync_channel(QUEUED_UPDATES);
     let _signals = crate::signal::spawn(&offsets, click_programs, signal_tx)?;
     if _signals.is_some() {
         handle
@@ -378,7 +389,7 @@ fn main() -> Result<()> {
     // The volume is not read at all: PipeWire says when it moves, from a thread of its
     // own, and the reading arrives here finished.
     if config_collectors.contains_key(&crate::collect::Which::Audio) {
-        let (audio_tx, audio_rx) = calloop::channel::channel();
+        let (audio_tx, audio_rx) = calloop::channel::sync_channel(QUEUED_UPDATES);
         let commands = crate::collect::audio::spawn(audio_tx)?;
         app.set_audio(commands);
         handle
@@ -393,7 +404,7 @@ fn main() -> Result<()> {
     // What is playing arrives from the session bus, on a thread of its own for the same
     // reason: a bus connection blocks, and the bar must not.
     if config_collectors.contains_key(&crate::collect::Which::Media) {
-        let (media_tx, media_rx) = calloop::channel::channel();
+        let (media_tx, media_rx) = calloop::channel::sync_channel(QUEUED_UPDATES);
         match crate::collect::media::spawn(media_tx) {
             Ok(commands) => {
                 app.set_media(commands);
@@ -412,7 +423,7 @@ fn main() -> Result<()> {
     // Sources the kernel reports changes on are read when they change and never in
     // between, so they are taken off the timer before it is first set.
     if collectors {
-        let (watch_tx, watch_rx) = calloop::channel::channel();
+        let (watch_tx, watch_rx) = calloop::channel::sync_channel(QUEUED_UPDATES);
         let asked: Vec<crate::collect::Which> = config_collectors.keys().cloned().collect();
         let watching = crate::collect::watch::spawn(watch_tx, &asked);
         if watching.running {
@@ -526,7 +537,7 @@ fn main() -> Result<()> {
     // drawing anything would leave applications registered with a bar that never shows
     // them, and keep a real tray from ever taking it.
     if tray_wanted {
-        let (tray_tx, tray_rx) = calloop::channel::channel();
+        let (tray_tx, tray_rx) = calloop::channel::sync_channel(QUEUED_UPDATES);
         match crate::tray::spawn(tray_tx, tray_size, tray_theme) {
             Ok(commands) => {
                 app.set_tray(commands);
@@ -547,7 +558,7 @@ fn main() -> Result<()> {
     if !watching.anything() {
         log::info!("no module comes from the compositor, so it is not connected to");
     } else {
-        let (desktop_tx, desktop_rx) = calloop::channel::channel();
+        let (desktop_tx, desktop_rx) = calloop::channel::sync_channel(QUEUED_UPDATES);
         let backend = crate::desktop::Backend::detect()
             .and_then(|backend| backend.spawn(desktop_tx, watching).map(|()| backend));
         match backend {

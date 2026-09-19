@@ -132,12 +132,12 @@ pub enum DesktopEvent {
 /// screen to find that nothing moved. Keeping the rule here means a new backend cannot
 /// forget it.
 pub struct Publisher {
-    sender: calloop::channel::Sender<DesktopEvent>,
+    sender: calloop::channel::SyncSender<DesktopEvent>,
     shown: Option<Desktop>,
 }
 
 impl Publisher {
-    pub fn new(sender: calloop::channel::Sender<DesktopEvent>) -> Publisher {
+    pub fn new(sender: calloop::channel::SyncSender<DesktopEvent>) -> Publisher {
         Publisher {
             sender,
             shown: None,
@@ -303,7 +303,7 @@ impl Backend {
     /// loop from a thread of the backend's own.
     pub fn spawn(
         self,
-        sender: calloop::channel::Sender<DesktopEvent>,
+        sender: calloop::channel::SyncSender<DesktopEvent>,
         watching: Watching,
     ) -> Result<()> {
         match self {
@@ -392,7 +392,7 @@ mod tests {
     /// nothing, and a backend must hear when there is no bar left to tell.
     #[test]
     fn a_state_the_bar_already_has_is_not_handed_over_again() {
-        let (sender, channel) = calloop::channel::channel();
+        let (sender, channel) = calloop::channel::sync_channel(8);
         let mut publisher = Publisher::new(sender);
         let mut state = Desktop::default();
         assert!(publisher.publish(&state), "the first state always goes");

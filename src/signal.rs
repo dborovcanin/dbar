@@ -34,7 +34,7 @@ impl Drop for Watching {
 pub fn spawn(
     offsets: &[i32],
     children: bool,
-    sender: calloop::channel::Sender<Event>,
+    sender: calloop::channel::SyncSender<Event>,
 ) -> Result<Option<Watching>> {
     if offsets.is_empty() && !children {
         return Ok(None);
@@ -89,7 +89,7 @@ mod tests {
     fn child_exits_reap_owned_handles_without_a_collector_timer() {
         let _alone = crate::proc::alone();
         let mut event_loop = calloop::EventLoop::<Vec<Child>>::try_new().unwrap();
-        let (sender, receiver) = calloop::channel::channel();
+        let (sender, receiver) = calloop::channel::sync_channel(8);
         let _watching = spawn(&[], true, sender).unwrap().unwrap();
         event_loop
             .handle()
@@ -153,7 +153,7 @@ mod tests {
 
     #[test]
     fn no_requested_signals_need_no_listener() {
-        let (sender, _receiver) = calloop::channel::channel();
+        let (sender, _receiver) = calloop::channel::sync_channel(8);
         assert!(spawn(&[], false, sender).unwrap().is_none());
     }
 }

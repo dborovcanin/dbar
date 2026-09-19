@@ -12,7 +12,7 @@ use std::io::{BufReader, Read as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use serde::Deserialize;
 
 use crate::desktop::{
@@ -32,6 +32,9 @@ const REQUESTS: &str = ".socket.sock";
 /// request here opens one of its own. A compositor that is really gone closes the event
 /// stream, which is the other way out of the loop and the one that usually comes first.
 const READS_BEFORE_GIVING_UP: u32 = 5;
+
+/// The largest answer the bar will read from the compositor's socket.
+const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
 
 /// What Hyprland calls the mode its keyboard is in when no submap is held.
 ///
@@ -178,9 +181,14 @@ fn ask(request: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("asking Hyprland for {request}"))?;
     stream.flush().context("flushing a request")?;
     let mut body = Vec::new();
-    stream
+    // Read to the end of the answer, but only so far: the length is the compositor's to
+    // decide and the buffer is the bar's to pay for.
+    std::io::Read::take(&mut stream, MAX_REPLY_BYTES as u64 + 1)
         .read_to_end(&mut body)
         .with_context(|| format!("reading Hyprland's answer to {request}"))?;
+    if body.len() > MAX_REPLY_BYTES {
+        bail!("Hyprland's answer to {request} is longer than the bar will hold");
+    }
     Ok(body)
 }
 
@@ -521,7 +529,7 @@ fn apply(
 }
 
 /// Follow Hyprland's event stream and forward what it says into the event loop.
-pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching) -> Result<()> {
+pub fn spawn(sender: calloop::channel::SyncSender<DesktopEvent>, watching: Watching) -> Result<()> {
     // Connected here rather than on the thread, so a socket that is not there is reported
     // at startup instead of silently leaving the modules empty.
     let events = connect(EVENTS)?;

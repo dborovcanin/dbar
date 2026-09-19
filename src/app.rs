@@ -1706,14 +1706,18 @@ impl App {
 
     /// Take what the session bus says is playing.
     pub fn on_media(&mut self, reading: crate::collect::Reading) {
-        self.native.push(&Which::Media, vec![reading]);
-        self.invalidate();
+        // A player says what it is doing whenever it thinks something moved, which is more
+        // often than the wording on the bar moves.
+        if self.native.push(&Which::Media, vec![reading]) {
+            self.invalidate();
+        }
     }
 
     /// Take a reading a source pushed of its own accord, like the volume from PipeWire.
     pub fn on_audio(&mut self, reading: crate::collect::Reading) {
-        self.native.push(&Which::Audio, vec![reading]);
-        self.invalidate();
+        if self.native.push(&Which::Audio, vec![reading]) {
+            self.invalidate();
+        }
     }
 
     /// Take what a command of your own published, routed to the module that runs it: one
@@ -1723,6 +1727,9 @@ impl App {
         // The timer finds nothing left to do on its next firing and drops itself.
         self.running.remove(which);
         self.waiting.remove(which);
+        // Always drawn again, whatever the reading came to: a run that has finished is a
+        // spinner that has to stop, and that is a change even when the answer is the same
+        // answer as last time.
         self.native.push(which, readings);
         self.invalidate();
     }

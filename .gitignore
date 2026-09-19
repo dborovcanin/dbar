@@ -27,3 +27,8 @@ packaging/aur/*/pkg/
 packaging/aur/*/*.pkg.tar.*
 packaging/aur/*/*.tar.gz
 packaging/aur/*/dbar-*-linux-*
+
+# The copy bench/run.sh takes of the sway config before it appends its bar block. It
+# belongs to one machine's run and must never travel in the repository: `down` would
+# otherwise have a file that was taken from somebody else's config.
+bench/.sway-config.backup

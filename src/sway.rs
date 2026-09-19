@@ -18,6 +18,9 @@ use crate::desktop::{
 
 const MAGIC: &[u8; 6] = b"i3-ipc";
 
+/// The largest reply the bar will make room for, whatever the header claims.
+const MAX_REPLY_BYTES: usize = 8 * 1024 * 1024;
+
 const RUN_COMMAND: u32 = 0;
 const GET_WORKSPACES: u32 = 1;
 const SUBSCRIBE: u32 = 2;
@@ -136,6 +139,12 @@ fn recv(stream: &mut UnixStream) -> Result<(u32, Vec<u8>)> {
     }
     let len = u32::from_ne_bytes(header[6..10].try_into().unwrap()) as usize;
     let kind = u32::from_ne_bytes(header[10..14].try_into().unwrap());
+    // The length comes off the socket and sizes the allocation that follows it. A whole
+    // tree on a busy session is measured in hundreds of kilobytes, so anything past this is
+    // a stream that has lost its place rather than a reply worth making room for.
+    if len > MAX_REPLY_BYTES {
+        bail!("the compositor announced a {len}-byte reply, which is more than the bar will hold");
+    }
     let mut body = vec![0u8; len];
     stream
         .read_exact(&mut body)
@@ -434,7 +443,7 @@ fn quote(name: &str) -> String {
 ///
 /// Input devices and binding modes are only subscribed to when something on the bar is
 /// going to draw them, so a bar without those modules pays nothing for the questions.
-pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching) -> Result<()> {
+pub fn spawn(sender: calloop::channel::SyncSender<DesktopEvent>, watching: Watching) -> Result<()> {
     // Fail loudly here rather than on the helper thread, so a missing socket is reported
     // at startup instead of silently leaving the modules empty.
     let mut events = connect()?;
@@ -547,6 +556,27 @@ pub fn spawn(sender: calloop::channel::Sender<DesktopEvent>, watching: Watching)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reply's length arrives before the reply does and sizes the buffer it will be
+    /// read into, so a stream that has lost its place must not be able to ask for memory
+    /// the bar would then try to find.
+    #[test]
+    fn a_reply_longer_than_the_bar_will_hold_is_refused_from_its_header() {
+        use std::io::Write as _;
+        let (mut ours, mut theirs) = std::os::unix::net::UnixStream::pair().expect("a pair");
+        let mut header = Vec::new();
+        header.extend_from_slice(MAGIC);
+        header.extend_from_slice(&((MAX_REPLY_BYTES + 1) as u32).to_ne_bytes());
+        header.extend_from_slice(&GET_WORKSPACES.to_ne_bytes());
+        theirs.write_all(&header).expect("the header goes");
+        drop(theirs);
+
+        let e = recv(&mut ours).expect_err("the reply is refused");
+        assert!(
+            format!("{e:#}").contains("more than the bar will hold"),
+            "{e:#}"
+        );
+    }
 
     /// The tree as sway reports it with two screens: the keyboard is on the left one, and
     /// the right one is still showing what it was last used for.

@@ -52,7 +52,9 @@ pub struct CommandSpec {
     /// being the answer. One command, several places to report on.
     pub pages: bool,
     /// Declared in the config, because dbar cannot know what somebody else's program
-    /// prints. Leaked once while the config is read, which happens exactly once.
+    /// prints, and leaked while the config is read so the thread parsing that program's
+    /// output can hold it. A reload reads the file again and leaks another one; see the
+    /// note where they are made.
     pub fields: &'static [FieldSpec],
     /// How long one run is given before it is stopped. Part of what makes two specs
     /// different, like the schedule: two modules that run the same program but disagree
@@ -455,18 +457,32 @@ impl Registry {
         }
     }
 
-    /// Take what a source sent of its own accord: one reading, or a page each.
+    /// Take what a source sent of its own accord: one reading, or a page each, and say
+    /// whether it changes what is drawn.
     ///
     /// A publication with nothing in it is a source that ran and had nothing to say, which
     /// is one empty reading rather than no reading at all - a module with no pages would
     /// have nothing to draw and nothing left to click.
-    pub fn push(&mut self, which: &Which, readings: Vec<Reading>) {
-        if let Some(entry) = self.entries.iter_mut().find(|e| &e.which == which) {
-            entry.readings = match readings.is_empty() {
-                true => vec![Reading::default()],
-                false => readings,
-            };
+    ///
+    /// A source that arrives says so whenever its own world moved, and most of those
+    /// movements are not ones a bar shows: a player reporting its position again, a volume
+    /// set to what it already was. Saying that nothing changed is what lets the caller
+    /// skip a layout, the same way a reading taken on the timer already does.
+    pub fn push(&mut self, which: &Which, readings: Vec<Reading>) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|e| &e.which == which) else {
+            return false;
+        };
+        let readings = match readings.is_empty() {
+            true => vec![Reading::default()],
+            false => readings,
+        };
+        if entry.readings.len() == readings.len()
+            && std::iter::zip(&entry.readings, &readings).all(|(old, new)| old.same(new))
+        {
+            return false;
         }
+        entry.readings = readings;
+        true
     }
 
     /// Say that the kernel is reporting this source's changes, or has stopped.
@@ -798,6 +814,29 @@ mod tests {
             !registry.arrived(&disk, Err(anyhow::anyhow!("still gone"))),
             "staying stale is not"
         );
+    }
+
+    /// A source that arrives reports whenever its own world moved, which is far more often
+    /// than what a bar draws moves. The registry says so, so nothing above it lays the bar
+    /// out again to discover it.
+    #[test]
+    fn a_pushed_reading_that_changes_nothing_says_so() {
+        let mut registry = Registry::new(&HashMap::from([(Which::Audio, Duration::from_secs(1))]));
+        let said = |text: &str| {
+            let mut fields = Fields::default();
+            fields.set("text", crate::status::Value::Text(text.to_string()));
+            Reading {
+                fields,
+                state: State::Idle,
+            }
+        };
+        assert!(registry.push(&Which::Audio, vec![said("40%")]), "the first");
+        assert!(!registry.push(&Which::Audio, vec![said("40%")]), "the same");
+        assert!(registry.push(&Which::Audio, vec![said("45%")]), "a change");
+        // Pages are compared whole: the same readings in another order is a change.
+        assert!(registry.push(&Which::Audio, vec![said("a"), said("b")]));
+        assert!(!registry.push(&Which::Audio, vec![said("a"), said("b")]));
+        assert!(registry.push(&Which::Audio, vec![said("b"), said("a")]));
     }
 
     #[test]
