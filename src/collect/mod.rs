@@ -334,6 +334,9 @@ struct Entry {
     failures: u32,
     /// Whether the current failure has been reported, so a broken sensor logs once.
     reported: bool,
+    /// What the wall clock said when an aligned source was last read, which is the only
+    /// way to notice that the reading is about a minute that has since gone by.
+    read_at: Option<std::time::SystemTime>,
 }
 
 /// How far the wait is allowed to stretch while a collector keeps failing.
@@ -363,6 +366,7 @@ impl Registry {
                 which: which.clone(),
                 failures: 0,
                 reported: false,
+                read_at: None,
             })
             .collect();
         // A stable order keeps logs and tests from depending on hash iteration.
@@ -377,14 +381,23 @@ impl Registry {
     /// Read everything that has come due, and say whether anything changed.
     pub fn tick(&mut self) -> bool {
         let now = Instant::now();
+        let wall = std::time::SystemTime::now();
         let mut changed = false;
         for at in 0..self.entries.len() {
-            if self.entries[at].due.is_none_or(|due| due > now) {
+            let entry = &self.entries[at];
+            // Due on the timer, or holding a reading the wall clock has left behind.
+            if entry.due.is_none_or(|due| due > now) && !entry.late(wall) {
                 continue;
             }
             let read = self.entries[at].collector.read();
             changed |= self.record(at, read);
-            self.entries[at].due = self.entries[at].next_due(now);
+            if self.entries[at].which.aligned() {
+                self.entries[at].read_at = Some(std::time::SystemTime::now());
+            }
+            // Timed from after the read rather than from the top of the tick. An aligned
+            // source scheduled from `now` aims short by however long this tick's reads
+            // took, which lands the next one back on the wrong side of the boundary.
+            self.entries[at].due = self.entries[at].next_due(Instant::now());
         }
         changed
     }
@@ -546,6 +559,7 @@ impl Registry {
                 watched: false,
                 failures: 0,
                 reported: false,
+                read_at: None,
             }],
         }
     }
@@ -583,6 +597,39 @@ impl Registry {
 }
 
 impl Entry {
+    /// Whether an aligned reading is about a boundary the wall clock has already left.
+    ///
+    /// The deadline is on the monotonic clock, which does not run while the machine is
+    /// suspended; the reading is about the wall clock, which does. So a laptop that slept
+    /// through three boundaries wakes with a clock that is right about none of them and a
+    /// deadline still in the future.
+    ///
+    /// This is a check, not a wake-up: it runs on ticks that were happening anyway, so it
+    /// costs the comparison below and nothing else. What corrects the clock after a resume
+    /// is therefore whichever source is due first - the monotonic deadlines all froze
+    /// together, so a bar with a cpu module reading every two seconds notices within two
+    /// seconds of waking. A bar whose only source is the clock has no such tick, and waits
+    /// out the rest of its own interval before it is right again.
+    ///
+    /// Closing that last gap needs a timer that counts through suspend - a `CLOCK_BOOTTIME`
+    /// timerfd in place of calloop's monotonic one - which is a wake-up path of its own to
+    /// own and to get wrong. It is not worth it for a bar that shows nothing but the time;
+    /// it would be worth it if anything else ever needed waking on wall-clock boundaries.
+    fn late(&self, wall: std::time::SystemTime) -> bool {
+        let (Some(read_at), true) = (self.read_at, self.which.aligned()) else {
+            return false;
+        };
+        let bucket = |at: std::time::SystemTime| {
+            at.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|since| since.as_nanos() / self.interval.as_nanos().max(1))
+        };
+        match (bucket(read_at), bucket(wall)) {
+            (Some(then), Some(now)) => now > then,
+            _ => false,
+        }
+    }
+
     fn next_due(&self, now: Instant) -> Option<Instant> {
         // A watched source is read when it changes. It goes back on the timer only while
         // it is failing, so a sensor that has broken is still retried.
@@ -593,7 +640,13 @@ impl Entry {
         if !self.which.aligned() || self.failures > 0 {
             return Some(now + wait);
         }
-        Some(now + align(wait))
+        // The wall clock first and the monotonic clock second, in that order and not the
+        // other way round. Whatever happens between the two samples - a descheduled
+        // thread, a slow page fault - is then time the deadline is late by rather than
+        // early by, and late is a reading a hair after the boundary while early is the
+        // minute before it standing on the bar.
+        let wait = align(wait);
+        Some(Instant::now() + wait)
     }
 }
 
@@ -607,27 +660,49 @@ pub fn backoff(interval: Duration, failures: u32) -> Duration {
     interval * 2u32.pow(failures.min(MAX_BACKOFF))
 }
 
-/// The wait that lands on the next whole multiple of `interval` on the wall clock.
+/// How far past the boundary an aligned reading aims, at most.
+///
+/// Aiming exactly at the minute is a coin toss, and losing it is expensive: a timer that
+/// fires a hair early reads a clock that still says the minute before, and that wording
+/// then stands for the whole of the next minute. Two milliseconds is longer than the
+/// jitter and shorter than anyone can see.
+///
+/// It is a ceiling rather than a fixed amount, because an interval may be shorter than it:
+/// the shortest a config may ask for is a millisecond, and a guard longer than the interval
+/// would step over the boundaries it exists to land on.
+const ALIGNMENT_GUARD: Duration = Duration::from_millis(2);
+
+/// The guard this interval can afford: the whole of it, or a quarter of a short one.
+fn guard_for(interval: Duration) -> Duration {
+    ALIGNMENT_GUARD.min(interval / 4)
+}
+
+/// The wait that lands just after the next whole multiple of `interval` on the wall clock.
 ///
 /// Uses the system clock only for the offset within the interval, so the deadline itself
 /// stays on the monotonic clock and a clock adjustment cannot stall the bar.
 fn align(interval: Duration) -> Duration {
-    let Ok(since_epoch) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
-        return interval;
-    };
+    match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(since_epoch) => align_from(since_epoch, interval),
+        // A clock set before the epoch is not one to schedule against.
+        Err(_) => interval,
+    }
+}
+
+/// The same arithmetic, against a wall clock that is handed in rather than read.
+///
+/// A remainder is never rounded up to a whole interval. Doing that used to mean that a
+/// reading taken a fraction of a millisecond early - which is what a timer aimed at the
+/// boundary does - waited a further whole minute, leaving the minute before it on the bar
+/// the entire time.
+fn align_from(since_epoch: Duration, interval: Duration) -> Duration {
     let step = interval.as_nanos();
     if step == 0 {
         return interval;
     }
     let past = since_epoch.as_nanos() % step;
-    let remaining = step - past;
-    // A deadline a hair in the future would fire twice on the same tick, so a reading
-    // taken exactly on the boundary waits a whole interval instead.
-    if remaining < Duration::from_millis(1).as_nanos() {
-        interval
-    } else {
-        Duration::from_nanos(remaining as u64)
-    }
+    let remaining = u64::try_from(step - past).unwrap_or(u64::MAX);
+    Duration::from_nanos(remaining).saturating_add(guard_for(interval))
 }
 
 /// Read a file that the kernel generates, where the reported length is meaningless.
@@ -901,6 +976,7 @@ mod tests {
             which: Which::Cpu,
             failures: 0,
             reported: false,
+            read_at: None,
         };
 
         let mut registry = Registry {
@@ -1004,6 +1080,7 @@ mod tests {
                 watched: false,
                 failures: 0,
                 reported: false,
+                read_at: None,
             }],
         }
     }
@@ -1160,7 +1237,116 @@ mod tests {
         for secs in [1, 5, 60] {
             let interval = Duration::from_secs(secs);
             let wait = align(interval);
-            assert!(wait > Duration::ZERO && wait <= interval, "for {secs}s");
+            assert!(
+                wait > Duration::ZERO && wait <= interval + guard_for(interval),
+                "for {secs}s"
+            );
         }
+    }
+
+    /// A clock that is a whole minute wrong for a whole minute, which is what rounding a
+    /// tiny remainder up to a full interval used to do.
+    ///
+    /// A timer aimed at the minute can fire a fraction of a millisecond before it. The
+    /// reading taken then says the minute before, so the next one has to be taken at the
+    /// boundary that is moments away - not at the one after it.
+    #[test]
+    fn a_reading_taken_a_hair_early_waits_for_the_boundary_it_missed() {
+        let minute = Duration::from_secs(60);
+        // Half a millisecond before a minute boundary.
+        let hair = Duration::from_secs(600) - Duration::from_micros(500);
+        let wait = align_from(hair, minute);
+        assert!(
+            wait < Duration::from_millis(10),
+            "waited {wait:?} rather than crossing the boundary in front of it"
+        );
+        assert!(wait > Duration::ZERO, "and it is still in the future");
+    }
+
+    /// The shortest interval a config may ask for is a millisecond, which is shorter than
+    /// the guard. A guard that outran its own interval would step over the boundaries it
+    /// is there to land just after.
+    #[test]
+    fn the_guard_never_outruns_a_short_interval() {
+        for (interval, longest) in [
+            (Duration::from_millis(1), Duration::from_micros(250)),
+            (Duration::from_millis(4), Duration::from_millis(1)),
+            (Duration::from_millis(8), ALIGNMENT_GUARD),
+            (Duration::from_secs(60), ALIGNMENT_GUARD),
+        ] {
+            assert_eq!(guard_for(interval), longest, "for {interval:?}");
+            // However far into the interval the clock is, the wait still lands inside the
+            // next one rather than past it.
+            for offset in [0, 1, 7, 999_999] {
+                let wait = align_from(
+                    Duration::from_secs(600) + Duration::from_nanos(offset),
+                    interval,
+                );
+                assert!(
+                    wait <= interval + longest,
+                    "{interval:?} at +{offset}ns waited {wait:?}"
+                );
+            }
+        }
+    }
+
+    /// A machine that suspends stops the monotonic clock the deadline sits on but not the
+    /// wall clock the reading is about, so a resume can find a clock module holding a
+    /// minute that went by while it slept, with its deadline still in the future.
+    #[test]
+    fn a_clock_that_slept_through_its_minute_is_read_again() {
+        let mut registry = Registry::new(&HashMap::from([(Which::Time, Duration::from_secs(60))]));
+        registry.tick();
+        let at = registry
+            .entries
+            .iter()
+            .position(|e| e.which == Which::Time)
+            .expect("the clock");
+
+        let due = registry.entries[at].due.expect("a deadline");
+        assert!(due > Instant::now(), "the deadline is still in front of it");
+        assert!(
+            !registry.entries[at].late(std::time::SystemTime::now()),
+            "and the reading it holds is about the minute it is in"
+        );
+
+        // Waking an hour later, with that deadline still unreached: the same shape as a
+        // reading taken an hour ago, which is what this stands in for.
+        registry.entries[at].read_at =
+            Some(std::time::SystemTime::now() - Duration::from_secs(3600));
+        assert!(registry.entries[at].late(std::time::SystemTime::now()));
+        assert!(
+            registry.tick(),
+            "so the tick reads it rather than waiting out a deadline from before the sleep"
+        );
+        // Both readings aim at the same boundary, so the deadline barely moves; what
+        // matters is that the reading it now holds is about the minute the bar is in.
+        assert!(
+            registry.entries[at].due.expect("a new deadline") > Instant::now(),
+            "and it is scheduled for a boundary still in front of it"
+        );
+        assert!(!registry.entries[at].late(std::time::SystemTime::now()));
+    }
+
+    /// Everywhere else the wait is the time left plus the guard, and a reading taken on the
+    /// boundary itself waits for the next one rather than firing again immediately.
+    #[test]
+    fn alignment_aims_just_past_each_boundary() {
+        let minute = Duration::from_secs(60);
+        assert_eq!(
+            align_from(Duration::from_secs(630), minute),
+            Duration::from_secs(30) + guard_for(minute),
+            "halfway through a minute"
+        );
+        assert_eq!(
+            align_from(Duration::from_secs(600), minute),
+            minute + guard_for(minute),
+            "exactly on a boundary"
+        );
+        assert_eq!(
+            align_from(Duration::from_secs(600) + Duration::from_millis(1), minute),
+            minute - Duration::from_millis(1) + guard_for(minute),
+            "a millisecond past one"
+        );
     }
 }
