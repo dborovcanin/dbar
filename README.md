@@ -221,6 +221,13 @@ the battery - both of which answer through a driver and so do not belong on the
 thread that draws. One more belongs to PipeWire's own library. A bar that reads
 less starts fewer, and none of them wakes while nothing is happening.
 
+The other rows are two processes and one runtime: swaybar itself keeps 2 threads
+and the `i3status-rs` it starts keeps 6, of which two are tokio workers serving
+every block it has - an async runtime buys a lower count than a thread per thing
+that can block, which is the trade dbar declines. Waybar keeps around 40.
+[bench/README.md](bench/README.md#where-the-threads-go) names every one of them,
+and what each is for.
+
 CPU is a share of one core, averaged over three consecutive two-minute windows;
 the spread across those windows was 0.15–0.17 % for dbar, 0.58–0.62 % for
 swaybar and 1.38–1.42 % for Waybar. Resident memory is `VmRSS`, which counts the
@@ -1060,24 +1067,24 @@ On a `command` module the same key says how the program is run instead — see
 These are read by dbar itself, from `/proc`, `/sys`, PipeWire and the session
 bus:
 
-| source            | fields                                                                              |
-| ----------------- | ----------------------------------------------------------------------------------- |
-| `cpu`             | `$utilization`                                                                      |
-| `memory`          | `$percent` `$used` `$total` `$available` `$swap_percent` `$swap_used` `$swap_total` |
-| `battery`         | `$percent` `$status` `$supply` `$power` `$time` `$health` `$threshold`              |
-| `backlight`       | `$brightness` `$device`                                                             |
-| `audio`           | `$volume` `$muted` `$device` `$port`                                                |
-| `media`           | `$title` `$artist` `$album` `$status` `$player`                                     |
-| `load`            | `$one` `$five` `$fifteen` `$percent`                                                |
-| `temperature`     | `$temp` `$average` `$label` `$chip`                                                 |
-| `disk`            | `$percent` `$used` `$total` `$available` `$free` `$path`                            |
-| `network`         | `$down` `$up` `$device` `$state` `$ssid` `$signal` `$dbm` `$received` `$sent`       |
-| `time`            | `$now`                                                                              |
-| `command`         | `$text`, or whatever the module declares                                            |
-| `window`          | `$title` `$app_id` `$class`                                                         |
-| `workspaces`      | `$name`                                                                             |
-| `language`        | `$layout` `$short` `$index`                                                         |
-| `mode`            | `$mode`                                                                             |
+| source        | fields                                                                              |
+| ------------- | ----------------------------------------------------------------------------------- |
+| `cpu`         | `$utilization`                                                                      |
+| `memory`      | `$percent` `$used` `$total` `$available` `$swap_percent` `$swap_used` `$swap_total` |
+| `battery`     | `$percent` `$status` `$supply` `$power` `$time` `$health` `$threshold`              |
+| `backlight`   | `$brightness` `$device`                                                             |
+| `audio`       | `$volume` `$muted` `$device` `$port`                                                |
+| `media`       | `$title` `$artist` `$album` `$status` `$player`                                     |
+| `load`        | `$one` `$five` `$fifteen` `$percent`                                                |
+| `temperature` | `$temp` `$average` `$label` `$chip`                                                 |
+| `disk`        | `$percent` `$used` `$total` `$available` `$free` `$path`                            |
+| `network`     | `$down` `$up` `$device` `$state` `$ssid` `$signal` `$dbm` `$received` `$sent`       |
+| `time`        | `$now`                                                                              |
+| `command`     | `$text`, or whatever the module declares                                            |
+| `window`      | `$title` `$app_id` `$class`                                                         |
+| `workspaces`  | `$name`                                                                             |
+| `language`    | `$layout` `$short` `$index`                                                         |
+| `mode`        | `$mode`                                                                             |
 
 Three of them are pointed at something, and take that from a key of their own:
 

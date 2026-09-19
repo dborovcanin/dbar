@@ -15,11 +15,11 @@ comparable to one drawing icons, rounded islands and shaded runs.
 
 ## The three configurations
 
-| bar | config | what draws what |
-| --- | --- | --- |
-| dbar | [`dbar/config.toml.in`](dbar/config.toml.in) | all fifteen modules |
-| Waybar | [`waybar/config.jsonc.in`](waybar/config.jsonc.in) + [`waybar/style.css`](waybar/style.css) | all fifteen modules |
-| swaybar + i3status-rs | [`i3status/status.toml`](i3status/status.toml) | i3status-rs draws eleven blocks; swaybar itself draws the workspaces, the binding mode and the tray |
+| bar                   | config                                                                                      | what draws what                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| dbar                  | [`dbar/config.toml.in`](dbar/config.toml.in)                                                | all fifteen modules                                                                                 |
+| Waybar                | [`waybar/config.jsonc.in`](waybar/config.jsonc.in) + [`waybar/style.css`](waybar/style.css) | all fifteen modules                                                                                 |
+| swaybar + i3status-rs | [`i3status/status.toml`](i3status/status.toml)                                              | i3status-rs draws eleven blocks; swaybar itself draws the workspaces, the binding mode and the tray |
 
 All three live here, so what was measured is one directory rather than a config
 in `examples/` that the project is free to change for its own reasons. dbar's is
@@ -39,23 +39,23 @@ directly, with no shell to expand anything.
 
 The modules, and the interval each is given:
 
-| | dbar | Waybar | i3status-rs |
-| --- | --- | --- | --- |
-| workspaces | `workspaces` | `sway/workspaces` | swaybar |
-| binding mode | `mode` | `sway/mode` | swaybar |
-| window title | `window` | `sway/window` | — |
-| tray | `tray` | `tray` | swaybar |
-| media | `media` | `mpris` | `music` |
-| weather | `command`, once | `custom/weather`, once | `weather`, 600 s |
-| cpu | 2 s | 2 s | 5 s |
-| memory | 5 s | 5 s | event |
-| temperature | 5 s | 5 s | 5 s |
-| keyboard layout | `language` | `sway/language` | `keyboard_layout` |
-| network | 2 s | 2 s | event |
-| volume | `audio`, PipeWire | `wireplumber` | `sound` |
-| backlight | `backlight` | `backlight` | `backlight` |
-| battery | 30 s | 30 s | event |
-| clock | 1 m | 1 m | 5 s |
+|                 | dbar              | Waybar                 | i3status-rs       |
+| --------------- | ----------------- | ---------------------- | ----------------- |
+| workspaces      | `workspaces`      | `sway/workspaces`      | swaybar           |
+| binding mode    | `mode`            | `sway/mode`            | swaybar           |
+| window title    | `window`          | `sway/window`          | —                 |
+| tray            | `tray`            | `tray`                 | swaybar           |
+| media           | `media`           | `mpris`                | `music`           |
+| weather         | `command`, once   | `custom/weather`, once | `weather`, 600 s  |
+| cpu             | 2 s               | 2 s                    | 5 s               |
+| memory          | 5 s               | 5 s                    | event             |
+| temperature     | 5 s               | 5 s                    | 5 s               |
+| keyboard layout | `language`        | `sway/language`        | `keyboard_layout` |
+| network         | 2 s               | 2 s                    | event             |
+| volume          | `audio`, PipeWire | `wireplumber`          | `sound`           |
+| backlight       | `backlight`       | `backlight`            | `backlight`       |
+| battery         | 30 s              | 30 s                   | event             |
+| clock           | 1 m               | 1 m                    | 5 s               |
 
 ## What each bar is asked to draw
 
@@ -170,11 +170,11 @@ was running throughout, so the media module was live in all three.
 
 Three two-minute idle windows, the spread across them in brackets:
 
-| idle | resident | heap | CPU | processes | threads |
-| --- | --- | --- | --- | --- | --- |
-| **dbar** | **15.4 MB** | **3.2 MB** | **0.16 %** (0.15-0.17) | **1** | 12 |
-| swaybar + i3status-rs | 55.0 MB | 12.6 MB | 0.60 % (0.58-0.62) | 2 | 8 |
-| Waybar | 75.2 MB | 20.4 MB | 1.40 % (1.38-1.42) | 1 | 39 |
+| idle                  | resident    | heap       | CPU                    | processes | threads |
+| --------------------- | ----------- | ---------- | ---------------------- | --------- | ------- |
+| **dbar**              | **15.4 MB** | **3.2 MB** | **0.16 %** (0.15-0.17) | **1**     | 12      |
+| swaybar + i3status-rs | 55.0 MB     | 12.6 MB    | 0.60 % (0.58-0.62)     | 2         | 8       |
+| Waybar                | 75.2 MB     | 20.4 MB    | 1.40 % (1.38-1.42)     | 1         | 39      |
 
 One window with the pointer crossing all three bars, driven from a script over
 one sway IPC connection rather than by hand, so that the same workload can be
@@ -182,20 +182,65 @@ repeated: 6,593 pointer moves in two minutes, about thirty-five a second, across
 the top of both top bars and swaybar at the bottom. No buttons, so nothing was
 clicked, folded or switched:
 
-| pointer crossing them | resident | heap | CPU |
-| --- | --- | --- | --- |
-| **dbar** | **15.4 MB** | **3.2 MB** | **0.29 %** |
-| swaybar + i3status-rs | 55.0 MB | 12.6 MB | 0.67 % |
-| Waybar | 75.3 MB | 20.4 MB | 1.82 % |
+| pointer crossing them | resident    | heap       | CPU        |
+| --------------------- | ----------- | ---------- | ---------- |
+| **dbar**              | **15.4 MB** | **3.2 MB** | **0.29 %** |
+| swaybar + i3status-rs | 55.0 MB     | 12.6 MB    | 0.67 %     |
+| Waybar                | 75.3 MB     | 20.4 MB    | 1.82 %     |
 
 At a tenth of that rate - two moves a second, which is closer to a hand reaching
 for something - dbar's cost is not distinguishable from its idle one.
 
-| | binary | shared libraries |
-| --- | --- | --- |
-| **dbar** | **7.1 MB** | **4** |
-| swaybar + i3status-rs | 0.1 + 17.4 MB | 45 / 28 |
-| Waybar | 2.1 MB | 115 |
+### Where the threads go
+
+The idle table counts swaybar and the `i3status-rs` it starts as one row, which
+hides the more interesting half of the comparison. Per process, by the names the
+threads carry in `/proc/PID/task/*/comm`:
+
+| process     | threads | which                                                                                                                                                                           |
+| ----------- | ------: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| dbar        |      12 | `dbar`, `tray`, `media`, `audio`, `sway-ipc`, `sway-commands`, `watch`, `cmd:…/weather.sh`, `signals`, `read:network`, `read:battery`, and `module-rt`, which is PipeWire's own |
+| swaybar     |       2 | `swaybar` and a fontconfig helper Pango starts                                                                                                                                  |
+| i3status-rs |       6 | `i3status-rs`, **two tokio runtime workers**, a PulseAudio thread, and two from `notify` - one inotify, one poll                                                                |
+| Waybar      |   39-40 | 32 named `waybar`, plus `gmain`, `gdbus`, `dconf worker`, Pango's fontconfig helper, GLib's `pool-spawner` and `pool-0`, and two PipeWire `module-rt`                           |
+
+So the comparison worth making is dbar's twelve against i3status-rs's six, and the
+gap is one decision rather than one being careless.
+
+**i3status-rs is async.** Every block - D-Bus, the weather fetch, netlink, the
+timers - is a task on a tokio runtime, and two worker threads serve all of them.
+A twentieth block is another task, not another thread. Its other three threads
+are the same kind dbar has: libraries that insist on their own.
+
+**dbar has no async runtime, on purpose.** The event loop is `calloop`, cheap
+reads happen on the thread that draws, and anything that can genuinely block gets
+a thread to block on. The list above is therefore a list of things that can wait:
+a bus, a player, PipeWire, the compositor's events and its commands, the kernel
+watcher, somebody's weather script, a signal listener, and the two sysfs readers
+that go through a driver rather than answering from memory.
+
+Two things follow from that, and they matter more than the number:
+
+- **It tracks the config.** Drop the tray, the player and the weather from
+  `bench/dbar/config.toml.in` and most of those threads are never started. Two of
+  the twelve exist only because this config runs a program on a click and a
+  command for the weather.
+- **It is not what the bar costs.** A sleeping thread is a stack and an entry in
+  the scheduler. Against i3status-rs's six, dbar's twelve use a quarter of the
+  CPU and a quarter of the resident memory in the table above; against Waybar's
+  forty, an eighth of the CPU and a fifth of the memory.
+
+The honest trade: tokio buys a lower thread count with a large dependency and an
+async machine running through everything it touches. dbar buys four linked
+libraries and a binary that carries the rest, and pays for it in threads that
+sleep. A bar that freezes its own surface while a mount hangs would be worse at
+both.
+
+|                       | binary        | shared libraries |
+| --------------------- | ------------- | ---------------- |
+| **dbar**              | **7.1 MB**    | **4**            |
+| swaybar + i3status-rs | 0.1 + 17.4 MB | 45 / 28          |
+| Waybar                | 2.1 MB        | 115              |
 
 Three things moved since the numbers in the top-level README, and only the first
 of them is dbar getting cheaper:
