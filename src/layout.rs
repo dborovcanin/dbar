@@ -1568,7 +1568,7 @@ fn size_group(
             let styled = || match icon.as_ref() {
                 Some(IconSpec::Native(icon)) => {
                     let level = match icon.is_graded() {
-                        true => value.map(icon::level_of).unwrap_or(0),
+                        true => value.map(|v| icon::level_of(*icon, v)).unwrap_or(0),
                         false => 0,
                     };
                     (Some((*icon, level)), None)

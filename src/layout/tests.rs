@@ -2146,7 +2146,9 @@ modules = ["bat"]
 [module.bat]
 icon = "$battery"
 "##;
-    for (percent, level) in [(0.0, 0), (50.0, 2), (100.0, 4)] {
+    // The battery draws its level as a share of six, so half a battery is the step half
+    // its readings round to, and the last step is the only full one.
+    for (percent, level) in [(0.0, 0), (50.0, 2), (100.0, 5)] {
         let frame = frame_of(config, &[with_percent(item("bat", "x"), percent)]);
         assert_eq!(
             frame.groups[0].modules[0].icon.as_ref().unwrap().level,

@@ -4,10 +4,32 @@
 //! riding on a font. Most are a unit wide as well; a battery is longer than it is tall and
 //! says so with `width`, which is the only thing that varies. Graded icons take a level
 //! rather than being five separate drawings: a battery is one outline with a fill of
-//! varying width, wifi is a dot plus a count of arcs, and so on.
+//! varying width, wifi is a fan with as many of its arcs lit as the signal reaches, and
+//! so on.
 
-/// Number of steps a graded icon has.
-pub const LEVELS: usize = 5;
+/// How many steps a battery and a thermometer have.
+///
+/// Six, because a battery fills by sixths and the third of them is exactly half a battery:
+/// the reading a glance is actually looking for wants a step of its own rather than a pair
+/// that straddle it.
+pub const LEVELS: usize = 6;
+
+/// How many steps wifi and volume have.
+///
+/// Both say their level by lighting arcs of a fan that is always drawn in full, and an arc
+/// is either lit or it is not, so the step count is the arc count plus the unlit fan.
+pub const SIGNAL_LEVELS: usize = 5;
+
+/// How many steps brightness has.
+///
+/// Its level is a share of a disc rather than a count of marks, so it can afford finer
+/// steps than a fan can: the terminator moves and changes which way it arches between one
+/// step and the next, which stays legible where a fourth or fifth arc would not.
+///
+/// Seven of them rather than six because the disc grades from nothing rather than from one
+/// share: an odd count keeps the empty ring for a screen turned right down and still puts
+/// the straight terminator on a step of its own, halfway up.
+pub const BRIGHTNESS_LEVELS: usize = 7;
 
 /// How a path in an icon is painted. Widths are in unit space, so they scale with the icon.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -217,12 +239,12 @@ impl Icon {
         parse_written_icon(name)
     }
 
-    /// How many steps this icon has, which is the animation's length for a spinner and
-    /// the grading's for everything else.
+    /// How many pictures of this icon there are: the animation's length for a spinner,
+    /// the grading's for a graded icon, and one for an icon that is always itself.
     pub fn frames(self) -> usize {
         match self {
             Icon::Spinner => SPINNER_FRAMES,
-            _ => LEVELS,
+            _ => self.grading().map_or(1, Grading::steps),
         }
     }
 
@@ -239,22 +261,70 @@ impl Icon {
 
     /// Whether this icon changes with a percentage in the module's text.
     pub fn is_graded(self) -> bool {
-        matches!(
-            self,
-            Icon::Battery
-                | Icon::BatteryCharging
-                | Icon::Wifi
-                | Icon::Volume
-                | Icon::Brightness
-                | Icon::Temperature
-        )
+        self.grading().is_some()
     }
 }
 
-/// Which step of a graded icon a percentage falls in.
-pub fn level_of(percent: f64) -> usize {
+/// How an icon turns its level back into a drawing, and over how many steps.
+///
+/// The drawing is what decides which level a reading belongs on, so the two travel
+/// together: there is one place that says an icon is graded, how it grades and how far.
+#[derive(Clone, Copy)]
+enum Grading {
+    /// The level is a share of the whole: the first step is nothing and the last is all
+    /// of it, as brightness and the thermometer draw it.
+    Span(usize),
+    /// The level is a share the drawing already counts from one: a battery at its lowest
+    /// step still shows a sliver, so `n` steps are the `n` shares of a full battery.
+    Share(usize),
+    /// The level is how many marks are lit.
+    Count(usize),
+}
+
+impl Grading {
+    fn steps(self) -> usize {
+        match self {
+            Grading::Span(steps) | Grading::Share(steps) | Grading::Count(steps) => steps,
+        }
+    }
+}
+
+impl Icon {
+    fn grading(self) -> Option<Grading> {
+        match self {
+            Icon::Battery | Icon::BatteryCharging => Some(Grading::Share(LEVELS)),
+            Icon::Wifi | Icon::Volume => Some(Grading::Count(SIGNAL_LEVELS)),
+            Icon::Brightness => Some(Grading::Span(BRIGHTNESS_LEVELS)),
+            Icon::Temperature => Some(Grading::Span(LEVELS)),
+            _ => None,
+        }
+    }
+}
+
+/// Which step of a graded icon a percentage belongs on.
+///
+/// The step nearest the reading rather than the one the reading has just passed: a step is
+/// a picture of a share, so a battery at half should draw the half-full step and not the
+/// next one up. Rounding is what makes the middle of each grading - half a battery, a disc
+/// cut straight down the middle - the step a reading around fifty per cent actually gets.
+///
+/// A fan is the exception at the bottom end. An unlit fan is the picture of no signal and
+/// no sound, and twenty per cent is neither, so anything above zero lights at least the
+/// near arc.
+///
+/// An icon that is not graded has one picture, so every reading draws it.
+pub fn level_of(icon: Icon, percent: f64) -> usize {
+    let Some(grading) = icon.grading() else {
+        return 0;
+    };
     let fraction = (percent / 100.0).clamp(0.0, 1.0);
-    ((fraction * LEVELS as f64) as usize).min(LEVELS - 1)
+    let nearest = |of: usize| (fraction * of as f64).round() as usize;
+    match grading {
+        Grading::Span(steps) => nearest(steps - 1).min(steps - 1),
+        Grading::Share(steps) => nearest(steps).clamp(1, steps) - 1,
+        Grading::Count(_) if fraction <= 0.0 => 0,
+        Grading::Count(steps) => nearest(steps - 1).clamp(1, steps - 1),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,17 +415,17 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
         Icon::WifiOff => {
             // Strike through a full-strength wifi: a slash over an empty one reads as
             // nothing at all at bar sizes.
-            wifi(&mut out, LEVELS - 2);
+            wifi(&mut out, SIGNAL_LEVELS - 1);
             let mut pb = Outline::new();
             line(&mut pb, 0.20, 0.22, 0.80, 0.82);
             finish(pb, Ink::Stroke(0.09), &mut out);
         }
         Icon::Volume => volume(&mut out, level),
         Icon::VolumeMuted => {
-            volume(&mut out, 0);
+            speaker(&mut out);
             let mut pb = Outline::new();
-            line(&mut pb, 0.62, 0.36, 0.88, 0.64);
-            line(&mut pb, 0.88, 0.36, 0.62, 0.64);
+            line(&mut pb, 0.52, 0.36, 0.78, 0.64);
+            line(&mut pb, 0.78, 0.36, 0.52, 0.64);
             finish(pb, Ink::Stroke(0.08), &mut out);
         }
         Icon::Spinner => spinner(&mut out, level),
@@ -779,43 +849,81 @@ fn headphones(out: &mut Vec<IconPath>) {
     finish(cups, Ink::Fill, out);
 }
 
-fn wifi(out: &mut Vec<IconPath>, level: usize) {
-    let (cx, cy) = (0.50, 0.74);
-    let mut dot = Outline::new();
-    dot.push_circle(cx, cy, 0.07);
-    finish(dot, Ink::Fill, out);
+/// How many arcs a signal fan has, and how heavily a lit and an unlit one are drawn.
+///
+/// Every arc is drawn at every level, so the icon keeps one silhouette and one width: the
+/// level says which of them are lit, not how many exist. An unlit arc is a hairline, which
+/// at bar sizes is a faint line rather than a thin one - enough to show the fan continues,
+/// too little to be mistaken for signal. A weak signal is therefore a full fan with its
+/// near arc lit, and never the bare dot that reads as nothing being there at all.
+const FAN_ARCS: usize = SIGNAL_LEVELS - 1;
+const FAN_LIT: f32 = 0.085;
+const FAN_UNLIT: f32 = 0.028;
 
-    // Level 0 is the dot alone; each further level adds an arc.
-    //
-    // The fan is a quarter turn either side of straight up, and the outermost arc stops
-    // just inside the box: a wider sweep at this radius would put the ends of the top arc
-    // past the edges, where the rasteriser cuts them off flat.
-    let mut arcs = Outline::new();
-    let (from, to) = (-std::f32::consts::PI * 0.75, -std::f32::consts::PI * 0.25);
-    for i in 0..level {
-        arc(&mut arcs, cx, cy, 0.20 + i as f32 * 0.15, from, to);
+/// Arcs at even spacing around a point, the first `level` of them lit.
+#[allow(clippy::too_many_arguments)]
+fn fan(
+    out: &mut Vec<IconPath>,
+    cx: f32,
+    cy: f32,
+    first: f32,
+    step: f32,
+    from: f32,
+    to: f32,
+    level: usize,
+) {
+    // Two paths rather than one per arc: an icon path carries a single stroke width, and
+    // the lit ones all share theirs, as do the rest.
+    for lit in [false, true] {
+        let mut arcs = Outline::new();
+        for i in 0..FAN_ARCS {
+            if (i < level) == lit {
+                arc(&mut arcs, cx, cy, first + i as f32 * step, from, to);
+            }
+        }
+        let width = match lit {
+            true => FAN_LIT,
+            false => FAN_UNLIT,
+        };
+        finish(arcs, Ink::Stroke(width), out);
     }
-    finish(arcs, Ink::Stroke(0.08), out);
 }
 
-fn volume(out: &mut Vec<IconPath>, level: usize) {
+fn wifi(out: &mut Vec<IconPath>, level: usize) {
+    let (cx, cy) = (0.50, 0.78);
+    let mut dot = Outline::new();
+    dot.push_circle(cx, cy, 0.075);
+    finish(dot, Ink::Fill, out);
+
+    // The fan is a quarter turn either side of straight up, and the outer arc stops inside
+    // the box: a wider sweep at this radius would put its ends past the edges, where the
+    // rasteriser cuts them off flat.
+    let (from, to) = (-std::f32::consts::PI * 0.75, -std::f32::consts::PI * 0.25);
+    fan(out, cx, cy, 0.18, 0.14, from, to, level);
+}
+
+/// The speaker itself, which says nothing about the level and is the whole of a muted one.
+fn speaker(out: &mut Vec<IconPath>) {
     let mut body = Outline::new();
-    body.move_to(0.12, 0.38);
-    body.line_to(0.28, 0.38);
-    body.line_to(0.46, 0.20);
-    body.line_to(0.46, 0.80);
-    body.line_to(0.28, 0.62);
-    body.line_to(0.12, 0.62);
+    body.move_to(0.06, 0.38);
+    body.line_to(0.21, 0.38);
+    body.line_to(0.36, 0.18);
+    body.line_to(0.36, 0.82);
+    body.line_to(0.21, 0.62);
+    body.line_to(0.06, 0.62);
     body.close();
     finish(body, Ink::Fill, out);
+}
 
-    // One wave per level, so all five steps stay distinct; level 0 is the speaker alone.
-    let mut arcs = Outline::new();
-    let (from, to) = (-std::f32::consts::FRAC_PI_3, std::f32::consts::FRAC_PI_3);
-    for i in 0..level {
-        arc(&mut arcs, 0.46, 0.50, 0.15 + i as f32 * 0.11, from, to);
-    }
-    finish(arcs, Ink::Stroke(0.08), out);
+/// How wide the sound's fan opens either side of straight ahead. Narrower than wifi's,
+/// because it starts a third of the way across the box and its far arc has to stay inside.
+const VOLUME_SPREAD: f32 = 0.84;
+
+/// A speaker with the sound in front of it: the same fan wifi uses, turned to face right.
+fn volume(out: &mut Vec<IconPath>, level: usize) {
+    speaker(out);
+    let (from, to) = (-VOLUME_SPREAD, VOLUME_SPREAD);
+    fan(out, 0.34, 0.50, 0.14, 0.14, from, to, level);
 }
 
 /// A triangle pointing the way a track runs.
@@ -913,28 +1021,48 @@ fn temperature(out: &mut Vec<IconPath>, level: usize) {
     finish(marks, Ink::Stroke(0.06), out);
 }
 
-fn brightness(out: &mut Vec<IconPath>, level: usize) {
-    // The core grows and the rays lengthen with the level.
-    let t = level as f32 / (LEVELS - 1) as f32;
-    let mut core = Outline::new();
-    core.push_circle(0.50, 0.50, 0.14 + 0.06 * t);
-    finish(core, Ink::Fill, out);
+/// How far across the disc the ring is drawn, and how thick.
+const BRIGHTNESS_RADIUS: f32 = 0.34;
+const BRIGHTNESS_STROKE: f32 = 0.085;
 
-    let inner = 0.26 + 0.06 * t;
-    let outer = inner + 0.08 + 0.06 * t;
-    let mut rays = Outline::new();
-    for i in 0..8 {
-        let a = i as f32 * std::f32::consts::FRAC_PI_4;
-        let (c, s) = (a.cos(), a.sin());
-        line(
-            &mut rays,
-            0.50 + inner * c,
-            0.50 + inner * s,
-            0.50 + outer * c,
-            0.50 + outer * s,
-        );
+/// Brightness, as a disc that fills with light rather than one that grows.
+///
+/// The ring never moves, so the icon holds the same width and the same weight at every
+/// level, and what changes is how much of the disc is lit. The edge of the light is a moon
+/// terminator rather than a straight cut: below half it bows to the left, so the lit part
+/// is a crescent along the rim, at half it is straight, and above half it bows to the
+/// right and what is left dark is the crescent. That curve is what makes two neighbouring
+/// levels tell apart at a glance - a chord alone moves by a few pixels between them, while
+/// the arch changes which way it is facing. Level zero is an empty ring, the honest picture
+/// of a screen turned down, and the ring keeps the icon from disappearing there.
+fn brightness(out: &mut Vec<IconPath>, level: usize) {
+    let mut ring = Outline::new();
+    ring.push_circle(0.50, 0.50, BRIGHTNESS_RADIUS);
+    finish(ring, Ink::Stroke(BRIGHTNESS_STROKE), out);
+
+    // The lit part sits inside the ring's stroke, so the two meet without overlapping.
+    let (cx, cy) = (0.50, 0.50);
+    let r = BRIGHTNESS_RADIUS - BRIGHTNESS_STROKE / 2.0;
+    let t = level as f32 / (BRIGHTNESS_LEVELS - 1) as f32;
+    if t <= 0.0 {
+        return;
     }
-    finish(rays, Ink::Stroke(0.08), out);
+    // Where the terminator crosses the middle: the left rim at nothing, the centre at half,
+    // the right rim at full. Its distance from the centre is the ellipse's other axis, and
+    // its sign is which way the arch faces.
+    let ax = r * (2.0 * t - 1.0);
+    let c = KAPPA * r;
+    let mut lit = Outline::new();
+    // The rim the light always reaches: the left half of the disc, top to bottom.
+    lit.move_to(cx, cy - r);
+    lit.cubic_to(cx - c, cy - r, cx - r, cy - c, cx - r, cy);
+    lit.cubic_to(cx - r, cy + c, cx - c, cy + r, cx, cy + r);
+    // The terminator back to the top, as half an ellipse `ax` wide.
+    let k = KAPPA * ax;
+    lit.cubic_to(cx + k, cy + r, cx + ax, cy + c, cx + ax, cy);
+    lit.cubic_to(cx + ax, cy - c, cx + k, cy - r, cx, cy - r);
+    lit.close();
+    finish(lit, Ink::Fill, out);
 }
 
 /// How many steps a spinner turns through before it is back where it started.
@@ -1178,5 +1306,105 @@ mod tests {
         assert!((x0 - 0.06).abs() < 0.001, "{x0}");
         assert!((x1 - 0.94).abs() < 0.001, "{x1}");
         assert!(((x0 + x1) / 2.0 - 0.5).abs() < 0.001);
+    }
+
+    /// Each grading is a different picture of a reading, so each rounds its own way, and
+    /// the readings that matter are the ones either side of where a step changes.
+    #[test]
+    fn a_reading_grades_to_the_step_that_draws_it() {
+        // A share of six. Every step draws some battery, so the boundaries sit a
+        // half-share apart and a full battery is the last step alone.
+        let share = [
+            (-10.0, 0),
+            (0.0, 0),
+            (24.9, 0),
+            (25.0, 1),
+            (41.6, 1),
+            (41.7, 2),
+            (50.0, 2),
+            (58.3, 2),
+            (58.4, 3),
+            (91.6, 4),
+            (91.7, 5),
+            (100.0, 5),
+            (140.0, 5),
+        ];
+        // Four arcs over a fifth step that is the unlit fan, which only nothing at all
+        // reaches: a tenth of a per cent is signal, so it lights the near arc.
+        let count = [
+            (-10.0, 0),
+            (0.0, 0),
+            (0.1, 1),
+            (12.5, 1),
+            (37.4, 1),
+            (37.5, 2),
+            (62.5, 3),
+            (87.4, 3),
+            (87.5, 4),
+            (100.0, 4),
+            (140.0, 4),
+        ];
+        // Seven steps over six intervals, counting from an empty ring.
+        let brightness = [
+            (-10.0, 0),
+            (0.0, 0),
+            (8.0, 0),
+            (9.0, 1),
+            (25.0, 2),
+            (50.0, 3),
+            (91.0, 5),
+            (92.0, 6),
+            (100.0, 6),
+            (140.0, 6),
+        ];
+        // Six steps over five intervals, so half the range falls on the step above.
+        let temperature = [
+            (0.0, 0),
+            (9.0, 0),
+            (11.0, 1),
+            (50.0, 3),
+            (89.0, 4),
+            (91.0, 5),
+            (100.0, 5),
+        ];
+        let cases: [(Icon, &[(f64, usize)]); 6] = [
+            (Icon::Battery, &share),
+            (Icon::BatteryCharging, &share),
+            (Icon::Wifi, &count),
+            (Icon::Volume, &count),
+            (Icon::Brightness, &brightness),
+            (Icon::Temperature, &temperature),
+        ];
+        for (icon, table) in cases {
+            for (percent, level) in table {
+                assert_eq!(level_of(icon, *percent), *level, "{icon:?} at {percent}%");
+            }
+        }
+    }
+
+    /// A level is an index into the icon's own pictures, and an icon nothing grades has
+    /// only the one, however a reading reaches it.
+    #[test]
+    fn every_reading_lands_on_a_step_the_icon_has() {
+        for icon in ALL {
+            if !icon.is_graded() {
+                // The spinner is the one icon with pictures that a reading does not
+                // choose between: its frames are the animation's, not a grading's.
+                let frames = match icon {
+                    Icon::Spinner => SPINNER_FRAMES,
+                    _ => 1,
+                };
+                assert_eq!(icon.frames(), frames, "{icon:?} has the wrong frames");
+                assert_eq!(level_of(icon, 80.0), 0, "{icon:?} graded a reading");
+                continue;
+            }
+            let frames = icon.frames();
+            for tenth in -50..=1500i32 {
+                let percent = f64::from(tenth) / 10.0;
+                let level = level_of(icon, percent);
+                assert!(level < frames, "{icon:?} at {percent}% is level {level}");
+            }
+            assert_eq!(level_of(icon, 100.0), frames - 1, "{icon:?} at full");
+        }
     }
 }

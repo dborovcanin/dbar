@@ -545,12 +545,20 @@ Fixed: `$tux` (penguin), `$arch` (the Arch Linux mark, also `$arch-linux`),
 (two beamed notes, also `$music`), `$keyboard` (also `$language`).
 
 Graded: `$battery`, `$battery-charging`, `$wifi` (also `$network`), `$volume`,
-`$brightness`, `$temperature` (also `$temp`). These have five steps and pick one from the value the source
-published — a battery at 58% draws a little over half full, and a thermometer
-reads its degrees as a share of a hundred, which is the range a processor lives
-in. A native source publishes what it measured;
-for a provider module, where rendered text is all there is, the percentage is
-read back out of it, and only an `NN%` pattern counts, so text such as `92GB`,
+`$brightness`, `$temperature` (also `$temp`). These pick a step from the value
+the source published, rounded to the step nearest it — a battery at 52% draws
+half full, and a thermometer reads its degrees as a share of a hundred, which is
+the range a processor lives in. `$battery`, `$battery-charging` and
+`$temperature` have six steps, so half a battery is a step of its own rather than
+something two steps straddle, and `$brightness` has seven: its disc grades from
+empty rather than from a first share, and an odd count keeps both the empty ring
+and a step where the light stops exactly halfway. `$wifi` and `$volume` draw
+their whole fan at every level and light the arcs the reading reaches, which is
+five steps — an unlit fan and four arcs — and any reading above zero lights at
+least the near arc, because an unlit fan means no signal or no sound and nothing
+else should look like it. A native source publishes what it measured; for a
+provider module, where rendered text is all there is, the percentage is read back
+out of it, and only an `NN%` pattern counts, so text such as `92GB`,
 `23:59` or `3h 5m` leaves the icon at its lowest step rather than grading on a
 number that means something else.
 
