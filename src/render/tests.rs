@@ -1199,8 +1199,10 @@ fn a_cached_icon_matches_the_one_drawn_straight() {
                 let (mut moved, mut worst) = (0usize, 0u8);
                 let pixels = direct
                     .data()
-                    .chunks_exact(4)
-                    .zip(cached.data().chunks_exact(4));
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .zip(cached.data().as_chunks::<4>().0);
                 for (a, b) in pixels {
                     let off = a
                         .iter()
