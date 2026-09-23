@@ -496,14 +496,14 @@ enum RawWidth {
 
 /// Space around or inside a bar as written: a bare number is every side, and a table names
 /// the sides it wants, leaving the rest at nothing.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum RawSides<T> {
     All(T),
     Each(RawEachSide<T>),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawEachSide<T> {
     top: Option<T>,
@@ -537,7 +537,7 @@ struct RawPosition {
 struct RawStyle {
     background: Option<String>,
     foreground: Option<String>,
-    padding: Option<f32>,
+    padding: Option<RawSides<f32>>,
     radius: Option<f32>,
     min_width: Option<f32>,
     max_width: Option<f32>,
@@ -1345,7 +1345,7 @@ impl StateRule {
 pub struct Style {
     pub background: Color,
     pub foreground: Color,
-    pub padding: f32,
+    pub padding: Sides<f32>,
     pub radius: f32,
     pub min_width: f32,
     /// Widest the module may draw, in logical pixels. Zero leaves it unbounded.
@@ -1362,6 +1362,26 @@ impl Style {
     /// The space between an icon and the text beside it.
     pub fn gap(&self) -> f32 {
         self.icon_gap.unwrap_or(self.icon_size * ICON_GAP_RATIO)
+    }
+
+    /// Horizontal room around content, which is what contributes to module width.
+    pub fn horizontal_padding(&self) -> f32 {
+        self.padding.left + self.padding.right
+    }
+
+    /// Where content begins inside a possibly wider module.
+    ///
+    /// `min_width` gives any spare room equally to both sides of the content, inside the
+    /// padding the config asked for. With no spare room this is exactly the left padding.
+    pub fn content_origin(&self, width: f32, content: f32) -> f32 {
+        let spare = (width - self.horizontal_padding() - content).max(0.0) / 2.0;
+        self.padding.left + spare
+    }
+
+    /// Empty room after content, including any share contributed by `min_width`.
+    pub fn content_end_inset(&self, width: f32, content: f32) -> f32 {
+        let spare = (width - self.horizontal_padding() - content).max(0.0) / 2.0;
+        self.padding.right + spare
     }
 }
 
@@ -1387,7 +1407,7 @@ impl Default for Style {
         Style {
             background: Color::TRANSPARENT,
             foreground: Color::rgba(0xcd, 0xd6, 0xf4, 0xff),
-            padding: 8.0,
+            padding: Sides::all(8.0),
             radius: 0.0,
             min_width: 0.0,
             max_width: 0.0,
@@ -1407,8 +1427,34 @@ impl Style {
         if let Some(c) = &over.foreground {
             self.foreground = colors.get(c)?;
         }
-        if let Some(v) = over.padding {
-            self.padding = v;
+        if let Some(written) = &over.padding {
+            match written {
+                RawSides::All(v) => self.padding = Sides::all(*v),
+                RawSides::Each(sides) => {
+                    if let Some(v) = sides.top {
+                        self.padding.top = v;
+                    }
+                    if let Some(v) = sides.right {
+                        self.padding.right = v;
+                    }
+                    if let Some(v) = sides.bottom {
+                        self.padding.bottom = v;
+                    }
+                    if let Some(v) = sides.left {
+                        self.padding.left = v;
+                    }
+                }
+            }
+        }
+        for side in [
+            self.padding.top,
+            self.padding.right,
+            self.padding.bottom,
+            self.padding.left,
+        ] {
+            if !(side.is_finite() && side >= 0.0) {
+                bail!("padding is a distance of zero or more, not {side}");
+            }
         }
         if let Some(v) = over.radius {
             self.radius = v;
@@ -1450,8 +1496,8 @@ fn check_collapsed_icon(icon: &IconSpec, style: &Style, where_: &str) -> Result<
             if !style.icon_size.is_finite() || style.icon_size <= 0.0 {
                 bail!("{where_}: a native icon needs a positive finite icon_size");
             }
-            let width =
-                (style.icon_size * native.width() + style.padding * 2.0).max(style.min_width);
+            let width = (style.icon_size * native.width() + style.horizontal_padding())
+                .max(style.min_width);
             if style.max_width > 0.0 && width > style.max_width {
                 bail!(
                     "{where_}: the icon needs {width}px but max_width is {max}px, so there \

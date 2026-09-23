@@ -1832,7 +1832,7 @@ fn group_collapse_defaults_requirements_and_style_cascade() {
         .clone();
     assert_eq!(style.icon, Icon::parse("cpu").map(IconSpec::Native));
     assert_eq!(style.icon_size, 12.0);
-    assert_eq!(style.padding, 7.0);
+    assert_eq!(style.padding, Sides::all(7.0));
     assert_eq!(style.background, Color::parse("#123456").unwrap());
     assert!(
         parse("collapsible = false\ncollapse_button = 'right'\ncollapsed = { icon = '$cpu' }")
@@ -1902,7 +1902,7 @@ fn module_collapse_requires_an_icon_and_rejects_keys_that_mean_nothing() {
     );
     let worn = collapse.style.as_ref().expect("a collapsed style");
     assert_eq!(worn.icon, Icon::parse("memory").map(IconSpec::Native));
-    assert_eq!(worn.padding, 7.0);
+    assert_eq!(worn.padding, Sides::all(7.0));
 
     // Without the table there is nothing to wear but what it already had.
     let plain = Config::parse(&one_module(

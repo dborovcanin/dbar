@@ -1585,7 +1585,7 @@ fn draw_group(
         let wording = wording_stop.map_or(wording, |stop| wording.stopped(stop));
         // Layout already placed the text; only the vertical placing is ours, and every
         // wording is put on the one baseline rather than centred on its own ink.
-        let ty = module.y + module.height / 2.0;
+        let ty = module.text_y;
         let (tx, ty) = (module.text_x + offset.0, ty + offset.1);
         draw_text(
             pixmap,

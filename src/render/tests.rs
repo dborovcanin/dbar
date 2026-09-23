@@ -829,6 +829,7 @@ fn module(x: f32, width: f32, background: Color, text: &str, icon: bool) -> Plac
         }),
         text: text.to_string(),
         text_x: x + 16.0,
+        text_y: 10.0,
         content_right: None,
         text_right: None,
         foreground: INK,

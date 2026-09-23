@@ -289,6 +289,8 @@ pub struct PlacedModule {
     pub text: String,
     /// Left edge of the text, already offset past any icon.
     pub text_x: f32,
+    /// Vertical centre of the text after the module's top and bottom padding.
+    pub text_y: f32,
     /// Where the module's contents stop, for one holding more than it shows.
     ///
     /// A module travelling between two wordings is drawn at a width neither was fitted to,
@@ -549,6 +551,7 @@ impl SamePaint for PlacedModule {
             && self.height == other.height
             && self.text == other.text
             && self.text_x == other.text_x
+            && self.text_y == other.text_y
             && self.content_right == other.content_right
             && self.text_right == other.text_right
             && self.foreground == other.foreground
@@ -1621,7 +1624,7 @@ fn size_group(
                 }
                 _ => 0.0,
             };
-            let fixed = advance(&content) + style.padding * 2.0;
+            let fixed = advance(&content) + style.horizontal_padding();
             let cap = match style.max_width > 0.0 {
                 true => style.max_width.min(available),
                 false => available,
@@ -1646,7 +1649,8 @@ fn size_group(
                 return hidden;
             }
             let text_width = text.measure(&content);
-            let width = (text_width + icon_advance + style.padding * 2.0).max(style.min_width);
+            let width =
+                (text_width + icon_advance + style.horizontal_padding()).max(style.min_width);
             Fitted {
                 drawn: true,
                 style,
@@ -1885,7 +1889,7 @@ fn collapsed_icon(
 
 /// The width the collapsed icon needs, which is what a fold travels to and from.
 fn shut_width(style: &Style, icon_advance: f32) -> f32 {
-    (icon_advance + style.padding * 2.0).max(style.min_width)
+    (icon_advance + style.horizontal_padding()).max(style.min_width)
 }
 
 fn finish_group(
@@ -1985,10 +1989,16 @@ impl SizedModule {
         self.background = self.background.mix(style.background, at);
         self.style.radius += (style.radius - self.style.radius) * at;
         self.style.icon_size += (style.icon_size - self.style.icon_size) * at;
+        // Horizontal padding is already represented by the travelling box and icon shift.
+        // Vertical padding has no box of its own, so carry its content inset explicitly.
+        self.style.padding.top += (style.padding.top - self.style.padding.top) * at;
+        self.style.padding.bottom += (style.padding.bottom - self.style.padding.bottom) * at;
         if let Some(hover) = self.hover_style.as_mut() {
             hover.foreground = hover.foreground.mix(style.foreground, at);
             hover.background = hover.background.mix(style.background, at);
             hover.radius += (style.radius - hover.radius) * at;
+            hover.padding.top = self.style.padding.top;
+            hover.padding.bottom = self.style.padding.bottom;
         }
     }
 
@@ -2009,7 +2019,7 @@ impl SizedModule {
         // never set `written_icon_advance`, which deliberately leaves their current behaviour.
         let from = self.icon_origin();
         let mark = self.mark_width(&shut.style);
-        let to = (shut.module - mark) / 2.0;
+        let to = shut.style.content_origin(shut.module, mark);
         to - from - self.shift
     }
 
@@ -2019,7 +2029,7 @@ impl SizedModule {
     /// what `min_width` is for.
     fn content_origin(&self) -> f32 {
         let content = self.icon_advance + self.text_width;
-        ((self.width - content) / 2.0).max(self.style.padding)
+        self.style.content_origin(self.width, content)
     }
 
     /// Where the icon sits inside that box.
@@ -2034,8 +2044,8 @@ impl SizedModule {
             return self.content_origin();
         }
         match self.icon_after_text {
-            true => self.width - self.style.padding - self.mark_width(&self.style),
-            false => self.style.padding,
+            true => self.width - self.style.padding.right - self.mark_width(&self.style),
+            false => self.style.padding.left,
         }
     }
 
@@ -2100,8 +2110,10 @@ impl SizedGroup {
         // standing in that padding to the last frame: an island closing on a generous
         // collapsed padding shows the first characters of its reading until the settled
         // frame takes them away in one step.
-        self.text_inset =
-            ((shut.module - self.modules[0].mark_width(&shut.style)) / 2.0).max(0.0) * at;
+        self.text_inset = shut
+            .style
+            .content_end_inset(shut.module, self.modules[0].mark_width(&shut.style))
+            * at;
         // The island is left holding the collapsed style's icon on the collapsed style's
         // ground, so the module that stays behind arrives wearing them. Both ends of the
         // hand-off are then the same picture and the swap on the last frame is a swap of
@@ -2169,11 +2181,13 @@ fn place(
         // Spare room in the box belongs to the wording, so the icon is placed from its own
         // origin rather than from where the wording starts.
         let icon_x = x + m.icon_origin() + carried;
+        let content_y = inner_y + m.style.padding.top;
+        let content_height = (inner_h - m.style.padding.top - m.style.padding.bottom).max(0.0);
         let placed_icon = m.icon.map(|(icon, level)| PlacedIcon {
             icon,
             level,
             x: icon_x,
-            y: inner_y + (inner_h - m.style.icon_size) / 2.0,
+            y: content_y + (content_height - m.style.icon_size) / 2.0,
             size: m.style.icon_size,
             art: m.art.clone(),
         });
@@ -2208,7 +2222,7 @@ fn place(
         // empty without clipping the icon that remains there.
         let content_right = m.clipped.then_some(match m.drawn_width {
             Some(_) => x + width,
-            None => x + width - m.style.padding,
+            None => x + width - m.style.padding.right,
         });
         let text_right = content_right.map(|right| match m.drawn_width {
             Some(_) => right - m.text_inset,
@@ -2222,6 +2236,7 @@ fn place(
             icon: placed_icon,
             text: m.text,
             text_x: content_x + painted_icon_advance,
+            text_y: content_y + content_height / 2.0,
             content_right,
             text_right,
             foreground,
@@ -2638,6 +2653,7 @@ pub fn fault(
                 on_click: None,
                 text: message.to_string(),
                 text_x: x + padding,
+                text_y: inset.top + height / 2.0,
                 foreground: FAULT_COLOR,
                 background: Color::TRANSPARENT,
                 radius: 0.0,

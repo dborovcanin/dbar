@@ -81,6 +81,7 @@ fn placed() -> PlacedModule {
         icon: None,
         text: String::new(),
         text_x: 0.0,
+        text_y: 5.0,
         content_right: None,
         text_right: None,
         foreground: crate::color::Color::TRANSPARENT,

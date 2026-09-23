@@ -480,7 +480,7 @@ groups = ["system"]
 
 [style.default]
 foreground = "$text"  # "$name" refers to a [colors] entry
-padding = 8
+padding = 8             # one number still applies to every side
 
 [module.cpu]
 source = "cpu"        # read by dbar itself
@@ -497,6 +497,17 @@ spacing = 0
 
 Style resolution runs built-in defaults, then the named `[style.*]` a module
 picks, then that module's own keys.
+
+Style, module and state padding may also name individual sides. Unnamed sides inherit
+from the style below them, so this adds room only after the module's contents:
+
+```toml
+[module.network]
+padding = { right = 8 }
+```
+
+`top` and `bottom` move the icon and wording within the module without shrinking
+its background or click target. `left` and `right` contribute to its width.
 
 ### Icons
 

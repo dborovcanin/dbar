@@ -417,7 +417,7 @@ pub fn art(icon: Icon, level: usize) -> IconArt {
             // nothing at all at bar sizes.
             wifi(&mut out, SIGNAL_LEVELS - 1);
             let mut pb = Outline::new();
-            line(&mut pb, 0.20, 0.22, 0.80, 0.82);
+            line(&mut pb, 0.20, 0.82, 0.80, 0.22);
             finish(pb, Ink::Stroke(0.09), &mut out);
         }
         Icon::Volume => volume(&mut out, level),
@@ -1293,6 +1293,18 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn wifi_off_strike_rises_to_the_right() {
+        let IconArt::Paths(paths) = art(Icon::WifiOff, 0) else {
+            panic!("wifi-off is vector art");
+        };
+        let strike = paths.last().expect("wifi-off has a strike");
+        let [PathCmd::MoveTo(from), PathCmd::LineTo(to)] = strike.cmds.as_slice() else {
+            panic!("wifi-off strike is one line");
+        };
+        assert!(from.x < to.x && from.y > to.y, "{from:?} to {to:?}");
     }
 
     #[test]

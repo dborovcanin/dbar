@@ -1753,11 +1753,37 @@ spacing = 0
 }
 
 #[test]
-fn padding_is_added_on_both_sides_and_nowhere_else() {
+fn scalar_padding_is_added_on_both_horizontal_sides() {
     // Three characters, no icon: the module is the text plus a padding each side.
     assert_eq!(width_of("padding = 0"), 3.0);
     assert_eq!(width_of("padding = 5"), 13.0);
     assert_eq!(width_of("padding = 5.5"), 14.0);
+}
+
+#[test]
+fn padding_can_override_each_side_independently() {
+    let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+padding = 0
+
+[style.tile]
+padding = 4
+
+[module.cpu]
+style = "tile"
+padding = { top = 2, right = 9, bottom = 6 }
+"##;
+    let frame = frame_of(config, &[item("cpu", "abc")]);
+    let module = &frame.groups[0].modules[0];
+    // The unnamed left side inherits four from the style; only right is replaced.
+    assert_eq!(module.width, 3.0 + 4.0 + 9.0);
+    assert_eq!(module.text_x - module.x, 4.0);
+    // Unequal vertical sides move the content within the unchanged module background.
+    assert_eq!(module.text_y, module.y + module.height / 2.0 - 2.0);
 }
 
 #[test]
