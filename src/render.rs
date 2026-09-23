@@ -1583,10 +1583,10 @@ fn draw_group(
             .text_right
             .map(|right| ((right + offset.0) * scale).ceil() as i32);
         let wording = wording_stop.map_or(wording, |stop| wording.stopped(stop));
-        // Layout already placed the text; only the vertical placing is ours, and every
-        // wording is put on the one baseline rather than centred on its own ink.
-        let ty = module.text_y;
-        let (tx, ty) = (module.text_x + offset.0, ty + offset.1);
+        // Layout placed the text, vertical padding included. `text_y` is a middle rather
+        // than a baseline, so every wording sits on the one line instead of being centred on
+        // its own ink.
+        let (tx, ty) = (module.text_x + offset.0, module.text_y + offset.1);
         draw_text(
             pixmap,
             tools.text,

@@ -1991,14 +1991,13 @@ impl SizedModule {
         self.style.icon_size += (style.icon_size - self.style.icon_size) * at;
         // Horizontal padding is already represented by the travelling box and icon shift.
         // Vertical padding has no box of its own, so carry its content inset explicitly.
+        // Hover only ever lends colour and radius, so its padding is left alone.
         self.style.padding.top += (style.padding.top - self.style.padding.top) * at;
         self.style.padding.bottom += (style.padding.bottom - self.style.padding.bottom) * at;
         if let Some(hover) = self.hover_style.as_mut() {
             hover.foreground = hover.foreground.mix(style.foreground, at);
             hover.background = hover.background.mix(style.background, at);
             hover.radius += (style.radius - hover.radius) * at;
-            hover.padding.top = self.style.padding.top;
-            hover.padding.bottom = self.style.padding.bottom;
         }
     }
 
@@ -2181,13 +2180,15 @@ fn place(
         // Spare room in the box belongs to the wording, so the icon is placed from its own
         // origin rather than from where the wording starts.
         let icon_x = x + m.icon_origin() + carried;
-        let content_y = inner_y + m.style.padding.top;
-        let content_height = (inner_h - m.style.padding.top - m.style.padding.bottom).max(0.0);
+        // Top and bottom padding only move the content off the module's middle, by half
+        // their difference. Left unclamped so equal padding stays centred however large it
+        // is; config refuses a difference that would move content off the module.
+        let middle = inner_y + (inner_h + m.style.padding.top - m.style.padding.bottom) / 2.0;
         let placed_icon = m.icon.map(|(icon, level)| PlacedIcon {
             icon,
             level,
             x: icon_x,
-            y: content_y + (content_height - m.style.icon_size) / 2.0,
+            y: middle - m.style.icon_size / 2.0,
             size: m.style.icon_size,
             art: m.art.clone(),
         });
@@ -2236,7 +2237,7 @@ fn place(
             icon: placed_icon,
             text: m.text,
             text_x: content_x + painted_icon_advance,
-            text_y: content_y + content_height / 2.0,
+            text_y: middle,
             content_right,
             text_right,
             foreground,

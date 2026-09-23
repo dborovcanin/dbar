@@ -506,8 +506,9 @@ from the style below them, so this adds room only after the module's contents:
 padding = { right = 8 }
 ```
 
-`top` and `bottom` move the icon and wording within the module without shrinking
-its background or click target. `left` and `right` contribute to its width.
+`top` and `bottom` move the icon and wording off the module's middle by half their
+difference, without shrinking its background or click target; equal ones leave the content
+centred. `left` and `right` contribute to its width.
 
 ### Icons
 

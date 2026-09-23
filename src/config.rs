@@ -496,11 +496,48 @@ enum RawWidth {
 
 /// Space around or inside a bar as written: a bare number is every side, and a table names
 /// the sides it wants, leaving the rest at nothing.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone)]
 enum RawSides<T> {
     All(T),
     Each(RawEachSide<T>),
+}
+
+/// Written by hand rather than untagged, so a misspelt side is reported as one instead of
+/// as a value that matched neither shape.
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for RawSides<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::value::MapAccessDeserializer;
+        use serde::de::{Error, IntoDeserializer, MapAccess, Visitor};
+        use std::marker::PhantomData;
+
+        struct Sides<T>(PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for Sides<T> {
+            type Value = RawSides<T>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a number for every side, or a table of top, right, bottom, left")
+            }
+
+            fn visit_i64<E: Error>(self, v: i64) -> Result<Self::Value, E> {
+                T::deserialize(v.into_deserializer()).map(RawSides::All)
+            }
+
+            fn visit_u64<E: Error>(self, v: u64) -> Result<Self::Value, E> {
+                T::deserialize(v.into_deserializer()).map(RawSides::All)
+            }
+
+            fn visit_f64<E: Error>(self, v: f64) -> Result<Self::Value, E> {
+                T::deserialize(v.into_deserializer()).map(RawSides::All)
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+                RawEachSide::deserialize(MapAccessDeserializer::new(map)).map(RawSides::Each)
+            }
+        }
+
+        deserializer.deserialize_any(Sides(PhantomData))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -941,6 +978,18 @@ impl<T: Copy + Default> Sides<T> {
                 left: sides.left.unwrap_or_default(),
             },
         }
+    }
+}
+
+impl Sides<f32> {
+    /// Refuses a side that is not a distance, which every padding has to be.
+    fn check_distances(&self) -> Result<()> {
+        for side in [self.top, self.right, self.bottom, self.left] {
+            if !(side.is_finite() && side >= 0.0) {
+                bail!("padding is a distance of zero or more, not {side}");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1446,16 +1495,7 @@ impl Style {
                 }
             }
         }
-        for side in [
-            self.padding.top,
-            self.padding.right,
-            self.padding.bottom,
-            self.padding.left,
-        ] {
-            if !(side.is_finite() && side >= 0.0) {
-                bail!("padding is a distance of zero or more, not {side}");
-            }
-        }
+        self.padding.check_distances()?;
         if let Some(v) = over.radius {
             self.radius = v;
         }
@@ -1976,6 +2016,7 @@ impl Config {
                     .get(group_name)
                     .ok_or_else(|| anyhow!("group {group_name:?} is used but not defined"))?;
                 let group = resolve_group(group_name, raw_group, &raw, &palette, &styles, &base)?;
+                check_vertical_padding(&group, &bar)?;
                 if slot.separator.is_some() && (group.opacity != 1.0 || group.padding != 0.0) {
                     bail!(
                         "[{name}.separator] joins group {group_name:?}, which must have opacity = 1 and padding = 0"
@@ -2199,16 +2240,51 @@ fn parse_bar_width(written: Option<&RawWidth>) -> Result<Option<BarWidth>> {
 /// then the runs are given nothing rather than the bar being refused.
 fn parse_bar_padding(written: Option<&RawSides<f32>>, height: u32) -> Result<Sides<f32>> {
     let padding = Sides::written(written);
-    for side in [padding.top, padding.right, padding.bottom, padding.left] {
-        if !(side.is_finite() && side >= 0.0) {
-            bail!("padding is a distance of zero or more, not {side}");
-        }
-    }
+    padding.check_distances()?;
     let vertical = padding.top + padding.bottom;
     if vertical >= height as f32 {
         bail!("{vertical} of padding above and below leaves nothing of a bar {height} high");
     }
     Ok(padding)
+}
+
+/// Refuses module padding above and below that would move the content off the module.
+///
+/// A module's height is the bar's, less the bar's and the group's padding. Its own top and
+/// bottom move the content off that height's middle by half their difference, so equal
+/// padding never moves it. A difference as large as the height would draw the icon and
+/// text off the surface, where the config would look accepted and the module be blank.
+fn check_vertical_padding(group: &Group, bar: &Bar) -> Result<()> {
+    let room = bar.height as f32 - bar.padding.top - bar.padding.bottom - group.padding * 2.0;
+    let fits = |style: &Style, where_: &dyn Fn() -> String| -> Result<()> {
+        let (top, bottom) = (style.padding.top, style.padding.bottom);
+        let difference = (top - bottom).abs();
+        if difference > 0.0 && difference >= room {
+            bail!(
+                "{}: padding of {top} above and {bottom} below moves the content off a \
+                 module {room} high in group {:?}",
+                where_(),
+                group.name
+            );
+        }
+        Ok(())
+    };
+    if let Some(collapse) = &group.collapse {
+        fits(&collapse.style, &|| {
+            format!("[group.{}.collapsed]", group.name)
+        })?;
+    }
+    for module in &group.modules {
+        let name = &module.name;
+        fits(&module.style, &|| format!("[module.{name}]"))?;
+        for rule in &module.states {
+            fits(&rule.style, &|| format!("a state of [module.{name}]"))?;
+        }
+        if let Some(style) = module.collapse.as_ref().and_then(|c| c.style.as_ref()) {
+            fits(style, &|| format!("[module.{name}.collapsed]"))?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether a rule may compare this kind of field against a word.

@@ -138,6 +138,11 @@ groups = ["system", "media", "tray", "power"]
 
 [style.default]
 foreground = "$text"
+# One number is every side. A table names only the sides it changes, and the rest
+# come from the style below: `padding = { right = 8 }` adds room after the content
+# alone. `left` and `right` are part of the module's width. `top` and `bottom` move
+# the icon and wording off the middle by half their difference, so equal ones never
+# move anything, and a difference as tall as the module is a startup error.
 padding = 4
 background = "#00000000" # default: transparent
 radius = 0               # default: 0
@@ -502,7 +507,7 @@ overlap = 1
 source = "workspaces"
 scope = "output"
 style = "plain"
-padding = 9
+padding = { left = 9, right = 9 }
 
 [module.workspaces.states.focused]
 focused = true

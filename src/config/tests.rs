@@ -1307,6 +1307,64 @@ fn space_around_a_bar_that_cannot_be_drawn_is_rejected() {
 }
 
 #[test]
+fn module_padding_names_its_sides_over_what_it_inherits() {
+    let cfg = Config::parse(&one_module(
+        "source = \"cpu\"\npadding = { right = 9 }\n[module.m.states.hot]\nabove = 90\npadding = { top = 2 }",
+    ))
+    .expect("padding by side");
+    let module = cfg.modules().next().unwrap();
+    let open = Sides {
+        top: 8.0,
+        right: 9.0,
+        bottom: 8.0,
+        left: 8.0,
+    };
+    assert_eq!(module.style.padding, open);
+    // A state starts from the module's padding, not from the defaults.
+    assert_eq!(module.states[0].style.padding, Sides { top: 2.0, ..open });
+}
+
+#[test]
+fn module_padding_that_cannot_be_drawn_is_rejected_by_name() {
+    // `one_module` gives a 30 high bar with no bar or group padding.
+    for (extra, message) in [
+        ("padding = -1", "zero or more"),
+        ("padding = { left = -4 }", "zero or more"),
+        ("padding = nan", "zero or more"),
+        ("padding = { rigth = 8 }", "unknown field `rigth`"),
+        ("padding = \"8\"", "a number for every side"),
+        (
+            "padding = { top = 38, bottom = 8 }",
+            "[module.m]: padding of 38 above and 8 below",
+        ),
+        (
+            "[module.m.states.hot]\nabove = 90\npadding = { top = 0, bottom = 30 }",
+            "a state of [module.m]",
+        ),
+        (
+            "collapsible = true\nicon = \"$cpu\"\ncollapsed = { padding = { top = 40 } }",
+            "[module.m.collapsed]",
+        ),
+    ] {
+        let body = format!("source = \"cpu\"\n{extra}");
+        let error = format!("{:#}", Config::parse(&one_module(&body)).unwrap_err());
+        assert!(error.contains(message), "{extra:?} gave {error}");
+    }
+
+    // Equal padding never moves the content, however much of it there is.
+    Config::parse(&one_module("source = \"cpu\"\npadding = 40")).expect("centred padding");
+
+    // The room is what the bar and the group leave, not the bar's whole height.
+    let squeezed = "[bar]\nheight = 30\npadding = { top = 4, bottom = 4 }\n\
+        [right]\ngroups = [\"g\"]\n\
+        [group.g]\nmodules = [\"m\"]\npadding = 3\n\
+        [module.m]\nsource = \"cpu\"\npadding = { top = 16, bottom = 0 }\n";
+    let error = format!("{:#}", Config::parse(squeezed).unwrap_err());
+    assert!(error.contains("a module 16 high"), "{error}");
+    Config::parse(&squeezed.replace("top = 16", "top = 15")).expect("15 of 16 fits");
+}
+
+#[test]
 fn a_bar_width_that_cannot_be_drawn_is_rejected() {
     for written in ["0", "-40", "\"0%\"", "\"150%\"", "\"1200px\"", "\"60\""] {
         let e = Config::parse(&format!("[bar]\nwidth = {written}\n")).expect_err(written);

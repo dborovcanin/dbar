@@ -1787,6 +1787,28 @@ padding = { top = 2, right = 9, bottom = 6 }
 }
 
 #[test]
+fn equal_vertical_padding_keeps_content_centred_however_large() {
+    let config = r##"
+[bar]
+height = 20
+[left]
+groups = ["g"]
+[group.g]
+modules = ["cpu"]
+padding = 0
+[module.cpu]
+padding = 12
+icon = "$cpu"
+icon_size = 8
+"##;
+    let frame = frame_of(config, &[item("cpu", "abc")]);
+    let module = &frame.groups[0].modules[0];
+    let icon = module.icon.as_ref().expect("an icon");
+    assert_eq!(module.text_y, module.y + module.height / 2.0);
+    assert_eq!(icon.y + icon.size / 2.0, module.text_y);
+}
+
+#[test]
 fn the_gap_between_an_icon_and_its_text_is_the_configured_one() {
     let keys = |gap: &str| format!("padding = 0\nicon = \"$cpu\"\nicon_size = 10\n{gap}");
     // Icon, gap, then the text.
@@ -2772,6 +2794,58 @@ icon = "$headphones"
     // And the wording is still centred in the room that is left, rather than pushed
     // against the icon it follows.
     assert!(narrow.1 > narrow.0 + 17.0 + 6.0);
+}
+
+/// Collapsed padding that differs side to side still lands a fold on the shut island:
+/// the icon travels to the collapsed left padding rather than to the middle, and the
+/// wording rises to the collapsed top and bottom as it goes.
+#[test]
+fn a_fold_lands_on_uneven_collapsed_padding() {
+    let config = r##"
+[bar]
+height = 34
+[right]
+groups = ["s"]
+[group.s]
+modules = ["cpu"]
+collapsible = true
+collapse_button = "right"
+collapsed = { icon = "$cpu", icon_size = 10, padding = { left = 2, right = 12, top = 10, bottom = 2 } }
+[module.cpu]
+format = "$text"
+padding = 6
+icon = "$cpu"
+icon_size = 10
+"##;
+    let cfg = Config::parse(config).unwrap();
+    let native = Registry::new(&Default::default());
+    let items = [item("cpu", "42")];
+    let none = Default::default();
+    let mut inputs = group_inputs(&items, &native, &none);
+    let place_of = |frame: &Frame| {
+        let group = &frame.groups[0];
+        let module = &group.modules[0];
+        let icon = module.icon.as_ref().expect("an icon to follow");
+        (group.x, group.width, icon.x, icon.y, module.text_y)
+    };
+
+    let all = ["s".to_string()].into_iter().collect();
+    inputs.collapsed_groups = &all;
+    let shut = place_of(&compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None));
+    inputs.collapsed_groups = &none;
+    // Twelve on the right and two on the left is not a centred icon.
+    assert_eq!(shut.2 - shut.0, 2.0);
+    assert_eq!(shut.1, 2.0 + 10.0 + 12.0);
+
+    let end: std::collections::HashMap<String, f32> = [("s".to_string(), 1.0)].into();
+    inputs.folding = &end;
+    let landed = place_of(&compute(&cfg, &inputs, 400.0, 34.0, &mut Fixed, None));
+    for (got, want) in [landed.0, landed.1, landed.2, landed.3, landed.4]
+        .into_iter()
+        .zip([shut.0, shut.1, shut.2, shut.3, shut.4])
+    {
+        assert!((got - want).abs() < 0.001, "{landed:?} against {shut:?}");
+    }
 }
 
 /// The island a fold arrives at is one icon, and the icon the first module already
