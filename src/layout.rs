@@ -873,13 +873,18 @@ fn wording<'g>(
     module: &'g ModuleCfg,
     alt: &std::collections::HashMap<String, usize>,
 ) -> &'g Format {
+    wording_at(module, showing(module, alt))
+}
+
+/// Which wording a module is on, numbered the way `wording_at` reads them.
+fn showing(module: &ModuleCfg, alt: &std::collections::HashMap<String, usize>) -> usize {
     // Most modules have one wording, and while another module is on its second, asking
     // which of one is showing would hash this module's name for an answer that cannot be
     // anything but the first.
     if module.format_alt.is_empty() {
-        return &module.format;
+        return 0;
     }
-    wording_at(module, alt.get(&module.name).copied().unwrap_or(0))
+    alt.get(&module.name).copied().unwrap_or(0)
 }
 
 /// One numbered wording, which is what a module travelling has two of.
@@ -1424,7 +1429,7 @@ fn size_group(
         // The state rules and the graded icons both key on what the source published, not
         // on whatever the text ended up saying; a rule reads the field it names, or the
         // value the source is mainly about.
-        let resolve = |hovered: bool, text: &str| {
+        let resolve = |flags: StateFlags, hovered: bool, text: &str| {
             module
                 .states
                 .iter()
@@ -1436,7 +1441,7 @@ fn size_group(
 
         // A provider often has to spell a state into the text for a rule to match on. Once
         // it has been matched the wording has done its job, and the icon says it better.
-        let strip = |content: String| match module
+        let strip = |flags: StateFlags, content: String| match module
             .states
             .iter()
             .find(|rule| rule.strip && rule.matches(flags, false, &values, &content))
@@ -1466,11 +1471,15 @@ fn size_group(
         // a rule can key on the text, so each wording resolves its own style, its own icon
         // and its own padding, and measuring the one being left behind in the style the
         // one arriving happens to wear is a first frame that jumps.
-        let fitted = |raw: String, folded: bool, text: &mut dyn Measure| -> Fitted {
+        let fitted = |raw: String, alt: usize, folded: bool, text: &mut dyn Measure| -> Fitted {
+            let flags = StateFlags {
+                showing: alt,
+                ..flags
+            };
             // What a folded module wears, for one that asked to wear something definite.
             // Resolved before the rules so the table wins outright, the way a group's does.
             let collapsed = module.collapse.as_ref().and_then(|c| c.style.as_ref());
-            let resolved = resolve(false, &raw);
+            let resolved = resolve(flags, false, &raw);
             // What a fold leaves behind: the icon its `collapsed` table named, and
             // otherwise whatever the module is wearing. The second is the interesting one -
             // it is the matching state's icon, so a player that swaps to a pause icon folds
@@ -1505,7 +1514,7 @@ fn size_group(
             {
                 return hidden;
             }
-            let mut content = strip(raw);
+            let mut content = strip(flags, raw);
             // Stripping can empty the text entirely, which is fine when an icon is left to
             // carry the module: a muted volume is the icon and nothing else, and so is a
             // command that has not answered yet.
@@ -1531,7 +1540,7 @@ fn size_group(
             let hover_style = match wearing_collapsed {
                 true => None,
                 false => {
-                    let hovered = resolve(true, &content);
+                    let hovered = resolve(flags, true, &content);
                     (hovered != style).then(|| Style {
                         padding: style.padding,
                         min_width: style.min_width,
@@ -1676,16 +1685,18 @@ fn size_group(
         // rule a group fold already follows. Drawing the folded shape instead held the
         // collapsed icon all the way through an opening and jumped to the wording on the
         // last frame.
+        let showing = showing(module, inputs.alt);
         let (arriving, leaving) = match folding {
             Some(_) => (
-                fitted(content.clone(), false, text),
-                Some(fitted(content, true, text)),
+                fitted(content.clone(), showing, false, text),
+                Some(fitted(content, showing, true, text)),
             ),
             None => (
-                fitted(content, folded, text),
+                fitted(content, showing, folded, text),
                 travelling.map(|leaving| {
                     fitted(
                         wording_at(module, leaving.from).render(&values),
+                        leaving.from,
                         folded,
                         text,
                     )

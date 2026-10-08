@@ -2449,3 +2449,34 @@ fn the_autohide_signal_cannot_also_refresh_a_module() {
     );
     assert!(Config::parse(&config).is_ok());
 }
+
+#[test]
+fn a_rule_waiting_for_a_wording_has_to_name_one_the_module_has() {
+    for (extra, message) in [
+        ("[module.m.states.s]\nalt = true", "has no format_alt"),
+        (
+            "format_alt = 'b'\n[module.m.states.s]\nalt = false",
+            "`alt = false`",
+        ),
+        (
+            "format_alt = 'b'\n[module.m.states.s]\nalt = 0",
+            "counts from 1 to 1",
+        ),
+        (
+            "format_alt = ['b', 'c']\n[module.m.states.s]\nalt = 3",
+            "counts from 1 to 2",
+        ),
+    ] {
+        let body = format!("source = \"cpu\"\n{extra}");
+        let error = format!("{:#}", Config::parse(&one_module(&body)).unwrap_err());
+        assert!(
+            error.contains("[module.m.states.s] alt"),
+            "{extra:?} gave {error}"
+        );
+        assert!(error.contains(message), "{extra:?} gave {error}");
+    }
+    Config::parse(&one_module(
+        "source = \"cpu\"\nformat_alt = ['b', 'c']\n[module.m.states.s]\nalt = 2",
+    ))
+    .expect("the second further wording");
+}

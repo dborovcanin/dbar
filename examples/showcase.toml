@@ -470,6 +470,8 @@ overlap = 1
 #   hover      matches while the pointer is over it      default: false
 #   focused    matches the focused workspace             default: false
 #   visible    matches a workspace shown on an output    default: false
+#   alt        matches while a format_alt wording is showing: true
+#              for any of them, or a number for one, counted from 1
 #
 # Unlike the sections above, these are deliberately left out where they are not
 # doing work. Writing a default onto a module is not a no-op: the cascade runs
@@ -766,6 +768,13 @@ alt_button = "right"
 # it and reads nothing it prints. A button already spoken for by `format_alt`,
 # `controls`, `scroll` or `collapsible` is a startup error, not a silent loss.
 on_click = { left = ["sh", "-c", "notify-send \"$(cal -3)\""] }
+
+# `alt` dresses a module for the wording a click moved it to, so the other
+# zones look like a different view rather than the same one saying more.
+# A warning or critical state still wins over it, the way it does over hover.
+[module.clock.states.abroad]
+alt = true
+style = "warm"
 
 [module.cpu]
 source = "cpu"

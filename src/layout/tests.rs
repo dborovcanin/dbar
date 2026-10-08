@@ -1731,6 +1731,60 @@ format_alt = ["second", "third"]
     );
 }
 
+#[test]
+fn a_state_rule_can_wait_for_a_wording_and_gives_way_to_a_warning() {
+    let config = r##"
+[left]
+groups = ["g"]
+
+[group.g]
+modules = ["cpu"]
+
+[module.cpu]
+padding = 0
+format = "first"
+format_alt = ["second", "third"]
+background = "#000000"
+
+[module.cpu.states.any]
+alt = true
+background = "#0000ff"
+
+[module.cpu.states.third]
+alt = 2
+background = "#00ff00"
+
+[module.cpu.states.warn]
+state = "warning"
+background = "#ff0000"
+"##;
+    let background = |showing: usize, state: State| {
+        let mut it = item("cpu", "x");
+        it.state = state;
+        frame_showing(
+            config,
+            &[it],
+            Registry::new(&Default::default()),
+            &std::collections::HashMap::from([("cpu".to_string(), showing)]),
+        )
+        .groups[0]
+            .modules[0]
+            .background
+    };
+    assert_eq!(background(0, State::Idle), Color::rgba(0, 0, 0, 0xff));
+    assert_eq!(background(1, State::Idle), Color::rgba(0, 0, 0xff, 0xff));
+    assert_eq!(
+        background(2, State::Idle),
+        Color::rgba(0, 0xff, 0, 0xff),
+        "one wording named outranks any of them, whatever the rules are called"
+    );
+    assert_eq!(
+        background(1, State::Warning),
+        Color::rgba(0xff, 0, 0, 0xff),
+        "what the source says outranks which wording a click picked"
+    );
+}
+
 /// The width of a one-module bar built from these style keys, with the stub measurer
 /// making every character one unit wide.
 fn width_of(keys: &str) -> f32 {

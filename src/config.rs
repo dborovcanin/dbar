@@ -801,6 +801,9 @@ struct RawState {
     /// Matches a workspace shown on some output.
     #[serde(default)]
     visible: bool,
+    /// Matches while the module is showing one of its `format_alt` wordings: `true` for
+    /// any of them, or a number for one, counted from 1.
+    alt: Option<RawShowing>,
     /// Matches when the module's text contains this.
     contains: Option<String>,
     /// Remove the matched text from what is drawn.
@@ -808,6 +811,15 @@ struct RawState {
     strip: bool,
     #[serde(flatten)]
     overrides: RawStyle,
+}
+
+/// `alt = true` is any further wording and `alt = 2` is one of them, because a rule for a
+/// module with a single second wording should not have to count to one.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(untagged)]
+enum RawShowing {
+    Any(bool),
+    Nth(i64),
 }
 
 fn default_height() -> u32 {
@@ -1267,6 +1279,16 @@ pub struct StateFlags {
     pub visible: bool,
     /// How the source rates what it is reporting.
     pub state: State,
+    /// Which wording is drawn: 0 for `format`, and n for the nth of `format_alt`.
+    pub showing: usize,
+}
+
+/// Which of a module's further wordings a rule waits for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Showing {
+    Any,
+    /// Counted the way `StateFlags::showing` counts them, from 1.
+    Nth(usize),
 }
 
 /// One conditional restyling of a module.
@@ -1276,6 +1298,7 @@ pub struct StateRule {
     pub hover: bool,
     pub focused: bool,
     pub visible: bool,
+    pub alt: Option<Showing>,
     /// Matches when the source rates itself this way.
     pub state: Option<State>,
     /// The field the bounds read. Without one they read the source's primary value.
@@ -1322,6 +1345,11 @@ impl StateRule {
         if self.visible && !flags.visible {
             return false;
         }
+        match self.alt {
+            Some(Showing::Any) if flags.showing == 0 => return false,
+            Some(Showing::Nth(n)) if flags.showing != n => return false,
+            _ => {}
+        }
         if let Some(needle) = &self.contains
             && !text.contains(needle.as_str())
         {
@@ -1359,6 +1387,7 @@ impl StateRule {
             || self.hover
             || self.focused
             || self.visible
+            || self.alt.is_some()
             || self.state.is_some()
             || self.contains.is_some()
             || self.equals.is_some()
@@ -1368,9 +1397,17 @@ impl StateRule {
     }
 
     /// How specific the rule is, for ordering. Urgent first, then the tightest bound; a
-    /// rule keyed only on hover carries no bound and so sorts last, leaving a warning or a
-    /// critical state visible while the pointer is over it.
-    fn specificity(&self) -> (std::cmp::Reverse<usize>, f32) {
+    /// rule keyed only on hover or a wording carries no bound and so sorts last, leaving a
+    /// warning or a critical state visible while the pointer is over it or a click has
+    /// changed what it says.
+    fn specificity(
+        &self,
+    ) -> (
+        std::cmp::Reverse<usize>,
+        f32,
+        std::cmp::Reverse<usize>,
+        std::cmp::Reverse<bool>,
+    ) {
         // How many things the rule insists on, so a rule that names two readings beats one
         // that names either alone: muted headphones are not just headphones, and not just
         // muted. A rule that insists on nothing categorical still comes last, which is the
@@ -1381,11 +1418,16 @@ impl StateRule {
             + usize::from(self.contains.is_some())
             + usize::from(self.equals.is_some())
             + self.fields.len();
+        // Among those, hovering the second wording is more than either alone, and one
+        // wording named is more than any of them.
+        let viewed = usize::from(self.hover) + usize::from(self.alt.is_some());
         (
             std::cmp::Reverse(named),
             self.below
                 .unwrap_or(f32::MAX)
                 .min(self.above.map(|a| 100.0 - a).unwrap_or(f32::MAX)),
+            std::cmp::Reverse(viewed),
+            std::cmp::Reverse(matches!(self.alt, Some(Showing::Nth(_)))),
         )
     }
 }
@@ -2170,6 +2212,29 @@ fn parse_state(name: &str) -> Result<State> {
     })
 }
 
+/// Which wording a rule waits for, refused when the module has no such wording: a rule
+/// that can never fire is a typo, the way one on a field the source does not publish is.
+fn showing(written: RawShowing, alts: Option<&RawAlt>) -> Result<Showing> {
+    let count = match alts {
+        None => 0,
+        Some(RawAlt::One(_)) => 1,
+        Some(RawAlt::Several(all)) => all.len(),
+    };
+    if count == 0 {
+        bail!("the module has no format_alt for a rule to wait for");
+    }
+    match written {
+        RawShowing::Any(true) => Ok(Showing::Any),
+        RawShowing::Any(false) => {
+            bail!("`alt = false` would match `format`, which is what no rule matching means")
+        }
+        RawShowing::Nth(n) if (1..=count as i64).contains(&n) => Ok(Showing::Nth(n as usize)),
+        RawShowing::Nth(n) => {
+            bail!("{n} is not one of this module's wordings; format_alt counts from 1 to {count}")
+        }
+    }
+}
+
 /// Parse a duration written the way a person would: "500ms", "2s", "1m", "1h".
 ///
 /// A bare number is refused. `interval = 2` reads as two of something, and which something
@@ -2832,6 +2897,15 @@ fn resolve_group(
                     );
                 }
 
+                let alt = match raw_state.alt {
+                    None => None,
+                    Some(written) => Some(
+                        showing(written, raw_module.format_alt.as_ref()).with_context(|| {
+                            format!("in [module.{module_name}.states.{state_name}] alt")
+                        })?,
+                    ),
+                };
+
                 states.push((
                     state_name.clone(),
                     StateRule {
@@ -2839,6 +2913,7 @@ fn resolve_group(
                         hover: raw_state.hover,
                         focused: raw_state.focused,
                         visible: raw_state.visible,
+                        alt,
                         state: rule_state,
                         field: raw_state.field.clone(),
                         equals: raw_state.equals.clone(),
