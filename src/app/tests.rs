@@ -68,6 +68,49 @@ fn a_font_reload_forces_paint_even_when_the_frame_geometry_matches() {
 }
 
 #[test]
+#[ignore = "requires DBAR_TEST_COMPOSITOR=1 and an isolated Wayland compositor"]
+fn a_menu_completion_or_disconnect_releases_autohide_without_accepting_stale_replies() {
+    let config = RELOAD_BAR.replace("height = 30", "height = 30\nautohide = true");
+    let (mut app, _queue) = compositor_app(&config);
+    let output = app.bars[0].output.clone();
+    for disconnected in [false, true] {
+        app.bars[0].autohide.as_mut().unwrap().enter();
+        app.opening = Some((output.clone(), "test".into(), 0.0, 20.0, 42));
+        app.pointer_left(0);
+        assert_eq!(app.bars[0].autohide.as_ref().unwrap().due(), None);
+        app.on_tray(crate::tray::Event::Menu {
+            key: "test".into(),
+            parent: 0,
+            request: 41,
+            rows: vec![],
+        });
+        assert!(
+            app.opening.is_some(),
+            "a stale reply cannot cancel the new request"
+        );
+        assert_eq!(app.bars[0].autohide.as_ref().unwrap().due(), None);
+
+        app.on_tray(if disconnected {
+            crate::tray::Event::Stopped("test disconnect".into())
+        } else {
+            crate::tray::Event::Menu {
+                key: "test".into(),
+                parent: 0,
+                request: 42,
+                rows: vec![],
+            }
+        });
+        assert!(app.opening.is_none());
+        assert!(app.bars[0].autohide.as_ref().unwrap().due().is_some());
+        assert!(
+            app.take_hide_timer(),
+            "the event loop can resume the hiding countdown"
+        );
+        app.release_hide_timer();
+    }
+}
+
+#[test]
 fn a_battery_uevent_requests_a_worker_read() {
     let battery = Which::Battery;
     let mut native = Registry::new(&std::collections::HashMap::from([(

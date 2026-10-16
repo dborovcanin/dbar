@@ -878,11 +878,21 @@ impl App {
                 parent,
                 request,
                 rows,
-            } => self.open_menu(&key, parent, request, rows),
+            } => {
+                let held = self.menu_held();
+                self.open_menu(&key, parent, request, rows);
+                // An empty answer, or a popup that could not be made, ends the request
+                // just as closing a mapped menu does. The pointer may already have left
+                // while it was being read, with its hiding countdown held off meanwhile.
+                if held && !self.menu_held() {
+                    self.menus_closed();
+                }
+            }
             crate::tray::Event::Stopped(reason) => {
                 // The rest of the bar is unaffected; only the tray goes quiet.
                 log::warn!("the tray has stopped: {reason}");
                 self.tray = crate::tray::TrayState::default();
+                self.close_menus();
                 self.invalidate();
             }
         }
@@ -904,6 +914,9 @@ impl App {
             request,
         });
         self.opening = accepted.then_some((output, key, x, width, request));
+        if !accepted {
+            self.menus_closed();
+        }
     }
 
     /// Pass a click on a tray icon to the application it belongs to.

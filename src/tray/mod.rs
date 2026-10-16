@@ -127,7 +127,8 @@ pub struct TrayState {
 pub enum Event {
     State(Box<TrayState>),
     /// One level of an item's menu, ready to be drawn. `parent` is the row it hangs from,
-    /// or zero for the menu itself, and `request` is the ask this answers.
+    /// or zero for the menu itself, and `request` is the ask this answers. An empty list
+    /// also completes a request whose item vanished or whose menu could not be read.
     Menu {
         key: String,
         parent: i32,
@@ -1085,6 +1086,38 @@ fn act(
     sender: &calloop::channel::SyncSender<Event>,
     command: &Command,
 ) {
+    // Every accepted menu request gets an answer, including a failed read or an item
+    // that disappeared while the request was queued. The UI holds autohide open until
+    // this completion arrives, so silently dropping a request would hold it forever.
+    if let Command::Menu {
+        key,
+        parent,
+        request,
+    } = command
+    {
+        let rows = match tray.items.iter().find(|t| &t.item.key == key) {
+            None => {
+                log::debug!("{key} went away before its menu could be read");
+                None
+            }
+            Some(tracked) => match (tracked.menu.as_deref(), *parent) {
+                (None, _) => {
+                    log::debug!("{key} has no menu to open");
+                    None
+                }
+                (Some(path), 0) => menu::layout(bus, &tracked.service, path, tray.size),
+                (Some(path), row) => menu::submenu(bus, &tracked.service, path, row, tray.size),
+            },
+        };
+        let _ = sender.send(Event::Menu {
+            key: key.clone(),
+            parent: *parent,
+            request: *request,
+            rows: rows.unwrap_or_default(),
+        });
+        return;
+    }
+
     let key = match command {
         Command::Activate { key, .. } | Command::Secondary { key, .. } => key,
         Command::Scroll { key, .. } => key,
@@ -1097,35 +1130,12 @@ fn act(
     // The menu is a second object on the same application, and the one thing a host has to
     // draw itself: the applications that keep their commands there do not answer
     // `ContextMenu` at all.
-    if let Command::Menu { parent, .. } | Command::Chose { id: parent, .. } = command {
-        let Some(path) = tracked.menu.clone() else {
+    if let Command::Chose { id, .. } = command {
+        let Some(path) = tracked.menu.as_deref() else {
             log::debug!("{key} has no menu to open");
             return;
         };
-        match command {
-            Command::Chose { id, .. } => menu::clicked(bus, &tracked.service, &path, *id),
-            _ => {
-                let rows = match *parent {
-                    0 => menu::layout(bus, &tracked.service, &path, tray.size),
-                    row => menu::submenu(bus, &tracked.service, &path, row, tray.size),
-                };
-                match rows {
-                    Some(rows) => {
-                        let request = match command {
-                            Command::Menu { request, .. } => *request,
-                            _ => 0,
-                        };
-                        let _ = sender.send(Event::Menu {
-                            key: key.clone(),
-                            parent: *parent,
-                            request,
-                            rows,
-                        });
-                    }
-                    None => log::debug!("{key} did not answer for its menu"),
-                }
-            }
-        }
+        menu::clicked(bus, &tracked.service, path, *id);
         return;
     }
 
@@ -1525,6 +1535,67 @@ mod tests {
             key: "test".into(),
             parent: 0,
             request,
+        }
+    }
+
+    #[test]
+    fn failed_menu_requests_complete_even_when_the_item_or_menu_has_gone() {
+        for parent in [0, 42] {
+            for missing in ["item", "menu", "reply"] {
+                let (mut bus, mut service) = Connection::test_pair();
+                let mut item = tracked("org.example.Tray", None, ITEM_PATH);
+                item.item.key = "test".into();
+                item.menu = (missing != "menu").then(|| "/Menu".into());
+                let tray = Tray {
+                    items: if missing == "item" {
+                        vec![]
+                    } else {
+                        vec![item]
+                    },
+                    hosting: false,
+                    size: 16,
+                    theme: String::new(),
+                    icons: Icons::default(),
+                };
+                let peer = (missing == "reply").then(|| {
+                    std::thread::spawn(move || {
+                        let prepare = service.receive().unwrap();
+                        assert!(prepare.is_call("com.canonical.dbusmenu", "AboutToShow"));
+                        service.reply(&prepare, &[Arg::Bool(false)]).unwrap();
+                        let layout = service.receive().unwrap();
+                        assert!(layout.is_call("com.canonical.dbusmenu", "GetLayout"));
+                        service
+                            .reply_error(&layout, "org.example.Failed", "menu unavailable")
+                            .unwrap();
+                    })
+                });
+                let (sender, receiver) = calloop::channel::sync_channel(8);
+                act(
+                    &mut bus,
+                    &tray,
+                    &sender,
+                    &Command::Menu {
+                        key: "test".into(),
+                        parent,
+                        request: 99,
+                    },
+                );
+                if let Some(peer) = peer {
+                    peer.join().unwrap();
+                }
+                let Event::Menu {
+                    key,
+                    parent: answered,
+                    request,
+                    rows,
+                } = receiver.try_recv().expect("every request completes")
+                else {
+                    panic!("expected the menu completion");
+                };
+                assert_eq!((key.as_str(), answered, request), ("test", parent, 99));
+                assert!(rows.is_empty());
+                assert!(receiver.try_recv().is_err(), "exactly one completion");
+            }
         }
     }
 
