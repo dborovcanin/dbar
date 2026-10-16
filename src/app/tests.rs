@@ -1,6 +1,72 @@
 use super::*;
 use crate::config::ClickActions;
 
+/// These integration checks make real layer surfaces. Require an explicit opt-in to a
+/// disposable compositor so `cargo test -- --ignored` cannot touch the user's desktop.
+fn compositor_app(config: &str) -> (App, wayland_client::EventQueue<App>) {
+    assert_eq!(
+        std::env::var("DBAR_TEST_COMPOSITOR").as_deref(),
+        Ok("1"),
+        "set DBAR_TEST_COMPOSITOR=1 and point WAYLAND_DISPLAY at a disposable compositor"
+    );
+    let conn = Connection::connect_to_env().expect("the test compositor");
+    let (globals, mut queue) = wayland_client::globals::registry_queue_init::<App>(&conn).unwrap();
+    let mut app = App::new(
+        &globals,
+        &queue.handle(),
+        conn,
+        Config::parse(config).unwrap(),
+        None,
+    )
+    .unwrap();
+    for _ in 0..3 {
+        queue.roundtrip(&mut app).unwrap();
+    }
+    assert_eq!(app.bars.len(), 1, "use one headless output");
+    app.choose_pixel_format();
+    app.draw_if_needed();
+    (app, queue)
+}
+
+const RELOAD_BAR: &str = r#"
+[bar]
+height = 30
+font = "sans-serif 14"
+[left]
+groups = ["g"]
+[group.g]
+modules = ["m"]
+[module.m]
+source = "cpu"
+format = "Hello World"
+"#;
+
+#[test]
+#[ignore = "requires DBAR_TEST_COMPOSITOR=1 and an isolated Wayland compositor"]
+fn a_font_reload_forces_paint_even_when_the_frame_geometry_matches() {
+    let (mut app, mut queue) = compositor_app(RELOAD_BAR);
+    let before = app.bars[0].frame.clone();
+    let surface = app.bars[0]
+        .presented
+        .expect("the initial frame was painted");
+    // A case-only family change replaces the renderer with identical metrics, making
+    // this independent of which fonts are installed. Replacing it must invalidate the
+    // painted frame even when geometry cannot distinguish the two renderers.
+    let mut config = Config::parse(RELOAD_BAR).unwrap();
+    config.bar.font_family.make_ascii_uppercase();
+    assert!(app.reconfigure(config));
+    let after = app.lay_out(0);
+    assert_eq!(after.damage(&before), layout::Damage::Rects(vec![]));
+    assert_eq!(
+        after.damage_since(&before, app.bars[0].presented, surface),
+        layout::Damage::All
+    );
+    queue.roundtrip(&mut app).unwrap();
+    app.bars[0].frame_pending = false;
+    app.draw_if_needed();
+    assert!(app.bars[0].presented.is_some());
+}
+
 #[test]
 fn a_battery_uevent_requests_a_worker_read() {
     let battery = Which::Battery;

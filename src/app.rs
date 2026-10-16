@@ -1502,7 +1502,14 @@ impl App {
             // Shaped runs and rasterised icons were measured against the old font, so the
             // caches go with it. One shaping pass on the next frame, and nothing kept that
             // was made for a file that is gone.
-            Some(text) => self.painter = render::Painter::new(text),
+            Some(text) => {
+                self.painter = render::Painter::new(text);
+                // Different fonts can have identical metrics and different pixels. The
+                // old frame's geometry cannot prove the new lettering is already drawn.
+                for bar in &mut self.bars {
+                    bar.presented = None;
+                }
+            }
             None => self.painter.forget_icons(),
         }
 
