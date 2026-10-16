@@ -55,7 +55,7 @@ impl Row {
 
 /// Read a menu, or as much of it as `DEPTH` reaches.
 pub fn layout(bus: &mut Connection, service: &str, path: &str, size: u32) -> Option<Vec<Row>> {
-    read_from(bus, service, path, 0, size)
+    submenu(bus, service, path, 0, size)
 }
 
 /// Read one submenu, which is the same call aimed at a row rather than the root.

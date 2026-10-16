@@ -253,6 +253,26 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Two connected peers without authentication, for exercising callers against a
+    /// local service. Bound both ends so a missing request or reply fails rather than
+    /// leaving a test waiting forever.
+    #[cfg(test)]
+    pub(crate) fn test_pair() -> (Connection, Connection) {
+        let (one, other) = UnixStream::pair().expect("a socket pair");
+        let connection = |socket: UnixStream| {
+            socket.set_read_timeout(Some(CALL_TIMEOUT * 2)).unwrap();
+            socket.set_write_timeout(Some(CALL_TIMEOUT * 2)).unwrap();
+            Connection {
+                socket,
+                serial: 0,
+                pending: Vec::new(),
+                deferred: std::collections::VecDeque::new(),
+                deferred_bytes: 0,
+            }
+        };
+        (connection(one), connection(other))
+    }
+
     /// Connect to the session bus and say hello, which is what earns a name on it.
     pub fn session() -> Result<Connection> {
         let address = std::env::var("DBUS_SESSION_BUS_ADDRESS")
@@ -1049,6 +1069,65 @@ impl Writer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A menu with one lazily populated row, encoded as GetLayout's `u(ia{sv}av)`.
+    fn menu_reply(to: &Message, parent: i32) -> Vec<u8> {
+        let mut body = Writer::new();
+        body.u32(1);
+        body.align(8);
+        body.u32(parent as u32);
+        body.arg(&Arg::Dict(&[]));
+        let length_at = body.bytes.len();
+        body.u32(0);
+        let children_at = body.bytes.len();
+        body.signature("(ia{sv}av)");
+        body.align(8);
+        body.u32(7);
+        body.arg(&Arg::Dict(&[("label", Arg::Str("Prepared menu"))]));
+        body.arg(&Arg::Array("v", &[]));
+        let length = (body.bytes.len() - children_at) as u32;
+        body.bytes[length_at..length_at + 4].copy_from_slice(&length.to_le_bytes());
+
+        let mut reply = build_message(
+            1,
+            2,
+            1,
+            &[(5, Arg::U32(to.serial)), (8, Arg::Sig("u(ia{sv}av)"))],
+            &[],
+        );
+        reply[4..8].copy_from_slice(&(body.bytes.len() as u32).to_le_bytes());
+        reply.extend_from_slice(&body.bytes);
+        reply
+    }
+
+    #[test]
+    fn root_menus_and_submenus_prepare_their_contents_before_reading() {
+        for parent in [0, 42] {
+            let (mut bus, mut service) = Connection::test_pair();
+            let peer = std::thread::spawn(move || {
+                let prepare = service.receive().unwrap();
+                assert!(prepare.is_call("com.canonical.dbusmenu", "AboutToShow"));
+                assert_eq!(prepare.body, [Value::Int(parent as i64)]);
+                service.reply(&prepare, &[Arg::Bool(true)]).unwrap();
+
+                let layout = service.receive().unwrap();
+                assert!(layout.is_call("com.canonical.dbusmenu", "GetLayout"));
+                assert_eq!(layout.body.first(), Some(&Value::Int(parent as i64)));
+                service
+                    .socket
+                    .write_all(&menu_reply(&layout, parent))
+                    .unwrap();
+            });
+            let rows = match parent {
+                0 => crate::tray::menu::layout(&mut bus, "org.example.Tray", "/Menu", 16),
+                row => crate::tray::menu::submenu(&mut bus, "org.example.Tray", "/Menu", row, 16),
+            };
+            peer.join().unwrap();
+            let rows = rows.expect("the prepared menu was read");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].label, "Prepared menu");
+        }
+    }
 
     #[test]
     fn a_bus_address_names_its_socket() {
